@@ -1,6 +1,6 @@
 {
   "name": "effect-trpc",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "[EXPERIMENTAL] tRPC-style ergonomics for Effect-based applications - NOT FOR PRODUCTION USE",
   "author": "Sebastian Prisacariu",
   "license": "MIT",
