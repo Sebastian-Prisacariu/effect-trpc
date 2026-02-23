@@ -50,36 +50,30 @@
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Result type for async state
+// Result type for async state (re-exported from @effect-atom/atom)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type {
-  Result,
-  Initial,
-  Loading,
-  Success,
-  Failure,
-  QueryResult,
-  MutationResult,
-} from "./result.js"
-
-export {
-  initial,
-  loading,
-  success,
-  failure,
-  isInitial,
-  isLoading,
-  isSuccess,
-  isFailure,
-  getValue,
-  getOrElse,
-  getError,
-  isPending,
-  match,
-  toQueryResult,
-  toMutationResult,
-} from "./result.js"
+/**
+ * Result namespace from effect-atom for pattern matching async state.
+ *
+ * @example
+ * ```typescript
+ * import { Result } from 'effect-trpc/react'
+ *
+ * function UserList() {
+ *   const query = api.user.list.useQuery()
+ *
+ *   return Result.builder(query.result)
+ *     .onInitial(() => <Skeleton />)
+ *     .onWaiting(() => <Spinner />)
+ *     .onSuccess((users) => <List users={users} />)
+ *     .onErrorTag('NotFoundError', () => <NotFound />)
+ *     .onError((error) => <GenericError error={error} />)
+ *     .render()
+ * }
+ * ```
+ */
+export { Result, type QueryResult, type MutationResult } from "./result.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client creation and hooks

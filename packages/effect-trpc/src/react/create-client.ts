@@ -69,36 +69,7 @@ import {
   initialChatState,
 } from "./atoms.js"
 
-import * as Result from "./result.js"
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper Functions
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Convert effect-atom Result to our custom Result type.
- * This maintains backward compatibility with existing code.
- *
- * @internal
- */
-function convertAtomResultToResult<A, E>(
-  atomResult: AtomResult.Result<A, E>,
-): Result.Result<A, E> {
-  if (AtomResult.isInitial(atomResult)) {
-    return Result.initial
-  }
-  if (AtomResult.isSuccess(atomResult)) {
-    return Result.success(atomResult.value, atomResult.waiting)
-  }
-  if (AtomResult.isFailure(atomResult)) {
-    const error = Option.getOrUndefined(AtomResult.error(atomResult))
-    const previousValue = atomResult.previousSuccess._tag === "Some"
-      ? atomResult.previousSuccess.value.value
-      : undefined
-    return Result.failure(error as E, previousValue, atomResult.waiting)
-  }
-  return Result.initial
-}
+import { Result, type QueryResult, type MutationResult } from "./result.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook Types
@@ -124,7 +95,7 @@ export interface UseQueryOptions<A> {
  * @since 0.1.0
  * @category hooks
  */
-export interface UseQueryReturn<A, E> extends Result.QueryResult<A, E> {
+export interface UseQueryReturn<A, E> extends QueryResult<A, E> {
   readonly refetch: () => void
 }
 
@@ -147,7 +118,7 @@ export interface UseSuspenseQueryOptions<A> {
  * @since 0.1.0
  * @category hooks
  */
-export interface UseSuspenseQueryReturn<A, E> extends Omit<Result.QueryResult<A, E>, "data"> {
+export interface UseSuspenseQueryReturn<A, E> extends Omit<QueryResult<A, E>, "data"> {
   readonly data: A
   readonly refetch: () => void
 }
@@ -275,7 +246,7 @@ export interface UseMutationOptions<A, E, I> {
  * @since 0.1.0
  * @category hooks
  */
-export interface UseMutationReturn<A, E, I> extends Result.MutationResult<A, E> {
+export interface UseMutationReturn<A, E, I> extends MutationResult<A, E> {
   readonly mutateAsync: (input: I) => Promise<A>
   readonly mutate: (input: I) => Effect.Effect<A, E>
   readonly reset: () => void
@@ -781,7 +752,7 @@ export function createTRPCReact<TRouter extends Router>(
           isError: AtomResult.isFailure(atomState.result),
           isSuccess: AtomResult.isSuccess(atomState.result),
           isRefetching: AtomResult.isSuccess(atomState.result) && atomState.result.waiting,
-          result: convertAtomResultToResult(atomState.result),
+          result: atomState.result,
           refetch,
         }
       },
@@ -914,7 +885,7 @@ export function createTRPCReact<TRouter extends Router>(
           isError: false,
           isSuccess: true,
           isRefetching: atomState.result.waiting,
-          result: convertAtomResultToResult(atomState.result),
+          result: atomState.result,
           refetch,
         } as UseSuspenseQueryReturn<any, any>
       },
@@ -1102,12 +1073,12 @@ export function createTRPCReact<TRouter extends Router>(
           isSuccess: lastResultRef.current !== undefined && !callerState.isPending && callerState.error === null,
           isIdle: !callerState.isPending && callerState.error === null && lastResultRef.current === undefined,
           result: callerState.isPending
-            ? Result.loading()
+            ? Result.initial(true) // initial with waiting=true for loading state
             : callerState.error !== null
-              ? Result.failure(callerState.error)
+              ? Result.fail(callerState.error)
               : lastResultRef.current !== undefined
                 ? Result.success(lastResultRef.current)
-                : Result.initial,
+                : Result.initial(),
           mutateAsync,
           mutate,
           reset,

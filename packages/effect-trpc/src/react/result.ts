@@ -1,352 +1,135 @@
 /**
  * @module effect-trpc/react/result
  *
- * Result type for representing async state in React components.
- * Inspired by effect-atom's Result type.
+ * Re-exports effect-atom's Result module for pattern matching async state.
  *
- * Uses Data.TaggedClass for structural equality, which enables:
- * - Proper comparison in React's useSyncExternalStore
- * - Efficient memoization with useMemo
- * - Effect's built-in equality checks
+ * The Result type represents the state of an async operation (query, mutation, etc.)
+ * and provides a powerful builder API for rendering different states.
+ *
+ * @example
+ * ```typescript
+ * import { Result } from 'effect-trpc/react'
+ *
+ * function UserList() {
+ *   const query = api.user.list.useQuery()
+ *
+ *   return Result.builder(query.result)
+ *     .onInitial(() => <Skeleton />)
+ *     .onWaiting(() => <Spinner />)
+ *     .onSuccess((users) => <List users={users} />)
+ *     .onErrorTag('NotFoundError', () => <NotFound />)
+ *     .onErrorTag('UnauthorizedError', () => <LoginPrompt />)
+ *     .onError((error) => <GenericError error={error} />)
+ *     .render()
+ * }
+ * ```
+ *
+ * @since 0.1.0
  */
 
-import * as Data from "effect/Data"
+import { Result } from "@effect-atom/atom"
+
+/**
+ * Re-export effect-atom's Result namespace.
+ *
+ * Provides:
+ * - `Result.Result<A, E>` - The Result type (Initial | Success | Failure)
+ * - `Result.Initial<A, E>` - Initial state type
+ * - `Result.Success<A, E>` - Success state type
+ * - `Result.Failure<A, E>` - Failure state type
+ * - `Result.builder(result)` - Builder for pattern matching (recommended!)
+ * - `Result.initial()` - Create initial state
+ * - `Result.success(value)` - Create success state
+ * - `Result.failure(cause)` - Create failure state from Cause
+ * - `Result.fail(error)` - Create failure state from error value
+ * - `Result.isInitial(result)` - Check if initial
+ * - `Result.isSuccess(result)` - Check if success
+ * - `Result.isFailure(result)` - Check if failure
+ * - `Result.isWaiting(result)` - Check if loading/waiting
+ * - `Result.match(result, { onInitial, onSuccess, onFailure })` - Pattern match
+ * - And many more...
+ *
+ * @since 0.1.0
+ */
+export { Result }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Result Types using Data.TaggedClass
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Initial state - query has not started yet.
- *
- * @since 0.1.0
- * @category models
- */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export class Initial extends Data.TaggedClass("Initial")<{}> {}
-
-/**
- * Loading state - query is in progress.
- *
- * @since 0.1.0
- * @category models
- */
-export class Loading<A> extends Data.TaggedClass("Loading")<{
-  /**
-   * Previous successful value, if any.
-   */
-  readonly previous: A | undefined
-}> {}
-
-/**
- * Success state - query completed successfully.
- *
- * @since 0.1.0
- * @category models
- */
-export class Success<A> extends Data.TaggedClass("Success")<{
-  readonly value: A
-  /**
-   * True if currently refetching in the background.
-   */
-  readonly isRefetching: boolean
-}> {}
-
-/**
- * Failure state - query failed with an error.
- *
- * @since 0.1.0
- * @category models
- */
-export class Failure<A, E> extends Data.TaggedClass("Failure")<{
-  readonly error: E
-  /**
-   * Previous successful value, if any.
-   */
-  readonly previous: A | undefined
-  /**
-   * True if currently retrying.
-   */
-  readonly isRetrying: boolean
-}> {}
-
-/**
- * Result represents the state of an async operation.
- *
- * @since 0.1.0
- * @category models
- */
-export type Result<A, E = unknown> =
-  | Initial
-  | Loading<A>
-  | Success<A>
-  | Failure<A, E>
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Constructors
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * The initial result state singleton.
- *
- * @since 0.1.0
- * @category constructors
- */
-export const initial: Initial = new Initial()
-
-/**
- * Create a loading result.
- *
- * @param previous - The previous successful value, if any
- *
- * @since 0.1.0
- * @category constructors
- */
-export const loading = <A>(previous?: A): Loading<A> =>
-  new Loading({ previous })
-
-/**
- * Create a success result.
- *
- * @param value - The successful value
- * @param isRefetching - Whether the query is currently refetching in the background
- *
- * @since 0.1.0
- * @category constructors
- */
-export const success = <A>(value: A, isRefetching = false): Success<A> =>
-  new Success({ value, isRefetching })
-
-/**
- * Create a failure result.
- *
- * @param error - The error that occurred
- * @param previous - The previous successful value, if any
- * @param isRetrying - Whether the query is currently retrying
- *
- * @since 0.1.0
- * @category constructors
- */
-export const failure = <A, E>(
-  error: E,
-  previous?: A,
-  isRetrying = false,
-): Failure<A, E> =>
-  new Failure({ error, previous, isRetrying })
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Guards
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Check if a result is in the initial state.
- *
- * @since 0.1.0
- * @category guards
- */
-export const isInitial = <A, E>(result: Result<A, E>): result is Initial =>
-  result._tag === "Initial"
-
-/**
- * Check if a result is in the loading state.
- *
- * @since 0.1.0
- * @category guards
- */
-export const isLoading = <A, E>(result: Result<A, E>): result is Loading<A> =>
-  result._tag === "Loading"
-
-/**
- * Check if a result is in the success state.
- *
- * @since 0.1.0
- * @category guards
- */
-export const isSuccess = <A, E>(result: Result<A, E>): result is Success<A> =>
-  result._tag === "Success"
-
-/**
- * Check if a result is in the failure state.
- *
- * @since 0.1.0
- * @category guards
- */
-export const isFailure = <A, E>(
-  result: Result<A, E>,
-): result is Failure<A, E> => result._tag === "Failure"
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Accessors
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Get the value if success, or the previous value if loading/failure.
- *
- * @since 0.1.0
- * @category utils
- */
-export const getValue = <A, E>(result: Result<A, E>): A | undefined => {
-  switch (result._tag) {
-    case "Initial":
-      return undefined
-    case "Loading":
-      return result.previous
-    case "Success":
-      return result.value
-    case "Failure":
-      return result.previous
-  }
-}
-
-/**
- * Get the value if success, or a fallback value.
- *
- * @since 0.1.0
- * @category utils
- */
-export const getOrElse = <A, E>(result: Result<A, E>, fallback: () => A): A => {
-  if (isSuccess(result)) {
-    return result.value
-  }
-  return fallback()
-}
-
-/**
- * Get the error if failure.
- *
- * @since 0.1.0
- * @category utils
- */
-export const getError = <A, E>(result: Result<A, E>): E | undefined => {
-  if (isFailure(result)) {
-    return result.error
-  }
-  return undefined
-}
-
-/**
- * Check if the result is in any loading state (initial, loading, or refetching).
- *
- * @since 0.1.0
- * @category guards
- */
-export const isPending = <A, E>(result: Result<A, E>): boolean => {
-  switch (result._tag) {
-    case "Initial":
-    case "Loading":
-      return true
-    case "Success":
-      return result.isRefetching
-    case "Failure":
-      return result.isRetrying
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Pattern Matching
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Pattern matcher for Result types.
- *
- * @since 0.1.0
- * @category models
- */
-export interface ResultMatcher<A, E, R> {
-  readonly onInitial: () => R
-  readonly onLoading: (previous: A | undefined) => R
-  readonly onSuccess: (value: A, isRefetching: boolean) => R
-  readonly onFailure: (error: E, previous: A | undefined, isRetrying: boolean) => R
-}
-
-/**
- * Pattern match on a Result.
- *
- * @since 0.1.0
- * @category utils
- */
-export const match = <A, E, R>(
-  result: Result<A, E>,
-  matcher: ResultMatcher<A, E, R>,
-): R => {
-  switch (result._tag) {
-    case "Initial":
-      return matcher.onInitial()
-    case "Loading":
-      return matcher.onLoading(result.previous)
-    case "Success":
-      return matcher.onSuccess(result.value, result.isRefetching)
-    case "Failure":
-      return matcher.onFailure(result.error, result.previous, result.isRetrying)
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// React Helpers
+// tRPC-compatible helper interfaces
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Convenience type for query results in React.
+ * Provides a tRPC-like API alongside the effect-atom Result.
+ *
+ * @example
+ * ```typescript
+ * // tRPC-style destructuring
+ * const { data, isLoading, error } = api.user.list.useQuery()
+ *
+ * // Or use the Result builder pattern
+ * const query = api.user.list.useQuery()
+ * return Result.builder(query.result)
+ *   .onInitial(() => <Skeleton />)
+ *   .onSuccess((users) => <List users={users} />)
+ *   .onError((e) => <Error error={e} />)
+ *   .render()
+ * ```
  *
  * @since 0.1.0
  * @category models
  */
 export interface QueryResult<A, E = unknown> {
+  /** The data if query succeeded */
   readonly data: A | undefined
+  /** The error if query failed */
   readonly error: E | undefined
+  /** True if query is loading (initial or refetching) */
   readonly isLoading: boolean
+  /** True if query failed */
   readonly isError: boolean
+  /** True if query succeeded */
   readonly isSuccess: boolean
+  /** True if query succeeded and is refetching in background */
   readonly isRefetching: boolean
-  readonly result: Result<A, E>
+  /** The raw effect-atom Result for builder pattern */
+  readonly result: Result.Result<A, E>
 }
 
 /**
- * Convert a Result to a QueryResult for easier use in components.
- *
- * @since 0.1.0
- * @category utils
- */
-export const toQueryResult = <A, E>(result: Result<A, E>): QueryResult<A, E> => ({
-  data: getValue(result),
-  error: getError(result),
-  isLoading: isInitial(result) || isLoading(result),
-  isError: isFailure(result),
-  isSuccess: isSuccess(result),
-  isRefetching: isSuccess(result) && result.isRefetching,
-  result,
-})
-
-/**
  * Convenience type for mutation results in React.
+ * Provides a tRPC-like API alongside the effect-atom Result.
+ *
+ * @example
+ * ```typescript
+ * // tRPC-style destructuring
+ * const { mutateAsync, isPending, error } = api.user.create.useMutation()
+ *
+ * // Or use the Result builder pattern
+ * const mutation = api.user.create.useMutation()
+ * return Result.builder(mutation.result)
+ *   .onInitial(() => <Button>Create</Button>)
+ *   .onWaiting(() => <Button disabled>Creating...</Button>)
+ *   .onSuccess(() => <Success />)
+ *   .onError((e) => <Error error={e} />)
+ *   .render()
+ * ```
  *
  * @since 0.1.0
  * @category models
  */
 export interface MutationResult<A, E = unknown> {
+  /** The data if mutation succeeded */
   readonly data: A | undefined
+  /** The error if mutation failed */
   readonly error: E | undefined
+  /** True if mutation is in progress */
   readonly isPending: boolean
+  /** True if mutation failed */
   readonly isError: boolean
+  /** True if mutation succeeded */
   readonly isSuccess: boolean
+  /** True if mutation hasn't been called yet */
   readonly isIdle: boolean
-  readonly result: Result<A, E>
+  /** The raw effect-atom Result for builder pattern */
+  readonly result: Result.Result<A, E>
 }
-
-/**
- * Convert a Result to a MutationResult for easier use in components.
- *
- * @since 0.1.0
- * @category utils
- */
-export const toMutationResult = <A, E>(
-  result: Result<A, E>,
-): MutationResult<A, E> => ({
-  data: getValue(result),
-  error: getError(result),
-  isPending: isLoading(result),
-  isError: isFailure(result),
-  isSuccess: isSuccess(result),
-  isIdle: isInitial(result),
-  result,
-})

@@ -173,22 +173,29 @@ import { api } from '~/lib/trpc'
 import { Result } from 'effect-trpc/react'
 
 export function UserList() {
-  const users = api.user.list.useQuery()
+  const query = api.user.list.useQuery()
 
-  return Result.match(users, {
-    onInitial: () => <div>Loading...</div>,
-    onPending: () => <div>Loading...</div>,
-    onSuccess: ({ value }) => (
+  // Option 1: tRPC-style destructuring
+  const { data, isLoading, error } = query
+  if (isLoading) return <div>Loading...</div>
+  if (error) return <div>Error: {error.message}</div>
+  return <ul>{data?.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+
+  // Option 2: Result.builder pattern (recommended for complex UI)
+  return Result.builder(query.result)
+    .onInitial(() => <Skeleton />)
+    .onWaiting(() => <Spinner />)
+    .onSuccess((users) => (
       <ul>
-        {value.map(user => (
+        {users.map(user => (
           <li key={user.id}>{user.name}</li>
         ))}
       </ul>
-    ),
-    onFailure: ({ cause }) => (
-      <div>Error: {cause.message}</div>
-    ),
-  })
+    ))
+    .onErrorTag('NotFoundError', () => <NotFound />)
+    .onErrorTag('UnauthorizedError', () => <LoginPrompt />)
+    .onError((error) => <ErrorDisplay error={error} />)
+    .render()
 }
 ```
 
@@ -696,24 +703,35 @@ const UserProceduresLive = UserProcedures.toLayer({
 
 ### Handling on Client
 
-```typescript
-const user = api.user.byId.useQuery({ id: '123' })
+Use the `Result.builder` pattern for type-safe error handling by tag:
 
-Result.match(user, {
-  onSuccess: ({ value }) => <UserProfile user={value} />,
-  onFailure: ({ cause }) => {
-    if (cause instanceof NotFoundError) {
-      return <NotFound resource={cause.resource} />
-    }
-    if (cause instanceof ForbiddenError) {
-      return <AccessDenied />
-    }
-    // Retry if possible
-    if (cause.isRetryable) {
-      return <RetryButton onClick={() => user.refetch()} />
-    }
-    return <GenericError error={cause} />
-  },
+```typescript
+const query = api.user.byId.useQuery({ id: '123' })
+
+// The builder pattern lets you handle errors by their _tag
+return Result.builder(query.result)
+  .onInitial(() => <Skeleton />)
+  .onWaiting(() => <Spinner />)
+  .onSuccess((user) => <UserProfile user={user} />)
+  .onErrorTag('NotFoundError', (err) => <NotFound resource={err.resource} />)
+  .onErrorTag('ForbiddenError', () => <AccessDenied />)
+  .onErrorTag('RateLimitError', (err) => (
+    <RetryButton 
+      onClick={() => query.refetch()} 
+      retryAfter={err.retryAfterMs} 
+    />
+  ))
+  .onError((error) => <GenericError error={error} />)
+  .render()
+```
+
+Or use `Result.match` for simpler cases:
+
+```typescript
+return Result.match(query.result, {
+  onInitial: () => <Skeleton />,
+  onSuccess: (user) => <UserProfile user={user.value} />,
+  onFailure: (failure) => <ErrorDisplay error={failure.cause} />,
 })
 ```
 
@@ -791,18 +809,28 @@ await createUser.mutateAsync(
 ### useQuery
 
 ```typescript
-const result = api.user.list.useQuery()
-const result = api.user.byId.useQuery({ id: '123' })
+const query = api.user.list.useQuery()
+const query = api.user.byId.useQuery({ id: '123' })
 
-// Result has these states:
-result.isInitial   // No data yet
-result.isPending   // Loading
-result.isSuccess   // Has data
-result.isFailure   // Has error
+// tRPC-style properties:
+query.data         // The data (when successful)
+query.error        // The error (when failed)
+query.isLoading    // Loading (initial or refetching)
+query.isSuccess    // Has data
+query.isError      // Has error
+query.isRefetching // Has data and refetching
+query.refetch()    // Manually refetch
 
-result.data        // The data (when successful)
-result.error       // The error (when failed)
-result.refetch()   // Manually refetch
+// effect-atom Result (for builder pattern):
+query.result       // Result.Result<A, E> from @effect-atom/atom
+
+// Use the Result builder for complex UI:
+Result.builder(query.result)
+  .onInitial(() => <Skeleton />)
+  .onWaiting(() => <Spinner />)
+  .onSuccess((data) => <Display data={data} />)
+  .onError((e) => <Error error={e} />)
+  .render()
 ```
 
 ### useMutation
@@ -810,9 +838,17 @@ result.refetch()   // Manually refetch
 ```typescript
 const mutation = api.user.create.useMutation()
 
+// tRPC-style properties:
+mutation.data       // Last successful result
+mutation.error      // Last error
 mutation.isPending  // Currently executing
 mutation.isSuccess  // Last call succeeded
-mutation.isFailure  // Last call failed
+mutation.isError    // Last call failed
+mutation.isIdle     // Never been called
+mutation.reset()    // Reset state
+
+// effect-atom Result (for builder pattern):
+mutation.result     // Result.Result<A, E> from @effect-atom/atom
 
 // Effect-first (returns Effect)
 const effect = mutation.mutate({ name: 'Alice' })
@@ -820,6 +856,14 @@ yield* effect
 
 // Promise (returns Promise)
 await mutation.mutateAsync({ name: 'Alice' })
+
+// Use the Result builder for mutation UI:
+Result.builder(mutation.result)
+  .onInitial(() => <Button>Create User</Button>)
+  .onWaiting(() => <Button disabled>Creating...</Button>)
+  .onSuccess((user) => <Success>Created {user.name}!</Success>)
+  .onError((e) => <Error>{e.message}</Error>)
+  .render()
 ```
 
 ### useStream
@@ -886,7 +930,9 @@ React hooks and provider:
 ```typescript
 import {
   createTRPCReact,
-  Result,
+  Result,           // effect-atom's Result namespace (for builder pattern)
+  QueryResult,      // Type for query hook return
+  MutationResult,   // Type for mutation hook return
   // Individual hooks (for custom setups)
   useQuery,
   useMutation,
@@ -895,6 +941,39 @@ import {
   useUtils,
 } from 'effect-trpc/react'
 ```
+
+#### Result Builder Pattern
+
+The `Result` namespace (re-exported from `@effect-atom/atom`) provides a powerful builder API for handling async state in React:
+
+```typescript
+import { Result } from 'effect-trpc/react'
+
+// All hooks expose a `result` property with the raw effect-atom Result
+const query = api.user.list.useQuery()
+
+// Build your UI by handling each state
+return Result.builder(query.result)
+  .onInitial(() => <Skeleton />)           // No data yet
+  .onWaiting(() => <Spinner />)            // Loading (initial or refetch)
+  .onSuccess((data) => <List data={data} />) // Has data
+  .onErrorTag('NotFoundError', () => <NotFound />) // Specific error
+  .onErrorTag('UnauthorizedError', () => <Login />) // Another specific error
+  .onError((e) => <GenericError error={e} />) // Catch-all error
+  .render() // Returns JSX or null
+```
+
+Builder methods:
+- `.onInitial(fn)` - Handle initial state (no data yet)
+- `.onWaiting(fn)` - Handle loading/waiting state
+- `.onSuccess(fn)` - Handle success with data
+- `.onFailure(fn)` - Handle any failure (receives Cause)
+- `.onError(fn)` - Handle error (receives the error value)
+- `.onErrorTag(tag, fn)` - Handle specific tagged error (type-safe!)
+- `.onDefect(fn)` - Handle unexpected defects
+- `.orElse(fn)` - Provide fallback for unhandled states
+- `.orNull()` - Return null for unhandled states
+- `.render()` - Finalize and return the result
 
 ### `effect-trpc/next`
 
