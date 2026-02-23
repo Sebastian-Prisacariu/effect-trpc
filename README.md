@@ -1024,22 +1024,22 @@ cd examples/nextjs-app && bun dev
 
 ## Roadmap
 
-### v1 (Current)
-- [x] Procedure builder API
-- [x] Query, mutation, stream, chat procedures
-- [x] Middleware system
-- [x] React hooks
-- [x] Next.js route handler
-- [x] Error types with `isRetryable`, `httpStatus`
-- [x] Declarative cache invalidation
-
-### v2 (In Progress)
-- [x] WebSocket subscriptions (Node.js + Bun)
-- [x] `useSubscription` React hook
-- [x] Authentication for WebSocket connections
+### Implemented
+- [x] Procedure builder API (query, mutation, stream, chat, subscription)
+- [x] Middleware system with context enhancement
+- [x] React hooks (`useQuery`, `useMutation`, `useStream`, `useChat`, `useSubscription`)
+- [x] Next.js App Router integration
+- [x] Node.js and Bun server adapters
+- [x] WebSocket subscriptions with authentication
 - [x] Automatic reconnection with exponential backoff
+- [x] Rich error types with `isRetryable`, `httpStatus`
+- [x] Declarative cache invalidation (server-defined)
+- [x] Optimistic updates with rollback
+- [x] Result builder pattern (via effect-atom)
+
+### Planned
 - [ ] SSR/RSC helpers (prefetch, dehydrate, HydrationBoundary)
-- [ ] Automatic cache invalidation (Convex-like)
+- [ ] Automatic cache invalidation (Convex-style reactivity)
 - [ ] Custom procedure type extensions
 - [ ] Vue and Solid adapters
 
