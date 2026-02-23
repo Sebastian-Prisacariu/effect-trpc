@@ -1,8 +1,8 @@
 {
   "name": "effect-trpc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "[EXPERIMENTAL] tRPC-style ergonomics for Effect-based applications - NOT FOR PRODUCTION USE",
-  "author": "Sebastian",
+  "author": "Sebastian Prisacariu",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -74,7 +74,7 @@
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "format": "prettier --write \"src/**/*.{ts,tsx}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx}\"",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "bun run build"
   },
   "peerDependencies": {
     "@effect-atom/atom": "^0.5.0",
@@ -155,7 +155,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/sebastian/effect-trpc.git"
+    "url": "git+https://github.com/Sebastian-Prisacariu/effect-trpc.git"
+  },
+  "homepage": "https://github.com/Sebastian-Prisacariu/effect-trpc#readme",
+  "bugs": {
+    "url": "https://github.com/Sebastian-Prisacariu/effect-trpc/issues"
   },
   "engines": {
     "node": ">=18.0.0"
