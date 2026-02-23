@@ -1,0 +1,163 @@
+{
+  "name": "effect-trpc",
+  "version": "0.1.0",
+  "description": "[EXPERIMENTAL] tRPC-style ergonomics for Effect-based applications - NOT FOR PRODUCTION USE",
+  "author": "Sebastian",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    },
+    "./react/server": {
+      "types": "./dist/react-server.d.ts",
+      "import": "./dist/react-server.js",
+      "require": "./dist/react-server.cjs"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.js",
+      "require": "./dist/next.cjs"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js",
+      "require": "./dist/node.cjs"
+    },
+    "./node/http": {
+      "types": "./dist/node-http.d.ts",
+      "import": "./dist/node-http.js",
+      "require": "./dist/node-http.cjs"
+    },
+    "./node/ws": {
+      "types": "./dist/node-ws.d.ts",
+      "import": "./dist/node-ws.js",
+      "require": "./dist/node-ws.cjs"
+    },
+    "./bun": {
+      "types": "./dist/bun.d.ts",
+      "import": "./dist/bun.js",
+      "require": "./dist/bun.cjs"
+    },
+    "./bun/http": {
+      "types": "./dist/bun-http.d.ts",
+      "import": "./dist/bun-http.js",
+      "require": "./dist/bun-http.cjs"
+    },
+    "./bun/ws": {
+      "types": "./dist/bun-ws.d.ts",
+      "import": "./dist/bun-ws.js",
+      "require": "./dist/bun-ws.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\"",
+    "prepublishOnly": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@effect-atom/atom": "^0.5.0",
+    "@effect-atom/atom-react": "^0.5.0",
+    "@effect/platform": "^0.94.0",
+    "@effect/platform-bun": "^0.87.0",
+    "@effect/platform-node": "^0.104.0",
+    "@effect/rpc": "^0.73.0",
+    "effect": "^3.15.0",
+    "next": "^16.1.6",
+    "react": "^19.2.0",
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "next": {
+      "optional": true
+    },
+    "@effect/platform": {
+      "optional": true
+    },
+    "@effect/platform-node": {
+      "optional": true
+    },
+    "@effect/platform-bun": {
+      "optional": true
+    },
+    "@effect-atom/atom": {
+      "optional": true
+    },
+    "@effect-atom/atom-react": {
+      "optional": true
+    },
+    "ws": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@effect-atom/atom": "^0.5.0",
+    "@effect-atom/atom-react": "^0.5.0",
+    "@effect/eslint-plugin": "^0.3.2",
+    "@effect/platform": "^0.94.0",
+    "@effect/platform-bun": "^0.87.0",
+    "@effect/platform-node": "^0.104.0",
+    "@effect/rpc": "^0.73.0",
+    "@eslint/compat": "^1.4.1",
+    "@eslint/eslintrc": "^3.3.3",
+    "@eslint/js": "^9.39.3",
+    "@testing-library/react": "^16.3.2",
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^20.10.0",
+    "@types/react": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "effect": "^3.15.0",
+    "eslint": "^9.39.3",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "jsdom": "^28.1.0",
+    "prettier": "^3.2.0",
+    "react": "^19.2.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.3.0",
+    "ws": "^8.19.0"
+  },
+  "keywords": [
+    "effect",
+    "trpc",
+    "rpc",
+    "typescript",
+    "react",
+    "nextjs",
+    "type-safe"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sebastian/effect-trpc.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

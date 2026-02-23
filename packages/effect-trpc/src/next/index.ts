@@ -1,0 +1,168 @@
+/**
+ * @module effect-trpc/next
+ *
+ * Next.js integration for effect-trpc.
+ * Provides route handlers and SSR/RSC helpers.
+ *
+ * @example
+ * ```ts
+ * // src/app/api/trpc/[...trpc]/route.ts
+ * import { createRouteHandler } from 'effect-trpc/next'
+ * import { appRouter, AppRouterLive } from '~/server/trpc'
+ *
+ * const { GET, POST } = createRouteHandler({
+ *   router: appRouter,
+ *   handlers: AppRouterLive,
+ * })
+ *
+ * export { GET, POST }
+ * ```
+ */
+
+import type * as Layer from "effect/Layer"
+import type { Router } from "../core/router.js"
+import { createRpcWebHandler } from "../shared/index.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CreateRouteHandlerOptions<TRouter extends Router, R> {
+  /**
+   * The router instance.
+   */
+  readonly router: TRouter
+
+  /**
+   * The layer providing all procedure implementations.
+   *
+   * @remarks
+   * **Why `any` for the provided type?**
+   *
+   * The Layer's provided type is `any` because the handlers layer is constructed
+   * dynamically from router procedure definitions. TypeScript cannot infer the
+   * exact union of all procedure handler services at this generic interface level.
+   *
+   * Type safety is maintained through:
+   * 1. The `TRouter` generic constrains which procedures exist
+   * 2. The handlers implementation is type-checked when created
+   * 3. Only the `R` (requirements) type matters for composition
+   */
+  readonly handlers: Layer.Layer<any, never, R>
+
+  /**
+   * Disable OpenTelemetry tracing.
+   * @default false
+   */
+  readonly disableTracing?: boolean
+
+  /**
+   * Prefix for span names.
+   * @default '@effect-trpc'
+   */
+  readonly spanPrefix?: string
+}
+
+export interface RouteHandler {
+  (request: Request): Promise<Response>
+}
+
+export interface RouteHandlers {
+  readonly GET: RouteHandler
+  readonly POST: RouteHandler
+  /**
+   * Dispose of the handler resources.
+   * Call this when shutting down the server.
+   */
+  readonly dispose: () => Promise<void>
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Route Handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create Next.js App Router route handlers for effect-trpc.
+ *
+ * @remarks
+ * **Streaming Support**: Stream procedures (type: "stream" or "chat") are
+ * automatically handled with NDJSON streaming. The underlying @effect/rpc
+ * WebHandler sets appropriate headers (`Transfer-Encoding: chunked`) and
+ * handles client disconnect via fiber interruption.
+ *
+ * **Edge Runtime**: These handlers are compatible with both Node.js and Edge
+ * Runtime. Add `export const runtime = "edge"` to your route file for edge
+ * deployment.
+ *
+ * @example
+ * ```ts
+ * // src/app/api/trpc/[...trpc]/route.ts
+ * import { createRouteHandler } from 'effect-trpc/next'
+ * import { appRouter } from '~/server/trpc/router'
+ * import { AppHandlersLive } from '~/server/trpc/handlers'
+ *
+ * const { GET, POST } = createRouteHandler({
+ *   router: appRouter,
+ *   handlers: AppHandlersLive,
+ * })
+ *
+ * export { GET, POST }
+ *
+ * // Optional: Enable edge runtime
+ * // export const runtime = "edge"
+ * ```
+ */
+export function createRouteHandler<TRouter extends Router, R>(
+  options: CreateRouteHandlerOptions<TRouter, R>,
+): RouteHandlers {
+  const { router, handlers, disableTracing, spanPrefix } = options
+
+  // Create the web handler using shared utility
+  const webHandler = createRpcWebHandler({ router, handlers, disableTracing, spanPrefix })
+
+  return {
+    GET: webHandler.handler,
+    POST: webHandler.handler,
+    dispose: webHandler.dispose,
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSR/RSC Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * For SSR and React Server Components (RSC), you can use the `createServerClient`
+ * utility from `effect-trpc/react`.
+ *
+ * It allows you to call your procedures directly without making HTTP requests,
+ * while maintaining the exact same API as the client.
+ *
+ * @example
+ * ```ts
+ * // src/trpc/server.ts
+ * import { createServerClient } from "effect-trpc/react"
+ * import { appRouter } from "./router"
+ * import { AppHandlersLive } from "./handlers"
+ *
+ * export const serverClient = createServerClient({
+ *   router: appRouter,
+ *   handlers: AppHandlersLive,
+ * })
+ * ```
+ *
+ * ```tsx
+ * // src/app/page.tsx
+ * import { Effect } from "effect"
+ * import { serverClient } from "~/trpc/server"
+ *
+ * export default async function UsersPage() {
+ *   // Direct call - no HTTP request!
+ *   const users = await Effect.runPromise(
+ *     serverClient.procedures.user.list()
+ *   )
+ *
+ *   return <UserList users={users} />
+ * }
+ * ```
+ */
