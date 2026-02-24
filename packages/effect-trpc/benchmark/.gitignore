@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Generated routes (recreated by npm run generate)
+vanilla-trpc/generated/
+effect-trpc/generated/
+vanilla-trpc/client.ts
+effect-trpc/client.ts
+vanilla-trpc/tsconfig.json
+effect-trpc/tsconfig.json
+
+# Benchmark results (regenerated each run)
+results/*.json
+results/RESULTS.md
+
+# TypeScript trace output
+.trace/
+vanilla-trpc/.trace/
+effect-trpc/.trace/
+
+# Lock file (not needed for benchmark subpackage)
+package-lock.json

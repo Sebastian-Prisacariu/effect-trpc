@@ -1,0 +1,34 @@
+{
+  "name": "effect-trpc-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript performance benchmark: vanilla tRPC vs effect-trpc",
+  "scripts": {
+    "generate": "tsx scripts/generate-routes.ts",
+    "generate:100": "tsx scripts/generate-routes.ts 100",
+    "generate:400": "tsx scripts/generate-routes.ts 400",
+    "generate:800": "tsx scripts/generate-routes.ts 800",
+    "generate:1600": "tsx scripts/generate-routes.ts 1600",
+    "bench:tsc": "tsx scripts/measure-tsc.ts",
+    "bench:tsserver": "tsx scripts/measure-tsserver.ts",
+    "bench:all": "tsx scripts/run-benchmark.ts",
+    "bench:quick": "tsx scripts/run-benchmark.ts --quick",
+    "bench:extended": "tsx scripts/run-extended-benchmark.ts",
+    "analyze": "tsx scripts/analyze-results.ts",
+    "clean": "rm -rf vanilla-trpc/generated effect-trpc/generated results/*.json"
+  },
+  "devDependencies": {
+    "@trpc/client": "^11.5.0",
+    "@trpc/server": "^11.5.0",
+    "@typescript/analyze-trace": "^0.10.1",
+    "effect": "^3.15.0",
+    "@effect/rpc": "^0.73.0",
+    "tinybench": "^6.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0",
+    "zod": "^3.23.0",
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.5"
+  }
+}
