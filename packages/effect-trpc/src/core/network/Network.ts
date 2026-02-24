@@ -245,6 +245,8 @@ const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Ef
         Stream.changes,
       ),
 
+      // Note: Type assertion is safe because gate uses closedBehavior: "wait",
+      // so GateClosedError is never thrown. The gate waits, never fails.
       whenOnline: (effect) => Gate.whenOpen(gate, effect) as any,
 
       whenOffline: (effect) =>

@@ -41,7 +41,6 @@ import * as SubscriptionRef from "effect/SubscriptionRef"
 import * as Stream from "effect/Stream"
 import * as Scope from "effect/Scope"
 import * as Fiber from "effect/Fiber"
-import * as Option from "effect/Option"
 import { GateClosedError } from "./errors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
