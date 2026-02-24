@@ -2,7 +2,17 @@
  * @module effect-trpc/react/signals
  *
  * Reactive signals for automatic refetching triggers.
- * Uses effect-atom's signal pattern for window focus and network reconnect.
+ * Simple callback-based subscriptions for React hooks.
+ *
+ * For Effect-based network status, see the `Network` service:
+ * ```ts
+ * import { Network, NetworkBrowserLive } from 'effect-trpc'
+ * ```
+ *
+ * For React hooks, see `useNetworkStatus`:
+ * ```ts
+ * import { useNetworkStatus } from 'effect-trpc/react'
+ * ```
  *
  * @since 0.2.0
  */

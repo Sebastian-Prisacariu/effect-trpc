@@ -178,6 +178,17 @@ export {
 export { keepPreviousData, queryPresets } from "./presets.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Network & Gate Hooks
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  useNetworkStatus,
+  useGate,
+  type UseNetworkStatusReturn,
+  type UseGateReturn,
+} from "./hooks/index.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Server Client (SSR/RSC)
 // ─────────────────────────────────────────────────────────────────────────────
 //
