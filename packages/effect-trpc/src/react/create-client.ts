@@ -15,6 +15,7 @@ import { useEvent } from "./internal/hooks.js"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Cause from "effect/Cause"
+import { pipe } from "effect/Function"
 import * as Stream from "effect/Stream"
 import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Fiber from "effect/Fiber"
@@ -23,12 +24,14 @@ import type * as Layer from "effect/Layer"
 import type * as HttpClient from "@effect/platform/HttpClient"
 import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
 import * as AtomResult from "@effect-atom/atom/Result"
-import {
-  useAtomValue,
-  useAtomSet,
-  useAtomMount,
-} from "@effect-atom/atom-react"
-import type { Router, RouterRecord, RouterEntry, AnyRouter, AnyProceduresGroup } from "../core/router.js"
+import { useAtomValue, useAtomSet, useAtomMount } from "@effect-atom/atom-react"
+import type {
+  Router,
+  RouterRecord,
+  RouterEntry,
+  AnyRouter,
+  AnyProceduresGroup,
+} from "../core/router.js"
 import type { ProceduresGroup, ProcedureRecord } from "../core/procedures.js"
 import type { ProcedureDefinition } from "../core/procedure.js"
 import {
@@ -135,24 +138,24 @@ export interface OptimisticUpdateConfig<I, Ctx = unknown> {
   /**
    * Called before the mutation executes.
    * Use this to optimistically update the cache.
-   * 
+   *
    * @param input - The mutation input
    * @param cache - Cache utilities for reading/writing query data
    * @returns Context that will be passed to onSuccess, onError, and onSettled.
    *          Typically used to store the previous state for rollback.
-   * 
+   *
    * @example
    * ```ts
    * onMutate: (input, cache) => {
    *   // Save previous state for rollback
    *   const previousPosts = cache.getQueryData<Post[]>("posts.list", {})
-   *   
+   *
    *   // Optimistically add the new post
-   *   cache.setQueryData("posts.list", {}, (old) => [...(old ?? []), { 
-   *     id: 'temp-id', 
-   *     title: input.title 
+   *   cache.setQueryData("posts.list", {}, (old) => [...(old ?? []), {
+   *     id: 'temp-id',
+   *     title: input.title
    *   }])
-   *   
+   *
    *   // Return context for rollback
    *   return { previousPosts }
    * }
@@ -163,7 +166,7 @@ export interface OptimisticUpdateConfig<I, Ctx = unknown> {
   /**
    * Called when the mutation succeeds.
    * Use this to update the cache with the actual server response.
-   * 
+   *
    * @param result - The mutation result from the server
    * @param input - The mutation input
    * @param cache - Cache utilities for reading/writing query data
@@ -179,12 +182,12 @@ export interface OptimisticUpdateConfig<I, Ctx = unknown> {
   /**
    * Called when the mutation fails.
    * Use this to rollback optimistic changes.
-   * 
+   *
    * @param error - The error that occurred
    * @param input - The mutation input
    * @param cache - Cache utilities for reading/writing query data
    * @param context - The context returned from onMutate
-   * 
+   *
    * @example
    * ```ts
    * onError: (error, input, cache, context) => {
@@ -205,7 +208,7 @@ export interface OptimisticUpdateConfig<I, Ctx = unknown> {
   /**
    * Called after the mutation completes (success or error).
    * Use this for cleanup or final cache updates.
-   * 
+   *
    * @param result - The mutation result, or undefined on error
    * @param error - The error, or undefined on success
    * @param input - The mutation input
@@ -247,7 +250,25 @@ export interface UseMutationOptions<A, E, I> {
  * @category hooks
  */
 export interface UseMutationReturn<A, E, I> extends MutationResult<A, E> {
-  readonly mutateAsync: (input: I) => Promise<A>
+  /**
+   * Execute the mutation and return a Promise that resolves to an Exit.
+   *
+   * **This function never throws.** Instead, it returns an `Exit` that you can
+   * pattern match on to handle success or failure. This is safer than try/catch
+   * and preserves the typed error information.
+   *
+   * @example
+   * ```typescript
+   * const result = await createUser.mutateAsync({ name: 'Alice' })
+   *
+   * if (Exit.isSuccess(result)) {
+   *   console.log('Created:', result.value)
+   * } else {
+   *   console.log('Failed:', Cause.squash(result.cause))
+   * }
+   * ```
+   */
+  readonly mutateAsync: (input: I) => Promise<Exit.Exit<A, E>>
   readonly mutate: (input: I) => Effect.Effect<A, E>
   readonly reset: () => void
 }
@@ -315,27 +336,16 @@ export interface UseChatReturn<I, A, E> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface QueryProcedure<I, A, E> {
-  useQuery: (
-    input: I,
-    options?: UseQueryOptions<A>,
-  ) => UseQueryReturn<A, E>
-  useSuspenseQuery: (
-    input: I,
-    options?: UseSuspenseQueryOptions<A>,
-  ) => UseSuspenseQueryReturn<A, E>
+  useQuery: (input: I, options?: UseQueryOptions<A>) => UseQueryReturn<A, E>
+  useSuspenseQuery: (input: I, options?: UseSuspenseQueryOptions<A>) => UseSuspenseQueryReturn<A, E>
 }
 
 interface MutationProcedure<I, A, E> {
-  useMutation: (
-    options?: UseMutationOptions<A, E, I>,
-  ) => UseMutationReturn<A, E, I>
+  useMutation: (options?: UseMutationOptions<A, E, I>) => UseMutationReturn<A, E, I>
 }
 
 interface StreamProcedure<I, A, E> {
-  useStream: (
-    input: I,
-    options?: UseStreamOptions,
-  ) => UseStreamReturn<A, E>
+  useStream: (input: I, options?: UseStreamOptions) => UseStreamReturn<A, E>
 }
 
 interface ChatProcedure<I, A, E> {
@@ -343,10 +353,7 @@ interface ChatProcedure<I, A, E> {
 }
 
 interface SubscriptionProcedure<I, A, E> {
-  useSubscription: (
-    input: I,
-    options?: UseSubscriptionOptions<A>,
-  ) => UseSubscriptionReturn<A, E>
+  useSubscription: (input: I, options?: UseSubscriptionOptions<A>) => UseSubscriptionReturn<A, E>
 }
 
 type ProcedureHook<P> =
@@ -488,14 +495,14 @@ export interface TRPCProviderProps {
 export interface UseUtilsReturn {
   /**
    * Invalidate a query by its path and optionally its input.
-   * 
+   *
    * @param path - The procedure path to invalidate.
    * @param input - Optional. If provided, invalidates the exact match for this path and input.
    *                If `undefined`, performs a **prefix-based invalidation**, refetching ALL
    *                queries whose path starts with the given `path`.
    */
   readonly invalidate: (path: string, input?: unknown) => void
-  
+
   /**
    * Invalidate all cached queries.
    */
@@ -578,7 +585,7 @@ export function createTRPCReact<TRouter extends Router>(
       return () => {
         // Decrement provider count on unmount
         providerCount--
-        
+
         // Auto-dispose ManagedRuntime when last Provider unmounts
         // This prevents resource leaks in tests and HMR scenarios
         if (providerCount === 0 && !isDisposed) {
@@ -638,13 +645,9 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
       // useQuery (effect-atom based - DECISION-007)
       // ─────────────────────────────────────────────────────────────────
-       
+
       useQuery: (input: unknown, queryOptions?: UseQueryOptions<any>) => {
-        const {
-          enabled = true,
-          initialData,
-          refetchInterval = 0,
-        } = queryOptions ?? {}
+        const { enabled = true, initialData, refetchInterval = 0 } = queryOptions ?? {}
 
         // Get registry for key tracking
         const registry = useRegistry()
@@ -681,7 +684,7 @@ export function createTRPCReact<TRouter extends Router>(
             result: AtomResult.waiting(
               previousValue !== undefined
                 ? AtomResult.success(previousValue)
-                : AtomResult.initial()
+                : AtomResult.initial(),
             ),
             lastFetchedAt: atomState.lastFetchedAt,
           })
@@ -736,11 +739,9 @@ export function createTRPCReact<TRouter extends Router>(
         }, [enabled, refetch, refetchInterval, atomState.result, initialData])
 
         // Convert effect-atom Result to our QueryResult format
-         
-        const data = AtomResult.isSuccess(atomState.result)
-          ? atomState.result.value
-          : undefined
-         
+
+        const data = AtomResult.isSuccess(atomState.result) ? atomState.result.value : undefined
+
         const error = AtomResult.isFailure(atomState.result)
           ? Option.getOrUndefined(AtomResult.error(atomState.result))
           : undefined
@@ -760,7 +761,7 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
       // useSuspenseQuery (effect-atom based - DECISION-007)
       // ─────────────────────────────────────────────────────────────────
-       
+
       useSuspenseQuery: (input: unknown, queryOptions?: UseSuspenseQueryOptions<any>) => {
         const { initialData, refetchInterval = 0 } = queryOptions ?? {}
 
@@ -800,7 +801,7 @@ export function createTRPCReact<TRouter extends Router>(
             result: AtomResult.waiting(
               previousValue !== undefined
                 ? AtomResult.success(previousValue)
-                : AtomResult.initial()
+                : AtomResult.initial(),
             ),
             lastFetchedAt: atomState.lastFetchedAt,
           })
@@ -856,7 +857,6 @@ export function createTRPCReact<TRouter extends Router>(
 
         // Handle errors - throw for error boundary
         if (AtomResult.isFailure(atomState.result)) {
-           
           throw Option.getOrUndefined(AtomResult.error(atomState.result))
         }
 
@@ -873,10 +873,8 @@ export function createTRPCReact<TRouter extends Router>(
         }, [refetch, refetchInterval])
 
         // At this point, we know we have success data
-         
-        const data = AtomResult.isSuccess(atomState.result)
-          ? atomState.result.value
-          : initialData!
+
+        const data = AtomResult.isSuccess(atomState.result) ? atomState.result.value : initialData!
 
         return {
           data,
@@ -893,12 +891,11 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
       // useMutation (effect-atom based with 3-tier hierarchy - DECISION-007)
       // ─────────────────────────────────────────────────────────────────
-       
+
       useMutation: (mutationOptions?: UseMutationOptions<any, any, any>) => {
-         
         const { onMutate, onSuccess, onError, onSettled, invalidates, optimistic } =
           mutationOptions ?? {}
-        
+
         // Get registry for atom-based operations
         const registry = useRegistry()
 
@@ -924,19 +921,19 @@ export function createTRPCReact<TRouter extends Router>(
         const cacheUtils = React.useMemo(() => createAtomCacheUtils(registry), [registry])
 
         /**
-         * Execute the mutation and return a Promise.
+         * Execute the mutation and return a Promise that resolves to an Exit.
+         *
+         * **This function never throws.** The Promise always resolves to an Exit
+         * that you can pattern match on to handle success or failure.
          *
          * @param input - The mutation input
-         * @returns Promise resolving to the mutation result
-         * @throws The procedure error when the mutation fails. This is intentional
-         *         for Promise/async-await consumers - the error is the squashed
-         *         Cause from the Effect, preserving the original error type.
+         * @returns Promise resolving to Exit.Success with the result, or Exit.Failure with the error
          */
         const mutateAsync = React.useCallback(
           async (input: any): Promise<any> => {
             // Increment version to track this mutation - used to ignore stale results
             const version = ++versionRef.current
-            
+
             // Context returned from optimistic onMutate, used for rollback
             let optimisticContext: unknown = undefined
 
@@ -960,7 +957,7 @@ export function createTRPCReact<TRouter extends Router>(
 
             const effect = createRpcEffect(url, path, input, tracing)
             const exit = await runEffect(effect)
-            
+
             // Check if this mutation was superseded by a newer one
             // If so, skip state updates and callbacks to prevent race conditions
             const isStale = version !== versionRef.current
@@ -989,7 +986,13 @@ export function createTRPCReact<TRouter extends Router>(
                 // Step 4a: Call optimistic onSettled
                 if (optimistic?.onSettled) {
                   await Promise.resolve(
-                    optimistic.onSettled(exit.value, undefined, input, cacheUtils, optimisticContext),
+                    optimistic.onSettled(
+                      exit.value,
+                      undefined,
+                      input,
+                      cacheUtils,
+                      optimisticContext,
+                    ),
                   )
                 }
 
@@ -997,20 +1000,17 @@ export function createTRPCReact<TRouter extends Router>(
                 onSettled?.(exit.value, undefined, input)
 
                 // Step 5: Handle invalidations using atom-based approach
-                const allInvalidates = [
-                  ...(procedureInvalidates ?? []),
-                  ...(invalidates ?? []),
-                ]
+                const allInvalidates = [...(procedureInvalidates ?? []), ...(invalidates ?? [])]
                 for (const invalidatePath of allInvalidates) {
                   // Use atom-based prefix invalidation
                   invalidateQueriesByPrefix(registry, invalidatePath)
                 }
               }
 
-              return exit.value
+              return Exit.succeed(exit.value)
             } else {
               const error = Cause.squash(exit.cause)
-              
+
               // Only update state and call callbacks if this is still the latest mutation
               if (!isStale) {
                 // Update caller state with error
@@ -1041,22 +1041,33 @@ export function createTRPCReact<TRouter extends Router>(
                 onSettled?.(undefined, error, input)
               }
 
-              // Intentional throw: mutateAsync returns Promise, must throw to reject
-              // Always throw even for stale mutations so the Promise rejects correctly
-              throw error
+              // Return the failure Exit - never throw, let caller pattern match
+              return exit
             }
           },
-          [onMutate, onSuccess, onError, onSettled, invalidates, procedureInvalidates, registry, optimistic, cacheUtils, setCallerState],
+          [
+            onMutate,
+            onSuccess,
+            onError,
+            onSettled,
+            invalidates,
+            procedureInvalidates,
+            registry,
+            optimistic,
+            cacheUtils,
+            setCallerState,
+          ],
         )
 
         const mutate = React.useCallback(
           (input: any): Effect.Effect<any, any> =>
-            // mutateAsync throws the squashed error directly, so we preserve it as-is
-            // The error type is already the procedure's error type (squashed from Cause)
-            Effect.tryPromise({
-              try: () => mutateAsync(input),
-              catch: (error): unknown => error,
-            }),
+            // mutateAsync returns Exit, so we convert Promise<Exit> to Effect
+            pipe(
+              Effect.promise(() => mutateAsync(input) as Promise<Exit.Exit<any, any>>),
+              Effect.flatMap((exit) =>
+                Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
+              ),
+            ),
           [mutateAsync],
         )
 
@@ -1070,8 +1081,14 @@ export function createTRPCReact<TRouter extends Router>(
           error: callerState.error ?? undefined,
           isPending: callerState.isPending,
           isError: callerState.error !== null,
-          isSuccess: lastResultRef.current !== undefined && !callerState.isPending && callerState.error === null,
-          isIdle: !callerState.isPending && callerState.error === null && lastResultRef.current === undefined,
+          isSuccess:
+            lastResultRef.current !== undefined &&
+            !callerState.isPending &&
+            callerState.error === null,
+          isIdle:
+            !callerState.isPending &&
+            callerState.error === null &&
+            lastResultRef.current === undefined,
           result: callerState.isPending
             ? Result.initial(true) // initial with waiting=true for loading state
             : callerState.error !== null
@@ -1103,7 +1120,7 @@ export function createTRPCReact<TRouter extends Router>(
         const setAtomState = useAtomSet(atom)
 
         const fiberRef = React.useRef<Fiber.RuntimeFiber<void, unknown> | null>(null)
-        
+
         // useEffectEvent for callbacks - ensures we always call the latest version
         // without recreating the stream when callbacks change.
         const onPartEvent = useEvent((part: unknown) => {
@@ -1131,7 +1148,7 @@ export function createTRPCReact<TRouter extends Router>(
 
         const restart = React.useCallback(() => {
           stop()
-          
+
           // Reset state via atom
           setAtomState({
             result: AtomResult.initial(),
@@ -1192,9 +1209,7 @@ export function createTRPCReact<TRouter extends Router>(
         }, [enabled, restart, stop])
 
         // Extract data from atom state
-        const data = AtomResult.isSuccess(atomState.result)
-          ? atomState.result.value
-          : []
+        const data = AtomResult.isSuccess(atomState.result) ? atomState.result.value : []
         const error = AtomResult.isFailure(atomState.result)
           ? Option.getOrUndefined(AtomResult.error(atomState.result))
           : undefined
@@ -1228,7 +1243,7 @@ export function createTRPCReact<TRouter extends Router>(
         const setAtomState = useAtomSet(atom)
 
         const fiberRef = React.useRef<Fiber.RuntimeFiber<void, unknown> | null>(null)
-        
+
         // useEffectEvent for callbacks - ensures we always call the latest version
         // without recreating the stream when callbacks change.
         const onPartEvent = useEvent((part: unknown) => {
@@ -1261,7 +1276,7 @@ export function createTRPCReact<TRouter extends Router>(
         const send = React.useCallback(
           (input: unknown) => {
             stop()
-            
+
             // Reset state for new message via atom
             setAtomState({
               result: AtomResult.initial(),
@@ -1285,9 +1300,8 @@ export function createTRPCReact<TRouter extends Router>(
                   }
 
                   setAtomState({
-                     
                     result: AtomResult.success(allParts as readonly any[]),
-                     
+
                     parts: allParts as readonly any[],
                     text: accumulatedText,
                     isStreaming: true,
@@ -1302,9 +1316,8 @@ export function createTRPCReact<TRouter extends Router>(
                 Effect.sync(() => {
                   fiberRef.current = null // Clear ref on completion
                   setAtomState({
-                     
                     result: AtomResult.success(allParts as readonly any[]),
-                     
+
                     parts: allParts as readonly any[],
                     text: accumulatedText,
                     isStreaming: false,
@@ -1320,7 +1333,7 @@ export function createTRPCReact<TRouter extends Router>(
                   const err = Cause.squash(cause)
                   setAtomState({
                     result: AtomResult.fail(err),
-                     
+
                     parts: allParts as readonly any[],
                     text: accumulatedText,
                     isStreaming: false,
@@ -1417,64 +1430,66 @@ export function createTRPCReact<TRouter extends Router>(
     routeEntry: RouterEntry | RouterRecord,
     pathParts: string[] = [],
   ): any => {
-    return new Proxy({}, {
-      get(_target, prop: string) {
-        // Skip internal properties
-        if (typeof prop !== "string" || prop === "then" || prop === "toJSON") {
-          return undefined
-        }
+    return new Proxy(
+      {},
+      {
+        get(_target, prop: string) {
+          // Skip internal properties
+          if (typeof prop !== "string" || prop === "then" || prop === "toJSON") {
+            return undefined
+          }
 
-        const newPathParts = [...pathParts, prop]
+          const newPathParts = [...pathParts, prop]
 
-        // If routeEntry is a RouterRecord (initial call or nested router routes)
-        if (!("_tag" in routeEntry)) {
-          const entry = (routeEntry)[prop]
-          if (entry) {
-            if (looksLikeRouter(entry)) {
-              // Nested router - recurse into its routes
-              return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
-            } else if (looksLikeProceduresGroup(entry)) {
-              // ProceduresGroup - return proxy for procedures
-              return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+          // If routeEntry is a RouterRecord (initial call or nested router routes)
+          if (!("_tag" in routeEntry)) {
+            const entry = routeEntry[prop]
+            if (entry) {
+              if (looksLikeRouter(entry)) {
+                // Nested router - recurse into its routes
+                return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
+              } else if (looksLikeProceduresGroup(entry)) {
+                // ProceduresGroup - return proxy for procedures
+                return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+              }
             }
+            // Unknown entry - might be a procedure name, but we don't have the group
+            // This shouldn't happen with proper types
+            return undefined
           }
-          // Unknown entry - might be a procedure name, but we don't have the group
-          // This shouldn't happen with proper types
-          return undefined
-        }
 
-        // If we're inside a ProceduresGroup, prop should be a procedure name
-        if (looksLikeProceduresGroup(routeEntry)) {
-          const group = routeEntry as AnyProceduresGroup
-          const procedureDef = group.procedures[prop]
-          if (procedureDef) {
-            // Build full path: join all parts with dots
-            // Path format: "groupKey.procedureName" or "nested.path.groupKey.procedureName"
-            const fullPath = newPathParts.join(".")
-            return createProcedureHooks(fullPath)
-          }
-          return undefined
-        }
-
-        // If we're inside a Router, prop should be a key in routes
-        if (looksLikeRouter(routeEntry)) {
-          const router = routeEntry as AnyRouter
-          const entry = router.routes[prop]
-          if (entry) {
-            if (looksLikeRouter(entry)) {
-              return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
-            } else if (looksLikeProceduresGroup(entry)) {
-              return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+          // If we're inside a ProceduresGroup, prop should be a procedure name
+          if (looksLikeProceduresGroup(routeEntry)) {
+            const group = routeEntry as AnyProceduresGroup
+            const procedureDef = group.procedures[prop]
+            if (procedureDef) {
+              // Build full path: join all parts with dots
+              // Path format: "groupKey.procedureName" or "nested.path.groupKey.procedureName"
+              const fullPath = newPathParts.join(".")
+              return createProcedureHooks(fullPath)
             }
+            return undefined
           }
-          return undefined
-        }
 
-        return undefined
+          // If we're inside a Router, prop should be a key in routes
+          if (looksLikeRouter(routeEntry)) {
+            const router = routeEntry as AnyRouter
+            const entry = router.routes[prop]
+            if (entry) {
+              if (looksLikeRouter(entry)) {
+                return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
+              } else if (looksLikeProceduresGroup(entry)) {
+                return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+              }
+            }
+            return undefined
+          }
+
+          return undefined
+        },
       },
-    })
+    )
   }
-   
 
   /**
    * Create the top-level procedures proxy from the router.
@@ -1491,7 +1506,11 @@ export function createTRPCReact<TRouter extends Router>(
     return new Proxy({} as RouterClient<TRouter["routes"]>, {
       get(_target, groupOrRouterKey: string) {
         // Skip internal properties
-        if (typeof groupOrRouterKey !== "string" || groupOrRouterKey === "then" || groupOrRouterKey === "toJSON") {
+        if (
+          typeof groupOrRouterKey !== "string" ||
+          groupOrRouterKey === "then" ||
+          groupOrRouterKey === "toJSON"
+        ) {
           return undefined
         }
 
@@ -1522,28 +1541,37 @@ export function createTRPCReact<TRouter extends Router>(
    * because TypeScript cannot express recursive proxy types that depend on
    * runtime path accumulation.
    */
-   
+
   const createNestedProxy = (pathParts: string[]): any => {
-    return new Proxy({}, {
-      get(_target, prop: string) {
-        // Skip internal properties
-        if (typeof prop !== "string" || prop === "then" || prop === "toJSON") {
-          return undefined
-        }
+    return new Proxy(
+      {},
+      {
+        get(_target, prop: string) {
+          // Skip internal properties
+          if (typeof prop !== "string" || prop === "then" || prop === "toJSON") {
+            return undefined
+          }
 
-        // Check if this is a hook method
-        if (prop === "useQuery" || prop === "useMutation" || prop === "useStream" || prop === "useChat" || prop === "useSubscription") {
-          // The last part is the procedure name, build the full path
-          const fullPath = pathParts.join(".")
-          const hooks = createProcedureHooks(fullPath)
-          return hooks[prop as keyof typeof hooks]
-        }
+          // Check if this is a hook method
+          if (
+            prop === "useQuery" ||
+            prop === "useMutation" ||
+            prop === "useStream" ||
+            prop === "useChat" ||
+            prop === "useSubscription"
+          ) {
+            // The last part is the procedure name, build the full path
+            const fullPath = pathParts.join(".")
+            const hooks = createProcedureHooks(fullPath)
+            return hooks[prop as keyof typeof hooks]
+          }
 
-        // Otherwise, this is another path segment (could be router, group, or procedure)
-         
-        return createNestedProxy([...pathParts, prop])
+          // Otherwise, this is another path segment (could be router, group, or procedure)
+
+          return createNestedProxy([...pathParts, prop])
+        },
       },
-    })
+    )
   }
 
   // Dispose function to clean up ManagedRuntime resources

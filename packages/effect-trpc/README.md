@@ -248,10 +248,15 @@ const handleCreate = Effect.gen(function* () {
   console.log('Created:', user)
 })
 
-// Promise escape hatch
+// Promise escape hatch (returns Exit, never throws)
 const handleCreateAsync = async () => {
-  const user = await createUser.mutateAsync({ name: 'Alice', email: 'alice@example.com' })
-  console.log('Created:', user)
+  const result = await createUser.mutateAsync({ name: 'Alice', email: 'alice@example.com' })
+  
+  if (Exit.isSuccess(result)) {
+    console.log('Created:', result.value)
+  } else {
+    console.log('Failed:', Cause.squash(result.cause))
+  }
 }
 ```
 

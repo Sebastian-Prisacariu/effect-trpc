@@ -6,6 +6,7 @@
 
 import { describe, it, expect, expectTypeOf } from "vitest"
 import type * as Effect from "effect/Effect"
+import type * as Exit from "effect/Exit"
 import {
   type Result,
   type Initial,
@@ -187,7 +188,7 @@ describe("QueryResult type", () => {
     expect(typeof queryResult.isError).toBe("boolean")
     expect(typeof queryResult.isSuccess).toBe("boolean")
     expect(typeof queryResult.isRefetching).toBe("boolean")
-    
+
     // These verify the shape compiles correctly
     expectTypeOf(queryResult).toHaveProperty("data")
     expectTypeOf(queryResult).toHaveProperty("error")
@@ -205,7 +206,7 @@ describe("MutationResult type", () => {
     expect(typeof mutationResult.isError).toBe("boolean")
     expect(typeof mutationResult.isSuccess).toBe("boolean")
     expect(typeof mutationResult.isIdle).toBe("boolean")
-    
+
     // These verify the shape compiles correctly
     expectTypeOf(mutationResult).toHaveProperty("data")
     expectTypeOf(mutationResult).toHaveProperty("error")
@@ -230,17 +231,13 @@ describe("Hook return types", () => {
   })
 
   it("UseMutationReturn has correct shape", () => {
-    type TestMutationReturn = UseMutationReturn<
-      { id: string },
-      Error,
-      { name: string }
-    >
+    type TestMutationReturn = UseMutationReturn<{ id: string }, Error, { name: string }>
 
     expectTypeOf<TestMutationReturn["data"]>().toEqualTypeOf<{ id: string } | undefined>()
     expectTypeOf<TestMutationReturn["error"]>().toEqualTypeOf<Error | undefined>()
     expectTypeOf<TestMutationReturn["isPending"]>().toEqualTypeOf<boolean>()
     expectTypeOf<TestMutationReturn["mutateAsync"]>().toMatchTypeOf<
-      (input: { name: string }) => Promise<{ id: string }>
+      (input: { name: string }) => Promise<Exit.Exit<{ id: string }, Error>>
     >()
     expectTypeOf<TestMutationReturn["mutate"]>().toMatchTypeOf<
       (input: { name: string }) => Effect.Effect<{ id: string }, Error>
@@ -268,9 +265,7 @@ describe("Hook return types", () => {
     type TestChatReturn = UseChatReturn<ChatInput, ChatPart, ChatError>
 
     // Verify send accepts the correct input type
-    expectTypeOf<TestChatReturn["send"]>().toMatchTypeOf<
-      (input: ChatInput) => void
-    >()
+    expectTypeOf<TestChatReturn["send"]>().toMatchTypeOf<(input: ChatInput) => void>()
     expectTypeOf<TestChatReturn["send"]>().toMatchTypeOf<
       (input: { message: string; conversationId: string }) => void
     >()
