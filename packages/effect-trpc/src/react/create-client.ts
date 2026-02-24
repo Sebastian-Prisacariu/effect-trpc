@@ -73,6 +73,7 @@ import {
 } from "./atoms.js"
 
 import { Result, type QueryResult, type MutationResult } from "./result.js"
+import { useNetworkStatus } from "./hooks/index.js"
 import {
   isStale,
   subscribeToWindowFocus,
@@ -552,6 +553,36 @@ export interface ProcedureMetadata {
 export type ProcedureMetadataRegistry = Record<string, ProcedureMetadata>
 
 /**
+ * Network configuration options.
+ *
+ * @since 0.2.0
+ * @category configuration
+ */
+export interface NetworkConfig {
+  /**
+   * How to detect online/offline status.
+   * - `'browser'`: Use navigator.onLine + events (default, works everywhere including serverless)
+   * - `'none'`: Always online (disable detection)
+   * @default 'browser'
+   */
+  readonly detector?: "browser" | "none"
+
+  /**
+   * Gate configuration for request flow control.
+   */
+  readonly gate?: {
+    /**
+     * Gate mode.
+     * - `'off'`: Gate always open (no gating)
+     * - `'auto'`: Gate opens/closes based on detector (default)
+     * - `'manual'`: User controls via Network.gate
+     * @default 'auto'
+     */
+    readonly mode?: "off" | "auto" | "manual"
+  }
+}
+
+/**
  * Options for creating a TRPC React client.
  *
  * @since 0.1.0
@@ -583,6 +614,61 @@ export interface CreateTRPCReactOptions {
    * @since 0.2.0
    */
   readonly defaultQueryOptions?: Partial<GlobalQueryOptions<unknown>>
+
+  /**
+   * Network configuration for online/offline detection and gating.
+   *
+   * @example
+   * ```ts
+   * const trpc = createTRPCReact<AppRouter>({
+   *   url: '/api/trpc',
+   *   network: {
+   *     detector: 'browser',
+   *     gate: { mode: 'auto' },
+   *   },
+   * })
+   * ```
+   *
+   * @since 0.2.0
+   */
+  readonly network?: NetworkConfig
+
+  /**
+   * Validate mutation input client-side before sending to server.
+   * Fails fast with ParseError if input doesn't match schema.
+   *
+   * @default false
+   * @since 0.2.0
+   */
+  readonly clientSideValidation?: boolean
+}
+
+/**
+ * Network utilities exposed on the tRPC client.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface TRPCNetworkUtils {
+  /**
+   * Hook to get current network status.
+   * SSR/hydration-safe - defers to useEffect to avoid mismatch.
+   *
+   * @example
+   * ```tsx
+   * function OfflineBanner() {
+   *   const { isOnline, isHydrated } = trpc.network.useStatus()
+   *   if (!isHydrated || isOnline) return null
+   *   return <div>You are offline</div>
+   * }
+   * ```
+   */
+  readonly useStatus: () => {
+    readonly isOnline: boolean
+    readonly isHydrated: boolean
+    readonly lastOnlineAt: number | null
+    readonly lastOfflineAt: number | null
+  }
 }
 
 /**
@@ -595,6 +681,19 @@ export interface TRPCReactClient<TRouter extends Router> {
   readonly procedures: RouterClient<TRouter["routes"]>
   readonly Provider: (props: TRPCProviderProps) => any
   readonly useUtils: () => UseUtilsReturn
+
+  /**
+   * Network utilities for online/offline status.
+   *
+   * @example
+   * ```tsx
+   * const { isOnline } = trpc.network.useStatus()
+   * ```
+   *
+   * @since 0.2.0
+   */
+  readonly network: TRPCNetworkUtils
+
   /**
    * Dispose of the client's ManagedRuntime resources.
    * Call this when the client is no longer needed (e.g., during app shutdown).
@@ -1918,10 +2017,16 @@ export function createTRPCReact<TRouter extends Router>(
     return managedRuntime.dispose()
   }
 
+  // Network utilities
+  const network: TRPCNetworkUtils = {
+    useStatus: useNetworkStatus,
+  }
+
   return {
     procedures: createProceduresProxy(),
     Provider,
     useUtils,
+    network,
     dispose,
   }
 }

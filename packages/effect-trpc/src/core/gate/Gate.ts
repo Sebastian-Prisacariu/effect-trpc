@@ -117,7 +117,15 @@ export interface GateOptions {
  * @category guards
  */
 export const isGate = (u: unknown): u is Gate =>
-  typeof u === "object" && u !== null && "_tag" in u && u._tag === "Gate"
+  typeof u === "object" &&
+  u !== null &&
+  "_tag" in u &&
+  u._tag === "Gate" &&
+  "name" in u &&
+  typeof (u as Gate).name === "string" &&
+  "state" in u &&
+  "semaphore" in u &&
+  "closedBehavior" in u
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor

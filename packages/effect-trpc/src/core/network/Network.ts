@@ -165,7 +165,11 @@ const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Ef
     const scope = yield* Effect.scope
 
     // Determine initial state (SSR-safe: default to online)
-    const initialOnline = typeof navigator !== "undefined" ? navigator.onLine : true
+    // Note: In Node.js, navigator exists but navigator.onLine is undefined
+    const initialOnline =
+      typeof navigator !== "undefined" && typeof navigator.onLine === "boolean"
+        ? navigator.onLine
+        : true
 
     // Create underlying gate
     const gate = yield* Gate.make("network", {

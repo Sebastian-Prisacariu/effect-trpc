@@ -89,6 +89,8 @@ export type {
   CreateTRPCReactOptions,
   TRPCReactClient,
   TRPCProviderProps,
+  TRPCNetworkUtils,
+  NetworkConfig,
   ProcedureMetadata,
   ProcedureMetadataRegistry,
   TracingConfig,
