@@ -87,6 +87,7 @@ export type {
   ProcedureMetadataRegistry,
   TracingConfig,
   UseQueryOptions,
+  GlobalQueryOptions,
   UseQueryReturn,
   UseSuspenseQueryOptions,
   UseSuspenseQueryReturn,

@@ -51,18 +51,25 @@ export const keepPreviousData = <T>(previousData: T | undefined): T | undefined 
 /**
  * Pre-configured query option presets for common data freshness patterns.
  *
+ * Note: These presets don't include `gcTime` because it's a global setting.
+ * Set `gcTime` via `defaultQueryOptions.gcTime` in `createTRPCReact()`.
+ *
  * @example
  * ```ts
  * import { queryPresets } from 'effect-trpc/react'
  *
- * // For frequently changing data (dashboards, feeds)
+ * // Per-query usage
  * const { data } = trpc.feed.list.useQuery(undefined, queryPresets.frequentData)
- *
- * // For semi-stable data (user profiles)
  * const { data } = trpc.user.profile.useQuery({ id }, queryPresets.semiStableData)
- *
- * // For SSG/SSR pages - disable automatic refetching
  * const { data } = trpc.page.content.useQuery({ slug }, queryPresets.static)
+ *
+ * // Or use with defaultQueryOptions for app-wide defaults
+ * const trpc = createTRPCReact<AppRouter>({
+ *   defaultQueryOptions: {
+ *     ...queryPresets.semiStableData,
+ *     gcTime: 30 * 60 * 1000, // Set gcTime globally
+ *   },
+ * })
  * ```
  *
  * @since 0.2.0
@@ -71,36 +78,30 @@ export const queryPresets = {
   /**
    * For data that changes frequently (dashboards, feeds, notifications).
    * - Immediately stale
-   * - 5 minute cache
    * - Polls every 30 seconds
    */
   frequentData: {
     staleTime: 0,
-    gcTime: 5 * 60 * 1000,
     refetchInterval: 30_000,
   } satisfies Partial<UseQueryOptions<unknown>>,
 
   /**
    * For semi-stable data (user profiles, settings, product details).
    * - Fresh for 5 minutes
-   * - 30 minute cache
    * - Polls every 10 minutes
    */
   semiStableData: {
     staleTime: 5 * 60 * 1000,
-    gcTime: 30 * 60 * 1000,
     refetchInterval: 10 * 60 * 1000,
   } satisfies Partial<UseQueryOptions<unknown>>,
 
   /**
    * For stable data (static content, rarely changing configuration).
    * - Fresh for 10 minutes
-   * - 1 hour cache
    * - No polling
    */
   stableData: {
     staleTime: 10 * 60 * 1000,
-    gcTime: 60 * 60 * 1000,
     refetchInterval: false,
   } satisfies Partial<UseQueryOptions<unknown>>,
 
@@ -122,7 +123,6 @@ export const queryPresets = {
    */
   realtime: {
     staleTime: 0,
-    gcTime: 60 * 1000,
     refetchInterval: 5_000,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,

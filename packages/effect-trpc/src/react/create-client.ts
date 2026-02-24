@@ -132,20 +132,6 @@ export interface UseQueryOptions<A> {
    */
   readonly staleTime?: number
 
-  /**
-   * How long unused/inactive cache data remains in memory (ms).
-   * After this time, unmounted queries are garbage collected.
-   *
-   * **Important:** In v1, gcTime is a GLOBAL setting only. Set it via
-   * `defaultQueryOptions.gcTime` in `createTRPCReact()`. Per-query
-   * gcTime values passed here are ignored - the global value is used.
-   *
-   * Uses effect-atom's `defaultIdleTTL` under the hood.
-   *
-   * @default 300_000 (5 minutes)
-   */
-  readonly gcTime?: number
-
   // ═══════════════════════════════════════════════════════════════════════════
   // Automatic Refetch Triggers
   // ═══════════════════════════════════════════════════════════════════════════
@@ -183,6 +169,30 @@ export interface UseQueryOptions<A> {
    * @default false
    */
   readonly refetchIntervalInBackground?: boolean
+}
+
+/**
+ * Global query options that can only be set via `defaultQueryOptions` in `createTRPCReact()`.
+ * Extends UseQueryOptions with settings that must be configured globally.
+ *
+ * @since 0.2.0
+ * @category hooks
+ */
+export interface GlobalQueryOptions<A> extends UseQueryOptions<A> {
+  /**
+   * How long unused/inactive cache data remains in memory (ms).
+   * After this time, unmounted queries are garbage collected.
+   *
+   * This is a **global setting only** - it cannot be set per-query because
+   * effect-atom's TTL must be configured at atom creation time.
+   *
+   * Set to `Infinity` to keep query data indefinitely (no garbage collection).
+   *
+   * Uses effect-atom's `defaultIdleTTL` under the hood.
+   *
+   * @default Infinity (no garbage collection)
+   */
+  readonly gcTime?: number
 }
 
 /**
@@ -556,12 +566,15 @@ export interface CreateTRPCReactOptions {
   /**
    * Default options for all queries. Per-query options override these.
    *
+   * Note: `gcTime` can ONLY be set here (globally), not per-query.
+   *
    * @example
    * ```ts
    * const trpc = createTRPCReact<AppRouter>({
    *   url: '/api/trpc',
    *   defaultQueryOptions: {
    *     staleTime: 30_000,
+   *     gcTime: 5 * 60 * 1000, // 5 minutes (global only)
    *     refetchOnWindowFocus: false,
    *   },
    * })
@@ -569,7 +582,7 @@ export interface CreateTRPCReactOptions {
    *
    * @since 0.2.0
    */
-  readonly defaultQueryOptions?: Partial<UseQueryOptions<unknown>>
+  readonly defaultQueryOptions?: Partial<GlobalQueryOptions<unknown>>
 }
 
 /**
@@ -708,12 +721,15 @@ export function createTRPCReact<TRouter extends Router>(
   const runFork = <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) =>
     managedRuntime.runFork(effect)
 
-  // Default gcTime (5 minutes) - matches TanStack Query
-  const DEFAULT_GC_TIME = 5 * 60 * 1000
-
   // Get global gcTime from defaultQueryOptions
-  // This sets how long unused/inactive query data stays in memory
-  const globalGcTime = defaultQueryOptions.gcTime ?? DEFAULT_GC_TIME
+  // When undefined or Infinity, atoms persist indefinitely (no GC)
+  // When a finite number, atoms are garbage collected after that duration
+  const globalGcTime = defaultQueryOptions.gcTime
+
+  // Only pass defaultIdleTTL when gcTime is a finite number
+  // undefined/Infinity means "keep forever" (no garbage collection)
+  const shouldSetIdleTTL =
+    globalGcTime !== undefined && globalGcTime !== Infinity && Number.isFinite(globalGcTime)
 
   // Provider wraps with effect-atom RegistryProvider and manages runtime lifecycle
   const Provider = ({ children }: TRPCProviderProps) => {
@@ -739,8 +755,13 @@ export function createTRPCReact<TRouter extends Router>(
     }, [])
 
     // Wrap with RegistryProvider for effect-atom state management
-    // Pass defaultIdleTTL from global gcTime option
-    return React.createElement(RegistryProvider, { defaultIdleTTL: globalGcTime }, children)
+    // Only set defaultIdleTTL when gcTime is finite (enables garbage collection)
+    // When gcTime is undefined/Infinity, atoms persist indefinitely
+    return React.createElement(
+      RegistryProvider,
+      shouldSetIdleTTL ? { defaultIdleTTL: globalGcTime } : {},
+      children,
+    )
   }
 
   // Invalidation utilities hook (uses effect-atom registry)
@@ -796,7 +817,6 @@ export function createTRPCReact<TRouter extends Router>(
           placeholderData,
           keepPreviousData = false,
           staleTime = 0,
-          gcTime: _gcTime = 300_000, // TODO: Wire to setIdleTTL
           refetchOnWindowFocus = true,
           refetchOnReconnect = true,
           refetchOnMount = true,
@@ -1031,7 +1051,6 @@ export function createTRPCReact<TRouter extends Router>(
           placeholderData,
           keepPreviousData = false,
           staleTime = 0,
-          gcTime: _gcTime = 300_000, // TODO: Wire to setIdleTTL
           refetchOnWindowFocus = true,
           refetchOnReconnect = true,
           refetchOnMount = true,
