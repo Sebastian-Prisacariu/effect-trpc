@@ -7,6 +7,8 @@
  */
 
 import * as React from "react"
+import * as Effect from "effect/Effect"
+import * as SubscriptionRef from "effect/SubscriptionRef"
 import type { GateInstance } from "../../core/gate/index.js"
 import { Gate } from "../../core/gate/index.js"
 
@@ -64,38 +66,38 @@ export interface UseGateReturn {
  * @category hooks
  */
 export function useGate(gate: GateInstance): UseGateReturn {
-  const [isOpen, setIsOpen] = React.useState(() => {
-    // Get initial state synchronously if possible
-    // This avoids a flash of incorrect state
+  // Get initial state from the gate's SubscriptionRef
+  // SubscriptionRef.get is a synchronous read, safe to run with Effect.runSync
+  const [state, setState] = React.useState(() => {
     try {
-      // We can't use Effect.runSync here safely in all cases,
-      // so we'll rely on the subscription to update
-      return true // Default to open
+      const currentState = Effect.runSync(SubscriptionRef.get(gate.state))
+      return {
+        isOpen: currentState.isOpen,
+        openedAt: currentState.openedAt,
+        closedAt: currentState.closedAt,
+      }
     } catch {
-      return true
+      // Fallback if runSync fails (shouldn't happen for sync operations)
+      return {
+        isOpen: true,
+        openedAt: null,
+        closedAt: null,
+      }
     }
   })
-
-  const [openedAt, setOpenedAt] = React.useState<number | null>(null)
-  const [closedAt, setClosedAt] = React.useState<number | null>(null)
 
   React.useEffect(() => {
     // Subscribe to gate changes
     const cleanup = Gate.subscribe(gate, (open) => {
-      setIsOpen(open)
-      if (open) {
-        setOpenedAt(Date.now())
-      } else {
-        setClosedAt(Date.now())
-      }
+      setState((prev) => ({
+        isOpen: open,
+        openedAt: open ? Date.now() : prev.openedAt,
+        closedAt: open ? prev.closedAt : Date.now(),
+      }))
     })
 
     return cleanup
   }, [gate])
 
-  return {
-    isOpen,
-    openedAt,
-    closedAt,
-  }
+  return state
 }

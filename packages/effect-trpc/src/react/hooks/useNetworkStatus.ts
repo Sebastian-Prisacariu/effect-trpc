@@ -84,7 +84,11 @@ export function useNetworkStatus(): UseNetworkStatusReturn {
 
   React.useEffect(() => {
     // Now on client - get real value
-    const currentOnline = typeof navigator !== "undefined" ? navigator.onLine : true
+    // Note: In Node.js, navigator exists but navigator.onLine is undefined
+    const currentOnline =
+      typeof navigator !== "undefined" && typeof navigator.onLine === "boolean"
+        ? navigator.onLine
+        : true
     setIsOnline(currentOnline)
     setIsHydrated(true)
 
@@ -94,7 +98,9 @@ export function useNetworkStatus(): UseNetworkStatusReturn {
       setLastOfflineAt(Date.now())
     }
 
-    // Subscribe to changes
+    // Subscribe to changes (only in browser environment)
+    if (typeof window === "undefined") return
+
     const handleOnline = () => {
       setIsOnline(true)
       setLastOnlineAt(Date.now())
