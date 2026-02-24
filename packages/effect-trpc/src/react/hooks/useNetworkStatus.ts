@@ -139,16 +139,19 @@ export function useNetworkStatus(): UseNetworkStatusReturn {
   })
 
   // Set hydrated and initial timestamps after mount
+  // We intentionally read `isOnline` only once at mount time to record
+  // the initial timestamp. Subsequent changes are handled by the effect below.
   React.useEffect(() => {
     setIsHydrated(true)
 
-    // Set initial timestamp based on current status
+    // Set initial timestamp based on current status at mount time
     if (isOnline) {
       setTimestamps((prev) => ({ ...prev, lastOnlineAt: Date.now() }))
     } else {
       setTimestamps((prev) => ({ ...prev, lastOfflineAt: Date.now() }))
     }
-  }, []) // Only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only run on mount
+  }, [])
 
   // Update timestamps when online status changes
   const prevIsOnlineRef = React.useRef(isOnline)

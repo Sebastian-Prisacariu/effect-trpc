@@ -433,6 +433,65 @@ describe("Gate Edge Cases", () => {
 
       expect(result).toBe(5)
     })
+
+    it("awaitOpen is race-condition safe when gate opens immediately", async () => {
+      // This test verifies the fix for the race condition where:
+      // 1. awaitOpen checks state (closed)
+      // 2. Another fiber opens the gate
+      // 3. awaitOpen subscribes to changes
+      // 4. Without the fix, it would wait forever
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const gate = yield* Gate.make("test", { initiallyOpen: false })
+
+            // Start awaitOpen and immediately open the gate
+            // This maximizes the chance of hitting the race window
+            const awaiter = yield* Effect.fork(Gate.awaitOpen(gate))
+
+            // Open immediately - no yield/sleep between fork and open
+            yield* Gate.open(gate)
+
+            // The awaiter should complete, not hang
+            yield* Fiber.join(awaiter).pipe(
+              Effect.timeout("100 millis"),
+              Effect.orDie,
+            )
+
+            return "completed"
+          }),
+        ),
+      )
+
+      expect(result).toBe("completed")
+    })
+
+    it("awaitClose is race-condition safe when gate closes immediately", async () => {
+      // Same test for awaitClose
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const gate = yield* Gate.make("test", { initiallyOpen: true })
+
+            // Start awaitClose and immediately close the gate
+            const awaiter = yield* Effect.fork(Gate.awaitClose(gate))
+
+            // Close immediately - no yield/sleep between fork and close
+            yield* Gate.close(gate)
+
+            // The awaiter should complete, not hang
+            yield* Fiber.join(awaiter).pipe(
+              Effect.timeout("100 millis"),
+              Effect.orDie,
+            )
+
+            return "completed"
+          }),
+        ),
+      )
+
+      expect(result).toBe("completed")
+    })
   })
 
   describe("state consistency", () => {

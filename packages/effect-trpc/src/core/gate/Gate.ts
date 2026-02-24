@@ -386,38 +386,64 @@ export const getState = (gate: Gate): Effect.Effect<GateState> =>
  * Wait until the gate is open.
  * Completes immediately if already open.
  *
+ * **Race-condition safe:** Subscribes to changes before checking state
+ * to avoid missing transitions that occur between check and subscribe.
+ *
  * @since 0.2.0
  * @category observation
  */
 export const awaitOpen = (gate: Gate): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(gate.state)
-    if (current.isOpen) return
-
-    yield* gate.state.changes.pipe(
+    // Subscribe FIRST to avoid race condition:
+    // If we check state then subscribe, the gate could open between those
+    // operations and we'd miss the change, waiting forever.
+    const fiber = yield* gate.state.changes.pipe(
       Stream.filter((s) => s.isOpen),
       Stream.take(1),
       Stream.runDrain,
-    )
+    ).pipe(Effect.fork)
+
+    // Now check current state - if already open, cancel subscription
+    const current = yield* SubscriptionRef.get(gate.state)
+    if (current.isOpen) {
+      yield* Fiber.interrupt(fiber)
+      return
+    }
+
+    // Wait for the gate to open
+    yield* Fiber.join(fiber)
   })
 
 /**
  * Wait until the gate is closed.
  * Completes immediately if already closed.
  *
+ * **Race-condition safe:** Subscribes to changes before checking state
+ * to avoid missing transitions that occur between check and subscribe.
+ *
  * @since 0.2.0
  * @category observation
  */
 export const awaitClose = (gate: Gate): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(gate.state)
-    if (!current.isOpen) return
-
-    yield* gate.state.changes.pipe(
+    // Subscribe FIRST to avoid race condition:
+    // If we check state then subscribe, the gate could close between those
+    // operations and we'd miss the change, waiting forever.
+    const fiber = yield* gate.state.changes.pipe(
       Stream.filter((s) => !s.isOpen),
       Stream.take(1),
       Stream.runDrain,
-    )
+    ).pipe(Effect.fork)
+
+    // Now check current state - if already closed, cancel subscription
+    const current = yield* SubscriptionRef.get(gate.state)
+    if (!current.isOpen) {
+      yield* Fiber.interrupt(fiber)
+      return
+    }
+
+    // Wait for the gate to close
+    yield* Fiber.join(fiber)
   })
 
 /**

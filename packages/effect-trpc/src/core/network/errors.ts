@@ -23,6 +23,11 @@ export type NetworkErrorTypeId = typeof NetworkErrorTypeId
  * Error thrown when attempting to execute an effect while offline
  * and the network gate is configured to fail.
  *
+ * **Note:** Currently, the Network service always uses `closedBehavior: "wait"`,
+ * so this error is not thrown by the built-in implementation. It is exported
+ * for users who create custom Network implementations with fail behavior,
+ * or for future versions that may support a "fail" mode.
+ *
  * @since 0.2.0
  * @category errors
  */
