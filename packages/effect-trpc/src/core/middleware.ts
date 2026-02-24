@@ -8,6 +8,7 @@
 import * as Effect from "effect/Effect"
 import * as Array from "effect/Array"
 import * as Clock from "effect/Clock"
+import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
 import { dual } from "effect/Function"
 import * as HashMap from "effect/HashMap"
@@ -188,6 +189,19 @@ export const Middleware = {
     name,
     fn,
   })),
+
+  /**
+   * Create a middleware that provides a request-scoped service to handlers.
+   *
+   * This is the recommended way to provide per-request services. The framework
+   * will use the correct method to provide the service:
+   * - For Effects: `Effect.provideServiceEffect()`
+   * - For Streams: `Stream.provideServiceEffect()`
+   *
+   * @see serviceMiddleware for full documentation and examples
+   * @since 0.2.0
+   */
+  withService: serviceMiddleware,
 }
 
 /**
@@ -245,6 +259,172 @@ export function middlewareWithProvides<
     name: options.name,
     fn: options.fn,
     // _provides is a phantom type, not set at runtime
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service-Providing Middleware (Request-Scoped Services)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Symbol to identify ServiceMiddleware at runtime.
+ * @internal
+ */
+export const ServiceMiddlewareTypeId: unique symbol = Symbol.for(
+  "@effect-trpc/ServiceMiddleware"
+)
+
+/**
+ * @internal
+ */
+export type ServiceMiddlewareTypeId = typeof ServiceMiddlewareTypeId
+
+/**
+ * A middleware that provides a service to downstream handlers.
+ *
+ * Unlike regular middleware that uses `Effect.provideService()` internally,
+ * ServiceMiddleware declares its provided service at runtime, allowing the
+ * framework to apply the service correctly for both Effects and Streams.
+ *
+ * This solves the problem where `Effect.provideService()` doesn't propagate
+ * to Stream's internal effects.
+ *
+ * @template CtxIn - The input context type
+ * @template CtxOut - The output context type (after adding service data to context)
+ * @template S - The service type being provided
+ * @template E - Error type the middleware can produce
+ * @template R - Requirements (Effect context) the middleware needs
+ *
+ * @since 0.2.0
+ */
+export interface ServiceMiddleware<
+  CtxIn extends BaseContext = BaseContext,
+  CtxOut extends BaseContext = CtxIn,
+  S = unknown,
+  E = never,
+  R = never
+> {
+  readonly [ServiceMiddlewareTypeId]: ServiceMiddlewareTypeId
+  readonly _tag: "ServiceMiddleware"
+  readonly name: string
+
+  /**
+   * The Context.Tag for the service this middleware provides.
+   * This is used at runtime to apply the service correctly.
+   */
+  readonly provides: Context.Tag<any, S>
+
+  /**
+   * Function that creates the service value from the context.
+   * This is evaluated per-request and the result is provided to handlers.
+   */
+  readonly make: (ctx: CtxIn) => Effect.Effect<S, E, R>
+
+  /**
+   * Optional function to transform the context after creating the service.
+   * If provided, the handler receives CtxOut instead of CtxIn.
+   * The service value is passed so it can be added to the context.
+   */
+  readonly transformContext?: ((ctx: CtxIn, service: S) => CtxOut) | undefined
+}
+
+/**
+ * Check if a middleware is a ServiceMiddleware.
+ *
+ * @since 0.2.0
+ */
+export const isServiceMiddleware = (
+  middleware: Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+): middleware is ServiceMiddleware<any, any, any, any, any> =>
+  ServiceMiddlewareTypeId in middleware
+
+/**
+ * Extract the service type from a ServiceMiddleware.
+ *
+ * @since 0.2.0
+ */
+export type ServiceMiddlewareService<M> = M extends ServiceMiddleware<any, any, infer S, any, any>
+  ? S
+  : never
+
+/**
+ * Create a middleware that provides a request-scoped service to handlers.
+ *
+ * This is the recommended way to provide per-request services like `CurrentUser`,
+ * `RequestContext`, or `Database` connections. The framework will:
+ *
+ * - For **Effects** (query/mutation): Use `Effect.provideServiceEffect()`
+ * - For **Streams** (stream/chat/subscription): Use `Stream.provideServiceEffect()`
+ *
+ * This ensures the service is properly available in all handler contexts.
+ *
+ * @example
+ * ```ts
+ * import { Middleware } from 'effect-trpc'
+ * import { Context, Effect } from 'effect'
+ *
+ * // Define your service tag
+ * class CurrentUser extends Context.Tag('CurrentUser')<
+ *   CurrentUser,
+ *   { readonly userId: string; readonly permissions: Set<string> }
+ * >() {}
+ *
+ * // Create auth middleware that provides CurrentUser
+ * const authMiddleware = Middleware.withService({
+ *   name: 'auth',
+ *   provides: CurrentUser,
+ *   make: (ctx) =>
+ *     Effect.gen(function* () {
+ *       const token = ctx.headers.get('authorization')
+ *       if (!token) {
+ *         return yield* Effect.fail(new UnauthorizedError())
+ *       }
+ *       const session = yield* verifyToken(token)
+ *       return {
+ *         userId: session.userId,
+ *         permissions: new Set(session.permissions),
+ *       }
+ *     }),
+ *   // Optionally add the user to the context for other middleware
+ *   transformContext: (ctx, user) => ({ ...ctx, user }),
+ * })
+ *
+ * // Use in router
+ * const router = Router.make({
+ *   user: UserProcedures,
+ * }).use(authMiddleware)
+ *
+ * // Handlers can now use CurrentUser
+ * const handlers = {
+ *   me: (ctx, input) =>
+ *     Effect.gen(function* () {
+ *       const user = yield* CurrentUser  // Provided by middleware!
+ *       return { userId: user.userId }
+ *     }),
+ * }
+ * ```
+ *
+ * @since 0.2.0
+ */
+export function serviceMiddleware<
+  CtxIn extends BaseContext,
+  CtxOut extends BaseContext,
+  S,
+  E,
+  R
+>(options: {
+  readonly name: string
+  readonly provides: Context.Tag<any, S>
+  readonly make: (ctx: CtxIn) => Effect.Effect<S, E, R>
+  readonly transformContext?: (ctx: CtxIn, service: S) => CtxOut
+}): ServiceMiddleware<CtxIn, CtxOut, S, E, R> {
+  return {
+    [ServiceMiddlewareTypeId]: ServiceMiddlewareTypeId,
+    _tag: "ServiceMiddleware",
+    name: options.name,
+    provides: options.provides,
+    make: options.make,
+    transformContext: options.transformContext,
   }
 }
 

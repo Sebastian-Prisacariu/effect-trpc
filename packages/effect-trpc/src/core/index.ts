@@ -124,6 +124,10 @@ export {
   MiddlewareContextRef,
   getMiddlewareContext,
   requireMiddlewareContext,
+  // Service-providing middleware (v0.2.0)
+  ServiceMiddlewareTypeId,
+  isServiceMiddleware,
+  serviceMiddleware,
 } from "./middleware.js"
 
 export type {
@@ -133,6 +137,9 @@ export type {
   Middleware as MiddlewareType,
   MiddlewareProvides,
   RateLimitOptions,
+  // Service-providing middleware types (v0.2.0)
+  ServiceMiddleware,
+  ServiceMiddlewareService,
 } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────

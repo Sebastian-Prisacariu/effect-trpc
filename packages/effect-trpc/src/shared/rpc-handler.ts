@@ -12,7 +12,12 @@ import type { Router, RouterRecord } from "../core/router.js"
 import { isRouter, isProceduresGroup } from "../core/router.js"
 import type { ProceduresGroup, ProcedureRecord, ProceduresService } from "../core/procedures.js"
 import { convertHandlers } from "../core/rpc-bridge.js"
-import type { Middleware } from "../core/middleware.js"
+import type { Middleware, ServiceMiddleware } from "../core/middleware.js"
+
+/**
+ * Union type for any middleware (regular or service-providing).
+ */
+type AnyMiddleware = Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -87,7 +92,7 @@ export function createRpcWebHandler<TRouter extends Router, R>(
   const processRouterEntries = (
     entries: RouterRecord,
     pathPrefix: string,
-    accumulatedMiddlewares: ReadonlyArray<Middleware<any, any, any, any>>,
+    accumulatedMiddlewares: ReadonlyArray<AnyMiddleware>,
   ): Effect.Effect<Array<Record<string, any>>, never, any> =>
     Effect.gen(function* () {
       const handlerEntries: Array<Record<string, any>> = []
@@ -95,7 +100,7 @@ export function createRpcWebHandler<TRouter extends Router, R>(
       for (const [key, entry] of Object.entries(entries)) {
         if (isRouter(entry)) {
           // Nested router - accumulate its middleware and recurse
-          const nestedMiddlewares: ReadonlyArray<Middleware<any, any, any, any>> = [
+          const nestedMiddlewares: ReadonlyArray<AnyMiddleware> = [
             ...accumulatedMiddlewares,
             ...(entry.middlewares ?? []),
           ]
@@ -131,7 +136,7 @@ export function createRpcWebHandler<TRouter extends Router, R>(
   // Recursively traverses nested routers, accumulating middleware from parent routers.
   const extractHandlersEffect = Effect.gen(function* () {
     // Start processing from the root router, including its middleware
-    const rootMiddlewares: ReadonlyArray<Middleware<any, any, any, any>> = rootRouter.middlewares ?? []
+    const rootMiddlewares: ReadonlyArray<AnyMiddleware> = rootRouter.middlewares ?? []
     const handlerEntries = yield* processRouterEntries(rootRouter.routes, "", rootMiddlewares)
 
     // Merge all handler objects immutably (Object.assign with {} target creates new object)

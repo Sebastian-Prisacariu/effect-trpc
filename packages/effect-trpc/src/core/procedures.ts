@@ -178,7 +178,7 @@ export type ProcedureRecord = Record<string, any>
  * The context type is automatically inferred from the middleware chain.
  *
  * - query/mutation: `(ctx: C, input: I) => Effect<O, E, R>`
- * - stream/chat: `(ctx: C, input: I) => Effect<AsyncIterable<O>, E, R>`
+ * - stream/chat: `(ctx: C, input: I) => Stream<O, E, R>`
  * - subscription: `SubscriptionHandler<I, O, E, R>` (context via SubscriptionContext)
  *
  * **Handler Requirements (R channel):**
@@ -213,7 +213,7 @@ export type InferHandler<P> =
     ? Type extends "subscription"
       ? SubscriptionHandler<I, A, E, any>
       : Type extends "stream" | "chat"
-        ? (ctx: Ctx, input: I) => Effect.Effect<AsyncIterable<A>, E, any>
+        ? (ctx: Ctx, input: I) => Stream.Stream<A, E, any>
         : (ctx: Ctx, input: I) => Effect.Effect<A, E, any>
     : never
 
