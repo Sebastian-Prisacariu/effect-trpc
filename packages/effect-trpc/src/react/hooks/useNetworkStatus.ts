@@ -2,7 +2,8 @@
  * @module effect-trpc/react/hooks/useNetworkStatus
  *
  * React hook for network online/offline status.
- * Handles SSR/hydration safely by deferring to useEffect.
+ * Uses useSyncExternalStore for React 18 concurrent mode safety.
+ * Handles SSR/hydration safely via getServerSnapshot.
  *
  * @since 0.2.0
  */
@@ -46,11 +47,53 @@ export interface UseNetworkStatusReturn {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get the current online status from the browser.
+ * Returns true if navigator.onLine is not available (SSR/Node.js).
+ */
+const getOnlineStatus = (): boolean => {
+  if (typeof navigator !== "undefined" && typeof navigator.onLine === "boolean") {
+    return navigator.onLine
+  }
+  return true
+}
+
+/**
+ * Subscribe to online/offline events.
+ * Returns a cleanup function.
+ */
+const subscribeToNetworkStatus = (callback: () => void): (() => void) => {
+  if (typeof window === "undefined") {
+    return () => {}
+  }
+
+  window.addEventListener("online", callback)
+  window.addEventListener("offline", callback)
+
+  return () => {
+    window.removeEventListener("online", callback)
+    window.removeEventListener("offline", callback)
+  }
+}
+
+/**
+ * Server snapshot - always online during SSR.
+ */
+const getServerSnapshot = (): boolean => true
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Hook Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Hook to track network online/offline status.
+ *
+ * Uses `useSyncExternalStore` for React 18 concurrent mode safety.
+ * This ensures consistent reads during concurrent renders and proper
+ * integration with React's scheduling.
  *
  * **SSR/Hydration Safety:**
  * - During SSR: Returns `isOnline: true, isHydrated: false`
@@ -76,54 +119,55 @@ export interface UseNetworkStatusReturn {
  * @category hooks
  */
 export function useNetworkStatus(): UseNetworkStatusReturn {
-  // Start with server-safe values to avoid hydration mismatch
-  const [isOnline, setIsOnline] = React.useState(true)
-  const [isHydrated, setIsHydrated] = React.useState(false)
-  const [lastOnlineAt, setLastOnlineAt] = React.useState<number | null>(null)
-  const [lastOfflineAt, setLastOfflineAt] = React.useState<number | null>(null)
+  // Use useSyncExternalStore for concurrent mode safety
+  const isOnline = React.useSyncExternalStore(
+    subscribeToNetworkStatus,
+    getOnlineStatus,
+    getServerSnapshot,
+  )
 
+  // Track hydration state
+  const [isHydrated, setIsHydrated] = React.useState(false)
+
+  // Track timestamps in separate state (these don't need sync external store)
+  const [timestamps, setTimestamps] = React.useState<{
+    lastOnlineAt: number | null
+    lastOfflineAt: number | null
+  }>({
+    lastOnlineAt: null,
+    lastOfflineAt: null,
+  })
+
+  // Set hydrated and initial timestamps after mount
   React.useEffect(() => {
-    // Now on client - get real value
-    // Note: In Node.js, navigator exists but navigator.onLine is undefined
-    const currentOnline =
-      typeof navigator !== "undefined" && typeof navigator.onLine === "boolean"
-        ? navigator.onLine
-        : true
-    setIsOnline(currentOnline)
     setIsHydrated(true)
 
-    if (currentOnline) {
-      setLastOnlineAt(Date.now())
+    // Set initial timestamp based on current status
+    if (isOnline) {
+      setTimestamps((prev) => ({ ...prev, lastOnlineAt: Date.now() }))
     } else {
-      setLastOfflineAt(Date.now())
+      setTimestamps((prev) => ({ ...prev, lastOfflineAt: Date.now() }))
     }
+  }, []) // Only on mount
 
-    // Subscribe to changes (only in browser environment)
-    if (typeof window === "undefined") return
-
-    const handleOnline = () => {
-      setIsOnline(true)
-      setLastOnlineAt(Date.now())
+  // Update timestamps when online status changes
+  const prevIsOnlineRef = React.useRef(isOnline)
+  React.useEffect(() => {
+    // Only update if status actually changed (not on initial render)
+    if (prevIsOnlineRef.current !== isOnline) {
+      if (isOnline) {
+        setTimestamps((prev) => ({ ...prev, lastOnlineAt: Date.now() }))
+      } else {
+        setTimestamps((prev) => ({ ...prev, lastOfflineAt: Date.now() }))
+      }
+      prevIsOnlineRef.current = isOnline
     }
-
-    const handleOffline = () => {
-      setIsOnline(false)
-      setLastOfflineAt(Date.now())
-    }
-
-    window.addEventListener("online", handleOnline)
-    window.addEventListener("offline", handleOffline)
-
-    return () => {
-      window.removeEventListener("online", handleOnline)
-      window.removeEventListener("offline", handleOffline)
-    }
-  }, [])
+  }, [isOnline])
 
   return {
     isOnline,
     isHydrated,
-    lastOnlineAt,
-    lastOfflineAt,
+    lastOnlineAt: timestamps.lastOnlineAt,
+    lastOfflineAt: timestamps.lastOfflineAt,
   }
 }

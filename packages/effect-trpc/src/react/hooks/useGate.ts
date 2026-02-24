@@ -25,18 +25,25 @@ import { Gate } from "../../core/gate/index.js"
 export interface UseGateReturn {
   /**
    * Whether the gate is currently open.
+   * During SSR and before hydration, this is always `true`.
    */
   readonly isOpen: boolean
 
   /**
+   * Whether the hook has hydrated with the real gate state.
+   * Use this to conditionally render based on actual gate status.
+   */
+  readonly isHydrated: boolean
+
+  /**
    * Timestamp of when the gate was last opened (ms since epoch).
-   * Null if never opened.
+   * Null if never opened or during SSR.
    */
   readonly openedAt: number | null
 
   /**
    * Timestamp of when the gate was last closed (ms since epoch).
-   * Null if never closed.
+   * Null if never closed or during SSR.
    */
   readonly closedAt: number | null
 }
@@ -48,14 +55,21 @@ export interface UseGateReturn {
 /**
  * Hook to observe a Gate's open/closed state.
  *
+ * **SSR/Hydration Safety:**
+ * - During SSR: Returns `isOpen: true, isHydrated: false`
+ * - After hydration: Returns actual gate state, `isHydrated: true`
+ *
+ * This prevents hydration mismatches while still providing accurate
+ * gate status after the component mounts.
+ *
  * @example
  * ```tsx
  * function AuthGuard({ children, authGate }) {
- *   const { isOpen } = useGate(authGate)
+ *   const { isOpen, isHydrated } = useGate(authGate)
  *
- *   if (!isOpen) {
- *     return <LoginPrompt />
- *   }
+ *   // Don't block until we know the real state
+ *   if (!isHydrated) return <LoadingSpinner />
+ *   if (!isOpen) return <LoginPrompt />
  *
  *   return children
  * }
@@ -66,31 +80,35 @@ export interface UseGateReturn {
  * @category hooks
  */
 export function useGate(gate: GateInstance): UseGateReturn {
-  // Get initial state from the gate's SubscriptionRef
-  // SubscriptionRef.get is a synchronous read, safe to run with Effect.runSync
-  const [state, setState] = React.useState(() => {
-    try {
-      const currentState = Effect.runSync(SubscriptionRef.get(gate.state))
-      return {
-        isOpen: currentState.isOpen,
-        openedAt: currentState.openedAt,
-        closedAt: currentState.closedAt,
-      }
-    } catch {
-      // Fallback if runSync fails (shouldn't happen for sync operations)
-      return {
-        isOpen: true,
-        openedAt: null,
-        closedAt: null,
-      }
-    }
+  // Start with SSR-safe defaults to avoid hydration mismatch
+  const [state, setState] = React.useState<UseGateReturn>({
+    isOpen: true, // Default during SSR
+    isHydrated: false,
+    openedAt: null,
+    closedAt: null,
   })
 
+  // Sync with actual gate state after mount
   React.useEffect(() => {
+    // Read current gate state
+    try {
+      const currentState = Effect.runSync(SubscriptionRef.get(gate.state))
+      setState({
+        isOpen: currentState.isOpen,
+        isHydrated: true,
+        openedAt: currentState.openedAt,
+        closedAt: currentState.closedAt,
+      })
+    } catch {
+      // Fallback if runSync fails
+      setState((prev) => ({ ...prev, isHydrated: true }))
+    }
+
     // Subscribe to gate changes
     const cleanup = Gate.subscribe(gate, (open) => {
       setState((prev) => ({
         isOpen: open,
+        isHydrated: true,
         openedAt: open ? Date.now() : prev.openedAt,
         closedAt: open ? prev.closedAt : Date.now(),
       }))

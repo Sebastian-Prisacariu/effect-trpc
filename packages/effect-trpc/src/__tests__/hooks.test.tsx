@@ -154,9 +154,19 @@ describe("useNetworkStatus", () => {
   const originalNavigator = global.navigator
   const originalWindow = global.window
 
+  // Track mocked online state
+  let mockOnlineState = true
+
   beforeEach(() => {
     // Reset mocks
     vi.restoreAllMocks()
+    mockOnlineState = true
+
+    // Mock navigator.onLine to be controllable
+    Object.defineProperty(navigator, "onLine", {
+      get: () => mockOnlineState,
+      configurable: true,
+    })
   })
 
   afterEach(() => {
@@ -170,6 +180,18 @@ describe("useNetworkStatus", () => {
       writable: true,
     })
   })
+
+  // Helper to simulate going offline
+  const goOffline = () => {
+    mockOnlineState = false
+    window.dispatchEvent(new Event("offline"))
+  }
+
+  // Helper to simulate going online
+  const goOnline = () => {
+    mockOnlineState = true
+    window.dispatchEvent(new Event("online"))
+  }
 
   it("starts with server-safe values (isOnline: true, isHydrated: false)", () => {
     const { result } = renderHook(() => useNetworkStatus())
@@ -220,7 +242,7 @@ describe("useNetworkStatus", () => {
 
     // Simulate offline then online
     await act(async () => {
-      window.dispatchEvent(new Event("offline"))
+      goOffline()
     })
 
     await waitFor(() => {
@@ -228,7 +250,7 @@ describe("useNetworkStatus", () => {
     })
 
     await act(async () => {
-      window.dispatchEvent(new Event("online"))
+      goOnline()
     })
 
     await waitFor(() => {
@@ -246,7 +268,7 @@ describe("useNetworkStatus", () => {
     const beforeOffline = Date.now()
 
     await act(async () => {
-      window.dispatchEvent(new Event("offline"))
+      goOffline()
     })
 
     await waitFor(() => {

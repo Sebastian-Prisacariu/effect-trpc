@@ -40,10 +40,8 @@ import * as Layer from "effect/Layer"
 import * as Stream from "effect/Stream"
 import * as SubscriptionRef from "effect/SubscriptionRef"
 import * as Scope from "effect/Scope"
-import * as Fiber from "effect/Fiber"
 
 import { Gate, type GateInstance } from "../gate/index.js"
-import { NetworkOfflineError } from "./errors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -110,12 +108,19 @@ export interface NetworkService {
   // Gating
   // ─────────────────────────────────────────────────────────────────────────
 
-  /** Run effect when online (waits if offline) */
+  /**
+   * Run effect when online (waits if offline).
+   * The effect will block until the network is online, then execute.
+   * This never fails with a network error - it waits instead.
+   */
   readonly whenOnline: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | NetworkOfflineError, R>
+  ) => Effect.Effect<A, E, R>
 
-  /** Run effect when offline (waits if online) */
+  /**
+   * Run effect when offline (waits if online).
+   * The effect will block until the network goes offline, then execute.
+   */
   readonly whenOffline: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -245,9 +250,11 @@ const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Ef
         Stream.changes,
       ),
 
-      // Note: Type assertion is safe because gate uses closedBehavior: "wait",
-      // so GateClosedError is never thrown. The gate waits, never fails.
-      whenOnline: (effect) => Gate.whenOpen(gate, effect) as any,
+      // Type assertion: Gate.whenOpen returns E | GateClosedError, but since
+      // we use closedBehavior: "wait", GateClosedError is never thrown.
+      // The gate waits until open, never fails.
+      whenOnline: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        Gate.whenOpen(gate, effect) as Effect.Effect<A, E, R>,
 
       whenOffline: (effect) =>
         Effect.gen(function* () {
@@ -300,9 +307,12 @@ const makeAlwaysOnline: Effect.Effect<NetworkService, never, Scope.Scope> = Effe
 
       changes: Stream.empty,
 
-      whenOnline: (effect) => effect as any,
+      // AlwaysOnline: effect runs immediately since we're always "online"
+      whenOnline: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
 
-      whenOffline: () => Effect.never as any,
+      // AlwaysOnline: never goes offline, so this effect never runs
+      whenOffline: <A, E, R>(_effect: Effect.Effect<A, E, R>) =>
+        Effect.never as Effect.Effect<A, E, R>,
 
       gate,
 
@@ -376,7 +386,7 @@ export const awaitOffline: Effect.Effect<void, never, Network> = Effect.flatMap(
  */
 export const whenOnline = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | NetworkOfflineError, R | Network> =>
+): Effect.Effect<A, E, R | Network> =>
   Effect.flatMap(Network, (n) => n.whenOnline(effect))
 
 /**

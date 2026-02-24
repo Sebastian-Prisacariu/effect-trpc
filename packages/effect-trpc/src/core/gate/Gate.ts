@@ -195,59 +195,94 @@ export const makeUnscoped = (
  * Open a gate, allowing effects to pass through.
  * If already open, this is a no-op.
  *
+ * Uses atomic state modification to prevent race conditions when
+ * multiple fibers call open() concurrently.
+ *
  * @since 0.2.0
  * @category control
  */
 export const open = (gate: Gate): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(gate.state)
-    if (current.isOpen) return
-
-    // Release the permit (unblocks waiters)
-    yield* gate.semaphore.release(1)
-
-    yield* SubscriptionRef.set(gate.state, {
-      isOpen: true,
-      closedAt: current.closedAt,
-      openedAt: Date.now(),
+    // Atomically check and update state to prevent race conditions
+    const wasAlreadyOpen = yield* SubscriptionRef.modify(gate.state, (current) => {
+      if (current.isOpen) {
+        return [true, current] // Already open, return current state unchanged
+      }
+      return [
+        false,
+        {
+          isOpen: true,
+          closedAt: current.closedAt,
+          openedAt: Date.now(),
+        },
+      ]
     })
+
+    // Only release permit if we actually transitioned from closed to open
+    if (!wasAlreadyOpen) {
+      yield* gate.semaphore.release(1)
+    }
   })
 
 /**
  * Close a gate, blocking or failing effects that try to pass through.
  * If already closed, this is a no-op.
  *
+ * Uses atomic state modification to prevent race conditions when
+ * multiple fibers call close() concurrently.
+ *
  * @since 0.2.0
  * @category control
  */
 export const close = (gate: Gate): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(gate.state)
-    if (!current.isOpen) return
-
-    // Take the permit (blocks future whenOpen calls)
-    yield* gate.semaphore.take(1)
-
-    yield* SubscriptionRef.set(gate.state, {
-      isOpen: false,
-      closedAt: Date.now(),
-      openedAt: current.openedAt,
+    // Atomically check and update state to prevent race conditions
+    const wasAlreadyClosed = yield* SubscriptionRef.modify(gate.state, (current) => {
+      if (!current.isOpen) {
+        return [true, current] // Already closed, return current state unchanged
+      }
+      return [
+        false,
+        {
+          isOpen: false,
+          closedAt: Date.now(),
+          openedAt: current.openedAt,
+        },
+      ]
     })
+
+    // Only take permit if we actually transitioned from open to closed
+    if (!wasAlreadyClosed) {
+      yield* gate.semaphore.take(1)
+    }
   })
 
 /**
  * Toggle a gate's state (open -> closed, closed -> open).
+ *
+ * Uses atomic state modification to prevent race conditions when
+ * multiple fibers call toggle() concurrently.
  *
  * @since 0.2.0
  * @category control
  */
 export const toggle = (gate: Gate): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(gate.state)
-    if (current.isOpen) {
-      yield* close(gate)
+    // Atomically toggle state to prevent race conditions
+    const wasOpen = yield* SubscriptionRef.modify(gate.state, (current) => {
+      const newState = {
+        isOpen: !current.isOpen,
+        closedAt: current.isOpen ? Date.now() : current.closedAt,
+        openedAt: current.isOpen ? current.openedAt : Date.now(),
+      }
+      return [current.isOpen, newState]
+    })
+
+    // Modify semaphore based on the transition
+    if (wasOpen) {
+      yield* gate.semaphore.take(1)
     } else {
-      yield* open(gate)
+      yield* gate.semaphore.release(1)
     }
   })
 
@@ -260,8 +295,14 @@ export const toggle = (gate: Gate): Effect.Effect<void> =>
  *
  * Behavior when closed depends on the gate's `closedBehavior`:
  * - `'wait'`: Block until the gate opens, then run the effect
- * - `'fail'`: Immediately fail with GateClosedError
- * - `'queue'`: Same as wait (queue integration handled separately)
+ * - `'fail'`: Immediately fail with GateClosedError (best-effort, see note)
+ * - `'queue'`: Same as wait (queue integration reserved for v2)
+ *
+ * **Note on 'fail' behavior:** There is a small race window between checking
+ * the gate state and acquiring the semaphore permit. If the gate closes during
+ * this window, the effect will wait rather than fail. For most use cases this
+ * is acceptable. If you need guaranteed fail semantics, check `isOpen` before
+ * calling `whenOpen`.
  *
  * @since 0.2.0
  * @category usage
@@ -274,9 +315,12 @@ export const whenOpen = <A, E, R>(
     case "wait":
     case "queue":
       // Semaphore handles waiting automatically via withPermits(1)
+      // Note: "queue" is reserved for future offline queue integration (v2)
       return gate.semaphore.withPermits(1)(effect)
 
     case "fail":
+      // Best-effort fail: check state first, then acquire permit
+      // Small race window exists - see JSDoc note above
       return Effect.gen(function* () {
         const state = yield* SubscriptionRef.get(gate.state)
         if (!state.isOpen) {

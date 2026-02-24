@@ -267,10 +267,10 @@ describe("Gate Edge Cases", () => {
       )
 
       // All subscribers should see the same changes
-      // Note: Stream includes initial state, so we see true -> false -> true
-      expect(result.changes1).toEqual([true, false, true])
-      expect(result.changes2).toEqual([true, false, true])
-      expect(result.changes3).toEqual([true, false, true])
+      // Note: subscribe() only emits on changes, not initial state
+      expect(result.changes1).toEqual([false, true])
+      expect(result.changes2).toEqual([false, true])
+      expect(result.changes3).toEqual([false, true])
     })
 
     it("unsubscribing one does not affect others", async () => {
@@ -302,9 +302,9 @@ describe("Gate Edge Cases", () => {
         ),
       )
 
-      // Note: Stream includes initial state
-      expect(result.changes1).toEqual([true, false])
-      expect(result.changes2).toEqual([true, false, true])
+      // Note: subscribe() only emits on changes, not initial state
+      expect(result.changes1).toEqual([false])
+      expect(result.changes2).toEqual([false, true])
     })
   })
 
