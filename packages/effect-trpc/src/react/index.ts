@@ -73,7 +73,13 @@
  * }
  * ```
  */
-export { Result, type QueryResult, type MutationResult } from "./result.js"
+export {
+  Result,
+  toQueryResult,
+  toMutationResult,
+  type QueryResult,
+  type MutationResult,
+} from "./result.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client creation and hooks

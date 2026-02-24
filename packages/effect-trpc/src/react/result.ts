@@ -1,7 +1,8 @@
 /**
  * @module effect-trpc/react/result
  *
- * Re-exports effect-atom's Result module for pattern matching async state.
+ * Re-exports effect-atom's Result module for pattern matching async state,
+ * plus helper functions for converting to tRPC-compatible result formats.
  *
  * The Result type represents the state of an async operation (query, mutation, etc.)
  * and provides a powerful builder API for rendering different states.
@@ -27,7 +28,12 @@
  * @since 0.1.0
  */
 
-import { Result } from "@effect-atom/atom"
+import { Result as AtomResult } from "@effect-atom/atom"
+import * as Option from "effect/Option"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-export effect-atom's Result namespace
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Re-export effect-atom's Result namespace.
@@ -51,7 +57,76 @@ import { Result } from "@effect-atom/atom"
  *
  * @since 0.1.0
  */
-export { Result }
+export { AtomResult as Result }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversion utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Convert an effect-atom Result to a tRPC-compatible QueryResult.
+ *
+ * @example
+ * ```typescript
+ * import { toQueryResult, Result } from 'effect-trpc/react'
+ *
+ * const result = Result.success({ name: "Alice" })
+ * const qr = toQueryResult(result)
+ *
+ * console.log(qr.data)      // { name: "Alice" }
+ * console.log(qr.isSuccess) // true
+ * console.log(qr.isLoading) // false
+ * ```
+ *
+ * @since 0.2.0
+ */
+export const toQueryResult = <A, E>(result: AtomResult.Result<A, E>): QueryResult<A, E> => {
+  const dataOption = AtomResult.value(result)
+  const errorOption = AtomResult.error(result)
+  const hasData = AtomResult.isSuccess(result)
+  const isWaiting = result.waiting || AtomResult.isInitial(result)
+
+  return {
+    data: Option.isSome(dataOption) ? dataOption.value : undefined,
+    error: Option.isSome(errorOption) ? errorOption.value : undefined,
+    isLoading: !hasData && isWaiting,
+    isError: AtomResult.isFailure(result),
+    isSuccess: AtomResult.isSuccess(result) && !result.waiting,
+    isRefetching: hasData && result.waiting,
+    result,
+  }
+}
+
+/**
+ * Convert an effect-atom Result to a tRPC-compatible MutationResult.
+ *
+ * @example
+ * ```typescript
+ * import { toMutationResult, Result } from 'effect-trpc/react'
+ *
+ * const result = Result.initial()
+ * const mr = toMutationResult(result)
+ *
+ * console.log(mr.isIdle)    // true
+ * console.log(mr.isPending) // false
+ * ```
+ *
+ * @since 0.2.0
+ */
+export const toMutationResult = <A, E>(result: AtomResult.Result<A, E>): MutationResult<A, E> => {
+  const dataOption = AtomResult.value(result)
+  const errorOption = AtomResult.error(result)
+
+  return {
+    data: Option.isSome(dataOption) ? dataOption.value : undefined,
+    error: Option.isSome(errorOption) ? errorOption.value : undefined,
+    isPending: result.waiting,
+    isError: AtomResult.isFailure(result),
+    isSuccess: AtomResult.isSuccess(result) && !result.waiting,
+    isIdle: AtomResult.isInitial(result) && !result.waiting,
+    result,
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tRPC-compatible helper interfaces
@@ -101,7 +176,7 @@ export interface QueryResult<A, E = unknown> {
    */
   readonly isRefetching: boolean
   /** The raw effect-atom Result for builder pattern */
-  readonly result: Result.Result<A, E>
+  readonly result: AtomResult.Result<A, E>
 }
 
 /**
@@ -140,5 +215,5 @@ export interface MutationResult<A, E = unknown> {
   /** True if mutation hasn't been called yet */
   readonly isIdle: boolean
   /** The raw effect-atom Result for builder pattern */
-  readonly result: Result.Result<A, E>
+  readonly result: AtomResult.Result<A, E>
 }

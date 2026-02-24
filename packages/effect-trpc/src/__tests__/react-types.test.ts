@@ -2,84 +2,70 @@
  * @module effect-trpc/tests/react-types
  *
  * Type system tests for React hooks.
+ * Tests use effect-atom's Result types and our custom converters.
  */
 
 import { describe, it, expect, expectTypeOf } from "vitest"
 import type * as Effect from "effect/Effect"
 import type * as Exit from "effect/Exit"
 import {
-  type Result,
-  type Initial,
-  type Loading,
-  type Success,
-  type Failure,
+  Result,
+  toQueryResult,
+  toMutationResult,
   type QueryResult,
   type MutationResult,
   type UseQueryReturn,
   type UseMutationReturn,
   type UseStreamReturn,
   type UseChatReturn,
-  initial,
-  loading,
-  success,
-  failure,
-  isInitial,
-  isLoading,
-  isSuccess,
-  isFailure,
-  getValue,
-  getOrElse,
-  match,
-  toQueryResult,
-  toMutationResult,
 } from "../react/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Result Type Tests
+// Result Type Tests (using effect-atom's Result)
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Result type", () => {
   it("initial has correct type", () => {
-    const result = initial
+    const result = Result.initial()
 
-    expectTypeOf(result).toMatchTypeOf<Initial>()
-    expectTypeOf(result._tag).toEqualTypeOf<"Initial">()
+    expect(Result.isInitial(result)).toBe(true)
+    expectTypeOf(result).toMatchTypeOf<Result.Initial<never, never>>()
   })
 
-  it("loading has correct type", () => {
-    const result = loading<string>()
+  it("initial with waiting has correct type", () => {
+    const result = Result.initial(true)
 
-    expectTypeOf(result).toMatchTypeOf<Loading<string>>()
-    expectTypeOf(result._tag).toEqualTypeOf<"Loading">()
-  })
-
-  it("loading preserves previous value type", () => {
-    const result = loading<number>(42)
-
-    expectTypeOf(result.previous).toEqualTypeOf<number | undefined>()
+    expect(Result.isInitial(result)).toBe(true)
+    expect(result.waiting).toBe(true)
   })
 
   it("success has correct type", () => {
-    const result = success({ id: "1", name: "Alice" })
+    const result = Result.success({ id: "1", name: "Alice" })
 
-    expectTypeOf(result).toMatchTypeOf<Success<{ id: string; name: string }>>()
+    expect(Result.isSuccess(result)).toBe(true)
+    expectTypeOf(result).toMatchTypeOf<Result.Success<{ id: string; name: string }, never>>()
     expectTypeOf(result.value).toMatchTypeOf<{ id: string; name: string }>()
-    expectTypeOf(result.isRefetching).toEqualTypeOf<boolean>()
+  })
+
+  it("success with waiting has correct type (refetching)", () => {
+    const result = Result.success("data", { waiting: true })
+
+    expect(Result.isSuccess(result)).toBe(true)
+    expect(result.waiting).toBe(true)
   })
 
   it("failure has correct type", () => {
-    const result = failure<string, Error>(new Error("test"))
+    const result = Result.fail<Error, string>(new Error("test"))
 
-    expectTypeOf(result).toMatchTypeOf<Failure<string, Error>>()
-    expectTypeOf(result.error).toEqualTypeOf<Error>()
-    expectTypeOf(result.previous).toEqualTypeOf<string | undefined>()
+    expect(Result.isFailure(result)).toBe(true)
+    expectTypeOf(result).toMatchTypeOf<Result.Failure<string, Error>>()
   })
 
   it("Result union includes all states", () => {
-    type TestResult = Result<string, Error>
+    type TestResult = Result.Result<string, Error>
 
     expectTypeOf<TestResult>().toMatchTypeOf<
-      Initial | Loading<string> | Success<string> | Failure<string, Error>
+      Result.Initial<string, Error> | Result.Success<string, Error> | Result.Failure<string, Error>
     >()
   })
 })
@@ -90,37 +76,40 @@ describe("Result type", () => {
 
 describe("Result guards", () => {
   it("isInitial narrows type", () => {
-    const result: Result<string, Error> = initial
+    const result: Result.Result<string, Error> = Result.initial()
 
-    if (isInitial(result)) {
-      expectTypeOf(result).toMatchTypeOf<Initial>()
-    }
-  })
-
-  it("isLoading narrows type", () => {
-    const result: Result<string, Error> = loading()
-
-    if (isLoading(result)) {
-      expectTypeOf(result).toMatchTypeOf<Loading<string>>()
+    if (Result.isInitial(result)) {
+      expectTypeOf(result).toMatchTypeOf<Result.Initial<string, Error>>()
     }
   })
 
   it("isSuccess narrows type", () => {
-    const result: Result<string, Error> = success("hello")
+    const result: Result.Result<string, Error> = Result.success("hello")
 
-    if (isSuccess(result)) {
-      expectTypeOf(result).toMatchTypeOf<Success<string>>()
+    if (Result.isSuccess(result)) {
+      expectTypeOf(result).toMatchTypeOf<Result.Success<string, Error>>()
       expectTypeOf(result.value).toEqualTypeOf<string>()
     }
   })
 
   it("isFailure narrows type", () => {
-    const result: Result<string, Error> = failure(new Error("test"))
+    const result: Result.Result<string, Error> = Result.fail(new Error("test"))
 
-    if (isFailure(result)) {
-      expectTypeOf(result).toMatchTypeOf<Failure<string, Error>>()
-      expectTypeOf(result.error).toEqualTypeOf<Error>()
+    if (Result.isFailure(result)) {
+      expectTypeOf(result).toMatchTypeOf<Result.Failure<string, Error>>()
     }
+  })
+
+  it("isWaiting checks waiting flag", () => {
+    const initial = Result.initial()
+    const initialWaiting = Result.initial(true)
+    const success = Result.success("x")
+    const successWaiting = Result.success("x", { waiting: true })
+
+    expect(Result.isWaiting(initial)).toBe(false)
+    expect(Result.isWaiting(initialWaiting)).toBe(true)
+    expect(Result.isWaiting(success)).toBe(false)
+    expect(Result.isWaiting(successWaiting)).toBe(true)
   })
 })
 
@@ -129,18 +118,32 @@ describe("Result guards", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Result accessors", () => {
-  it("getValue returns value or undefined", () => {
-    const result: Result<number, Error> = success(42)
-    const value = getValue(result)
+  it("value returns Option with data", () => {
+    const result: Result.Result<number, Error> = Result.success(42)
+    const valueOption = Result.value(result)
 
-    expectTypeOf(value).toEqualTypeOf<number | undefined>()
+    expect(valueOption._tag).toBe("Some")
+    if (valueOption._tag === "Some") {
+      expect(valueOption.value).toBe(42)
+    }
   })
 
-  it("getOrElse returns value type", () => {
-    const result: Result<number, Error> = initial
-    const value = getOrElse(result, () => 0)
+  it("getOrElse returns value or fallback", () => {
+    const success: Result.Result<number, Error> = Result.success(42)
+    const initial: Result.Result<number, Error> = Result.initial()
 
-    expectTypeOf(value).toEqualTypeOf<number>()
+    expect(Result.getOrElse(success, () => 0)).toBe(42)
+    expect(Result.getOrElse(initial, () => 0)).toBe(0)
+  })
+
+  it("error returns Option with error", () => {
+    const failure = Result.fail<string>("my-error")
+    const errorOption = Result.error(failure)
+
+    expect(errorOption._tag).toBe("Some")
+    if (errorOption._tag === "Some") {
+      expect(errorOption.value).toBe("my-error")
+    }
   })
 })
 
@@ -150,27 +153,27 @@ describe("Result accessors", () => {
 
 describe("Result pattern matching", () => {
   it("match returns correct type", () => {
-    const result: Result<number, string> = success(42)
+    const result: Result.Result<number, string> = Result.success(42)
 
-    const output = match<number, string, string>(result, {
+    const output = Result.match(result, {
       onInitial: () => "initial",
-      onLoading: () => "loading",
-      onSuccess: (value) => {
-        // Verify value type by assignment
-        const _v: number = value
-        void _v
-        return "success"
-      },
-      onFailure: (error) => {
-        // Verify error type by assignment
-        const _e: string = error
-        void _e
-        return "failure"
-      },
+      onSuccess: (s) => `success: ${s.value}`,
+      onFailure: () => "failure",
     })
 
-    // Runtime check that pattern matching works
-    expect(output).toBe("success")
+    expect(output).toBe("success: 42")
+  })
+
+  it("builder pattern works correctly", () => {
+    const result = Result.success("data")
+
+    const output = Result.builder(result)
+      .onInitial(() => "initial")
+      .onSuccess((value: string) => `got: ${value}`)
+      .onError(() => "error")
+      .orNull()
+
+    expect(output).toBe("got: data")
   })
 })
 
@@ -180,8 +183,8 @@ describe("Result pattern matching", () => {
 
 describe("QueryResult type", () => {
   it("toQueryResult has correct shape", () => {
-    const result: Result<string, Error> = success("hello")
-    const queryResult: QueryResult<string, Error> = toQueryResult(result)
+    const result: Result.Result<string, Error> = Result.success("hello")
+    const queryResult = toQueryResult(result)
 
     // Runtime checks that the types are correct
     expect(typeof queryResult.isLoading).toBe("boolean")
@@ -194,12 +197,31 @@ describe("QueryResult type", () => {
     expectTypeOf(queryResult).toHaveProperty("error")
     expectTypeOf(queryResult).toHaveProperty("result")
   })
+
+  it("toQueryResult converts success correctly", () => {
+    const result = Result.success("hello")
+    const qr = toQueryResult(result)
+
+    expect(qr.data).toBe("hello")
+    expect(qr.isSuccess).toBe(true)
+    expect(qr.isLoading).toBe(false)
+    expect(qr.isRefetching).toBe(false)
+  })
+
+  it("toQueryResult converts refetching correctly", () => {
+    const result = Result.success("hello", { waiting: true })
+    const qr = toQueryResult(result)
+
+    expect(qr.data).toBe("hello")
+    expect(qr.isRefetching).toBe(true)
+    expect(qr.isLoading).toBe(false)
+  })
 })
 
 describe("MutationResult type", () => {
   it("toMutationResult has correct shape", () => {
-    const result: Result<number, string> = initial
-    const mutationResult: MutationResult<number, string> = toMutationResult(result)
+    const result: Result.Result<number, string> = Result.initial()
+    const mutationResult = toMutationResult(result)
 
     // Runtime checks that the types are correct
     expect(typeof mutationResult.isPending).toBe("boolean")
@@ -211,6 +233,22 @@ describe("MutationResult type", () => {
     expectTypeOf(mutationResult).toHaveProperty("data")
     expectTypeOf(mutationResult).toHaveProperty("error")
     expectTypeOf(mutationResult).toHaveProperty("result")
+  })
+
+  it("toMutationResult converts idle correctly", () => {
+    const result = Result.initial()
+    const mr = toMutationResult(result)
+
+    expect(mr.isIdle).toBe(true)
+    expect(mr.isPending).toBe(false)
+  })
+
+  it("toMutationResult converts pending correctly", () => {
+    const result = Result.initial(true)
+    const mr = toMutationResult(result)
+
+    expect(mr.isIdle).toBe(false)
+    expect(mr.isPending).toBe(true)
   })
 })
 
