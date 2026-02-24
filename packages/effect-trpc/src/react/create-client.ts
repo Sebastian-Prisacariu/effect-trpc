@@ -135,6 +135,13 @@ export interface UseQueryOptions<A> {
   /**
    * How long unused/inactive cache data remains in memory (ms).
    * After this time, unmounted queries are garbage collected.
+   *
+   * **Important:** In v1, gcTime is a GLOBAL setting only. Set it via
+   * `defaultQueryOptions.gcTime` in `createTRPCReact()`. Per-query
+   * gcTime values passed here are ignored - the global value is used.
+   *
+   * Uses effect-atom's `defaultIdleTTL` under the hood.
+   *
    * @default 300_000 (5 minutes)
    */
   readonly gcTime?: number
@@ -701,6 +708,13 @@ export function createTRPCReact<TRouter extends Router>(
   const runFork = <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) =>
     managedRuntime.runFork(effect)
 
+  // Default gcTime (5 minutes) - matches TanStack Query
+  const DEFAULT_GC_TIME = 5 * 60 * 1000
+
+  // Get global gcTime from defaultQueryOptions
+  // This sets how long unused/inactive query data stays in memory
+  const globalGcTime = defaultQueryOptions.gcTime ?? DEFAULT_GC_TIME
+
   // Provider wraps with effect-atom RegistryProvider and manages runtime lifecycle
   const Provider = ({ children }: TRPCProviderProps) => {
     React.useEffect(() => {
@@ -725,7 +739,8 @@ export function createTRPCReact<TRouter extends Router>(
     }, [])
 
     // Wrap with RegistryProvider for effect-atom state management
-    return React.createElement(RegistryProvider, {}, children)
+    // Pass defaultIdleTTL from global gcTime option
+    return React.createElement(RegistryProvider, { defaultIdleTTL: globalGcTime }, children)
   }
 
   // Invalidation utilities hook (uses effect-atom registry)

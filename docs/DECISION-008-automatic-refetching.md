@@ -94,7 +94,12 @@ export interface UseQueryOptions<A> {
   /** 
    * How long unused/inactive cache data remains in memory (ms).
    * After this time, unmounted queries are garbage collected.
-   * Uses effect-atom's `setIdleTTL` under the hood.
+   * Uses effect-atom's `defaultIdleTTL` under the hood.
+   * 
+   * **Note:** In v1, gcTime is a GLOBAL setting. Set it via `defaultQueryOptions.gcTime`
+   * in `createTRPCReact()`. Per-query gcTime values are ignored - they would require
+   * creating separate atoms per gcTime value, which breaks query deduplication.
+   * 
    * @default 300_000 (5 minutes)
    */
   readonly gcTime?: number
@@ -532,8 +537,18 @@ Match TanStack Query for familiarity:
 - [ ] Export preset configs (`queryPresets`)
 
 ### Phase 5: GC Time
-- [ ] Wire `gcTime` to effect-atom's `setIdleTTL`
+- [x] Wire `gcTime` to effect-atom's `defaultIdleTTL` (global setting only)
 - [ ] Add tests for atom disposal
+
+**Note on gcTime implementation:** effect-atom's `setIdleTTL` must be applied at atom creation
+time inside the family function. Since our `queryAtomFamily` caches atoms by key, supporting
+per-query gcTime would require either:
+1. Including gcTime in the key (breaks deduplication for same query with different gcTime)
+2. A custom caching layer with "first gcTime wins" semantics
+
+For v1, we use the simpler approach: `gcTime` is set globally via `defaultQueryOptions.gcTime`,
+which is passed to `RegistryProvider.defaultIdleTTL`. Query atoms no longer use `Atom.keepAlive`,
+so they respect the registry's TTL setting.
 
 ---
 
