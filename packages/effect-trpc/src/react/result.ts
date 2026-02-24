@@ -83,13 +83,22 @@ export interface QueryResult<A, E = unknown> {
   readonly data: A | undefined
   /** The error if query failed */
   readonly error: E | undefined
-  /** True if query is loading (initial or refetching) */
+  /**
+   * True only when loading with NO data (first load).
+   * False once we have data, even if refetching.
+   * @remarks
+   * This matches TanStack Query semantics where isLoading means
+   * "loading AND no cached data". Use isFetching for any loading state.
+   */
   readonly isLoading: boolean
   /** True if query failed */
   readonly isError: boolean
   /** True if query succeeded */
   readonly isSuccess: boolean
-  /** True if query succeeded and is refetching in background */
+  /**
+   * True when we have cached data AND are fetching fresh data.
+   * Useful for showing subtle loading indicators without hiding content.
+   */
   readonly isRefetching: boolean
   /** The raw effect-atom Result for builder pattern */
   readonly result: Result.Result<A, E>

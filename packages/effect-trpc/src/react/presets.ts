@@ -1,0 +1,143 @@
+/**
+ * @module effect-trpc/react/presets
+ *
+ * Query presets and helper functions for common data freshness patterns.
+ *
+ * @since 0.2.0
+ */
+
+import type { UseQueryOptions } from "./create-client.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// keepPreviousData Helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Helper to use previous data as placeholder while loading new data.
+ * Pass to the `placeholderData` option.
+ *
+ * This is useful for pagination or filtering where you want to show
+ * the previous page's data while the next page is loading.
+ *
+ * @example
+ * ```ts
+ * import { keepPreviousData } from 'effect-trpc/react'
+ *
+ * function UserList() {
+ *   const [page, setPage] = useState(1)
+ *
+ *   const { data, isPlaceholderData } = trpc.user.list.useQuery(
+ *     { page },
+ *     { placeholderData: keepPreviousData }
+ *   )
+ *
+ *   return (
+ *     <div style={{ opacity: isPlaceholderData ? 0.5 : 1 }}>
+ *       {data?.map(user => <div key={user.id}>{user.name}</div>)}
+ *       <button onClick={() => setPage(p => p + 1)}>Next</button>
+ *     </div>
+ *   )
+ * }
+ * ```
+ *
+ * @since 0.2.0
+ */
+export const keepPreviousData = <T>(previousData: T | undefined): T | undefined => previousData
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Query Presets
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Pre-configured query option presets for common data freshness patterns.
+ *
+ * @example
+ * ```ts
+ * import { queryPresets } from 'effect-trpc/react'
+ *
+ * // For frequently changing data (dashboards, feeds)
+ * const { data } = trpc.feed.list.useQuery(undefined, queryPresets.frequentData)
+ *
+ * // For semi-stable data (user profiles)
+ * const { data } = trpc.user.profile.useQuery({ id }, queryPresets.semiStableData)
+ *
+ * // For SSG/SSR pages - disable automatic refetching
+ * const { data } = trpc.page.content.useQuery({ slug }, queryPresets.static)
+ * ```
+ *
+ * @since 0.2.0
+ */
+export const queryPresets = {
+  /**
+   * For data that changes frequently (dashboards, feeds, notifications).
+   * - Immediately stale
+   * - 5 minute cache
+   * - Polls every 30 seconds
+   */
+  frequentData: {
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchInterval: 30_000,
+  } satisfies Partial<UseQueryOptions<unknown>>,
+
+  /**
+   * For semi-stable data (user profiles, settings, product details).
+   * - Fresh for 5 minutes
+   * - 30 minute cache
+   * - Polls every 10 minutes
+   */
+  semiStableData: {
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+  } satisfies Partial<UseQueryOptions<unknown>>,
+
+  /**
+   * For stable data (static content, rarely changing configuration).
+   * - Fresh for 10 minutes
+   * - 1 hour cache
+   * - No polling
+   */
+  stableData: {
+    staleTime: 10 * 60 * 1000,
+    gcTime: 60 * 60 * 1000,
+    refetchInterval: false,
+  } satisfies Partial<UseQueryOptions<unknown>>,
+
+  /**
+   * For SSG/SSR pages - disable all automatic refetching.
+   * Use when data was prefetched on the server.
+   */
+  static: {
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+  } satisfies Partial<UseQueryOptions<unknown>>,
+
+  /**
+   * Real-time data that should always be fresh.
+   * - Never cached as fresh
+   * - Refetch on all triggers
+   * - Short polling interval
+   */
+  realtime: {
+    staleTime: 0,
+    gcTime: 60 * 1000,
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    refetchOnMount: "always",
+  } satisfies Partial<UseQueryOptions<unknown>>,
+
+  /**
+   * Manual-only refresh - disable all automatic refetching.
+   * Use refetch() explicitly to update data.
+   */
+  manual: {
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+    refetchInterval: false,
+  } satisfies Partial<UseQueryOptions<unknown>>,
+} as const
