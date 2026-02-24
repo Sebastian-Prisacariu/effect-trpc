@@ -73,7 +73,13 @@
  * }
  * ```
  */
-export { Result, type QueryResult, type MutationResult } from "./result.js"
+export {
+  Result,
+  toQueryResult,
+  toMutationResult,
+  type QueryResult,
+  type MutationResult,
+} from "./result.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client creation and hooks
@@ -87,6 +93,7 @@ export type {
   ProcedureMetadataRegistry,
   TracingConfig,
   UseQueryOptions,
+  GlobalQueryOptions,
   UseQueryReturn,
   UseSuspenseQueryOptions,
   UseSuspenseQueryReturn,
@@ -158,13 +165,26 @@ export {
 } from "./subscription.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Automatic Refetching Utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  isStale,
+  subscribeToWindowFocus,
+  subscribeToNetworkReconnect,
+  isDocumentVisible,
+} from "./signals.js"
+
+export { keepPreviousData, queryPresets } from "./presets.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Server Client (SSR/RSC)
 // ─────────────────────────────────────────────────────────────────────────────
-// 
+//
 // Server-side utilities are in a separate subpath to avoid bundling server code
 // with client-only hooks. Import from "effect-trpc/react/server" instead:
-// 
+//
 // import { createServerClient } from "effect-trpc/react/server"
-// 
+//
 // This keeps the client bundle smaller (~22KB savings).
 // ─────────────────────────────────────────────────────────────────────────────

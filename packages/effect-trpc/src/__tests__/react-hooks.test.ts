@@ -8,10 +8,9 @@
  */
 
 import { describe, it, expect } from "vitest"
-import * as Exit from "effect/Exit"
 
 import { generateQueryKey } from "../react/atoms.js"
-import * as Result from "../react/result.js"
+import { Result, toQueryResult, toMutationResult } from "../react/result.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query Key Generation Tests
@@ -79,202 +78,187 @@ describe("generateQueryKey", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Result Type Tests (Additional to react-types.test.ts)
+// Result Type Tests - effect-atom API
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("Result utilities", () => {
-  describe("getValue", () => {
-    it("returns undefined for initial", () => {
-      expect(Result.getValue(Result.initial)).toBeUndefined()
+describe("Result (effect-atom)", () => {
+  describe("state constructors", () => {
+    it("creates initial state", () => {
+      const result = Result.initial()
+      expect(Result.isInitial(result)).toBe(true)
+      expect(Result.isSuccess(result)).toBe(false)
+      expect(Result.isFailure(result)).toBe(false)
     })
 
-    it("returns previous for loading", () => {
-      expect(Result.getValue(Result.loading(42))).toBe(42)
-      expect(Result.getValue(Result.loading())).toBeUndefined()
+    it("creates initial with waiting flag", () => {
+      const result = Result.initial(true)
+      expect(Result.isInitial(result)).toBe(true)
+      expect(result.waiting).toBe(true)
     })
 
-    it("returns value for success", () => {
-      expect(Result.getValue(Result.success("data"))).toBe("data")
+    it("creates success state", () => {
+      const result = Result.success("data")
+      expect(Result.isSuccess(result)).toBe(true)
+      expect(result.value).toBe("data")
     })
 
-    it("returns previous for failure", () => {
-      expect(Result.getValue(Result.failure("error", "prev"))).toBe("prev")
-      expect(Result.getValue(Result.failure("error"))).toBeUndefined()
-    })
-  })
-
-  describe("getOrElse", () => {
-    it("returns value for success", () => {
-      expect(Result.getOrElse(Result.success(42), () => 0)).toBe(42)
+    it("creates success with waiting flag (refetching)", () => {
+      const result = Result.success("data", { waiting: true })
+      expect(Result.isSuccess(result)).toBe(true)
+      expect(result.value).toBe("data")
+      expect(result.waiting).toBe(true)
     })
 
-    it("returns fallback for non-success", () => {
-      expect(Result.getOrElse(Result.initial, () => "fallback")).toBe("fallback")
-      expect(Result.getOrElse(Result.loading(), () => "fallback")).toBe("fallback")
-      expect(Result.getOrElse(Result.failure("err"), () => "fallback")).toBe("fallback")
-    })
-  })
-
-  describe("getError", () => {
-    it("returns error for failure", () => {
-      expect(Result.getError(Result.failure("my-error"))).toBe("my-error")
-    })
-
-    it("returns undefined for non-failure", () => {
-      expect(Result.getError(Result.initial)).toBeUndefined()
-      expect(Result.getError(Result.loading())).toBeUndefined()
-      expect(Result.getError(Result.success("data"))).toBeUndefined()
+    it("creates failure from error", () => {
+      const result = Result.fail("my-error")
+      expect(Result.isFailure(result)).toBe(true)
     })
   })
 
-  describe("isPending", () => {
-    it("returns true for initial", () => {
-      expect(Result.isPending(Result.initial)).toBe(true)
+  describe("type guards", () => {
+    it("isInitial identifies initial state", () => {
+      expect(Result.isInitial(Result.initial())).toBe(true)
+      expect(Result.isInitial(Result.success("x"))).toBe(false)
+      expect(Result.isInitial(Result.fail("e"))).toBe(false)
     })
 
-    it("returns true for loading", () => {
-      expect(Result.isPending(Result.loading())).toBe(true)
+    it("isSuccess identifies success state", () => {
+      expect(Result.isSuccess(Result.initial())).toBe(false)
+      expect(Result.isSuccess(Result.success("x"))).toBe(true)
+      expect(Result.isSuccess(Result.fail("e"))).toBe(false)
     })
 
-    it("returns true for success with refetching", () => {
-      expect(Result.isPending(Result.success("data", true))).toBe(true)
+    it("isFailure identifies failure state", () => {
+      expect(Result.isFailure(Result.initial())).toBe(false)
+      expect(Result.isFailure(Result.success("x"))).toBe(false)
+      expect(Result.isFailure(Result.fail("e"))).toBe(true)
     })
 
-    it("returns false for success without refetching", () => {
-      expect(Result.isPending(Result.success("data", false))).toBe(false)
-    })
-
-    it("returns true for failure with retrying", () => {
-      expect(Result.isPending(Result.failure("err", undefined, true))).toBe(true)
-    })
-
-    it("returns false for failure without retrying", () => {
-      expect(Result.isPending(Result.failure("err", undefined, false))).toBe(false)
-    })
-  })
-
-  describe("toQueryResult", () => {
-    it("converts initial correctly", () => {
-      const qr = Result.toQueryResult(Result.initial)
-      expect(qr.data).toBeUndefined()
-      expect(qr.error).toBeUndefined()
-      expect(qr.isLoading).toBe(true)
-      expect(qr.isError).toBe(false)
-      expect(qr.isSuccess).toBe(false)
-      expect(qr.isRefetching).toBe(false)
-    })
-
-    it("converts loading correctly", () => {
-      const qr = Result.toQueryResult(Result.loading("prev"))
-      expect(qr.data).toBe("prev")
-      expect(qr.error).toBeUndefined()
-      expect(qr.isLoading).toBe(true)
-      expect(qr.isError).toBe(false)
-      expect(qr.isSuccess).toBe(false)
-      expect(qr.isRefetching).toBe(false)
-    })
-
-    it("converts success correctly", () => {
-      const qr = Result.toQueryResult(Result.success("data"))
-      expect(qr.data).toBe("data")
-      expect(qr.error).toBeUndefined()
-      expect(qr.isLoading).toBe(false)
-      expect(qr.isError).toBe(false)
-      expect(qr.isSuccess).toBe(true)
-      expect(qr.isRefetching).toBe(false)
-    })
-
-    it("converts success with refetching correctly", () => {
-      const qr = Result.toQueryResult(Result.success("data", true))
-      expect(qr.data).toBe("data")
-      expect(qr.isRefetching).toBe(true)
-    })
-
-    it("converts failure correctly", () => {
-      const qr = Result.toQueryResult(Result.failure("error", "prev"))
-      expect(qr.data).toBe("prev")
-      expect(qr.error).toBe("error")
-      expect(qr.isLoading).toBe(false)
-      expect(qr.isError).toBe(true)
-      expect(qr.isSuccess).toBe(false)
+    it("isWaiting checks waiting flag", () => {
+      expect(Result.isWaiting(Result.initial())).toBe(false)
+      expect(Result.isWaiting(Result.initial(true))).toBe(true)
+      expect(Result.isWaiting(Result.success("x"))).toBe(false)
+      expect(Result.isWaiting(Result.success("x", { waiting: true }))).toBe(true)
     })
   })
 
-  describe("toMutationResult", () => {
-    it("converts initial correctly", () => {
-      const mr = Result.toMutationResult(Result.initial)
-      expect(mr.data).toBeUndefined()
-      expect(mr.error).toBeUndefined()
-      expect(mr.isPending).toBe(false)
-      expect(mr.isError).toBe(false)
-      expect(mr.isSuccess).toBe(false)
-      expect(mr.isIdle).toBe(true)
+  describe("value extraction", () => {
+    it("value returns Option with data", () => {
+      const initial = Result.initial()
+      const success = Result.success("data")
+
+      expect(Result.value(initial)._tag).toBe("None")
+      expect(Result.value(success)._tag).toBe("Some")
+      if (Result.value(success)._tag === "Some") {
+        expect(Result.value(success).value).toBe("data")
+      }
     })
 
-    it("converts loading correctly", () => {
-      const mr = Result.toMutationResult(Result.loading())
-      expect(mr.isPending).toBe(true)
-      expect(mr.isIdle).toBe(false)
+    it("getOrElse returns value or fallback", () => {
+      const success = Result.success(42)
+      const initial = Result.initial()
+
+      expect(Result.getOrElse(success, () => 0)).toBe(42)
+      expect(Result.getOrElse(initial, () => 0)).toBe(0)
     })
 
-    it("converts success correctly", () => {
-      const mr = Result.toMutationResult(Result.success("data"))
-      expect(mr.data).toBe("data")
-      expect(mr.isPending).toBe(false)
-      expect(mr.isSuccess).toBe(true)
-      expect(mr.isIdle).toBe(false)
-    })
+    it("error returns Option with error", () => {
+      const success = Result.success("data")
+      const failure = Result.fail("my-error")
 
-    it("converts failure correctly", () => {
-      const mr = Result.toMutationResult(Result.failure("error"))
-      expect(mr.error).toBe("error")
-      expect(mr.isPending).toBe(false)
-      expect(mr.isError).toBe(true)
-      expect(mr.isIdle).toBe(false)
+      expect(Result.error(success)._tag).toBe("None")
+      expect(Result.error(failure)._tag).toBe("Some")
+      if (Result.error(failure)._tag === "Some") {
+        expect(Result.error(failure).value).toBe("my-error")
+      }
     })
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Structural Equality Tests
+// toQueryResult Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("Result structural equality", () => {
-  it("initial is singleton", () => {
-    expect(Result.initial).toBe(Result.initial)
+describe("toQueryResult", () => {
+  it("converts initial correctly", () => {
+    const qr = toQueryResult(Result.initial())
+    expect(qr.data).toBeUndefined()
+    expect(qr.error).toBeUndefined()
+    expect(qr.isLoading).toBe(true)
+    expect(qr.isError).toBe(false)
+    expect(qr.isSuccess).toBe(false)
+    expect(qr.isRefetching).toBe(false)
   })
 
-  it("same success values are equal", () => {
-    const a = Result.success({ id: "1", name: "Alice" })
-    const b = Result.success({ id: "1", name: "Alice" })
-    
-    // Data.TaggedClass provides structural equality via Effect's Equal
-    expect(a._tag).toBe(b._tag)
-    expect(a.value).toEqual(b.value)
-    expect(a.isRefetching).toBe(b.isRefetching)
+  it("converts initial with waiting correctly", () => {
+    const qr = toQueryResult(Result.initial(true))
+    expect(qr.isLoading).toBe(true)
+    expect(qr.isRefetching).toBe(false)
   })
 
-  it("different success values are not equal", () => {
-    const a = Result.success({ id: "1" })
-    const b = Result.success({ id: "2" })
-    
-    expect(a.value).not.toEqual(b.value)
+  it("converts success correctly", () => {
+    const qr = toQueryResult(Result.success("data"))
+    expect(qr.data).toBe("data")
+    expect(qr.error).toBeUndefined()
+    expect(qr.isLoading).toBe(false)
+    expect(qr.isError).toBe(false)
+    expect(qr.isSuccess).toBe(true)
+    expect(qr.isRefetching).toBe(false)
   })
 
-  it("loading preserves previous value", () => {
-    const prev = { id: "1", name: "Alice" }
-    const loading = Result.loading(prev)
-    
-    expect(loading.previous).toBe(prev)
+  it("converts success with refetching correctly", () => {
+    const qr = toQueryResult(Result.success("data", { waiting: true }))
+    expect(qr.data).toBe("data")
+    expect(qr.isLoading).toBe(false)
+    expect(qr.isSuccess).toBe(false) // Not settled yet
+    expect(qr.isRefetching).toBe(true)
   })
 
-  it("failure preserves previous and error", () => {
-    const prev = { id: "1" }
-    const error = new Error("test")
-    const failure = Result.failure(error, prev)
-    
-    expect(failure.error).toBe(error)
-    expect(failure.previous).toBe(prev)
+  it("converts failure correctly", () => {
+    const qr = toQueryResult(Result.fail("error"))
+    expect(qr.data).toBeUndefined()
+    expect(qr.error).toBe("error")
+    expect(qr.isLoading).toBe(false)
+    expect(qr.isError).toBe(true)
+    expect(qr.isSuccess).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// toMutationResult Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("toMutationResult", () => {
+  it("converts initial correctly (idle)", () => {
+    const mr = toMutationResult(Result.initial())
+    expect(mr.data).toBeUndefined()
+    expect(mr.error).toBeUndefined()
+    expect(mr.isPending).toBe(false)
+    expect(mr.isError).toBe(false)
+    expect(mr.isSuccess).toBe(false)
+    expect(mr.isIdle).toBe(true)
+  })
+
+  it("converts initial with waiting correctly (pending)", () => {
+    const mr = toMutationResult(Result.initial(true))
+    expect(mr.isPending).toBe(true)
+    expect(mr.isIdle).toBe(false)
+  })
+
+  it("converts success correctly", () => {
+    const mr = toMutationResult(Result.success("data"))
+    expect(mr.data).toBe("data")
+    expect(mr.isPending).toBe(false)
+    expect(mr.isSuccess).toBe(true)
+    expect(mr.isIdle).toBe(false)
+  })
+
+  it("converts failure correctly", () => {
+    const mr = toMutationResult(Result.fail("error"))
+    expect(mr.error).toBe("error")
+    expect(mr.isPending).toBe(false)
+    expect(mr.isError).toBe(true)
+    expect(mr.isIdle).toBe(false)
   })
 })
 
@@ -283,153 +267,63 @@ describe("Result structural equality", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Query Deduplication", () => {
-  /**
-   * Simulates the deduplication logic used in createTRPCReact.
-   * This is a unit test for the deduplication pattern.
-   */
-  const createDeduplicator = () => {
-    const inFlightQueries = new Map<string, Promise<Exit.Exit<unknown, unknown>>>()
-
-    return {
-      execute: <A, E>(
-        key: string,
-        effectFn: () => Promise<Exit.Exit<A, E>>,
-      ): Promise<Exit.Exit<A, E>> => {
-        const existing = inFlightQueries.get(key)
-        if (existing) {
-          return existing as Promise<Exit.Exit<A, E>>
-        }
-
-        const promise = effectFn().finally(() => {
-          inFlightQueries.delete(key)
-        })
-
-        inFlightQueries.set(key, promise as Promise<Exit.Exit<unknown, unknown>>)
-        return promise
-      },
-      getInFlightCount: () => inFlightQueries.size,
-      hasInFlight: (key: string) => inFlightQueries.has(key),
-    }
-  }
-
-  it("deduplicates concurrent requests with same key", async () => {
-    const deduplicator = createDeduplicator()
-    let callCount = 0
-
-    const mockFetch = () => {
-      callCount++
-      return new Promise<Exit.Exit<string, never>>((resolve) => {
-        setTimeout(() => resolve(Exit.succeed("data")), 50)
-      })
-    }
-
-    // Start 3 concurrent requests with the same key
-    const key = generateQueryKey("user.get", { id: "123" })
-    const promise1 = deduplicator.execute(key, mockFetch)
-    const promise2 = deduplicator.execute(key, mockFetch)
-    const promise3 = deduplicator.execute(key, mockFetch)
-
-    // All should share the same promise
-    expect(promise1).toBe(promise2)
-    expect(promise2).toBe(promise3)
-
-    // Only one request should be in-flight
-    expect(deduplicator.getInFlightCount()).toBe(1)
-    expect(deduplicator.hasInFlight(key)).toBe(true)
-
-    // Wait for all to complete
-    const [result1, result2, result3] = await Promise.all([promise1, promise2, promise3])
-
-    // All should get the same result
-    expect(Exit.isSuccess(result1) && result1.value).toBe("data")
-    expect(Exit.isSuccess(result2) && result2.value).toBe("data")
-    expect(Exit.isSuccess(result3) && result3.value).toBe("data")
-
-    // Only one actual fetch should have been made
-    expect(callCount).toBe(1)
-
-    // In-flight should be cleared
-    expect(deduplicator.getInFlightCount()).toBe(0)
-    expect(deduplicator.hasInFlight(key)).toBe(false)
+  it("same query key produces same cache entry", () => {
+    const key1 = generateQueryKey("user.get", { id: "123" })
+    const key2 = generateQueryKey("user.get", { id: "123" })
+    expect(key1).toBe(key2)
   })
 
-  it("does not deduplicate requests with different keys", async () => {
-    const deduplicator = createDeduplicator()
-    let callCount = 0
-
-    const mockFetch = () => {
-      callCount++
-      return Promise.resolve(Exit.succeed(`data-${callCount}`))
-    }
-
+  it("different inputs produce different cache entries", () => {
     const key1 = generateQueryKey("user.get", { id: "1" })
     const key2 = generateQueryKey("user.get", { id: "2" })
+    expect(key1).not.toBe(key2)
+  })
+})
 
-    const promise1 = deduplicator.execute(key1, mockFetch)
-    const promise2 = deduplicator.execute(key2, mockFetch)
+// ─────────────────────────────────────────────────────────────────────────────
+// Result Pattern Matching (builder pattern)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // Different keys = different promises
-    expect(promise1).not.toBe(promise2)
+describe("Result builder pattern", () => {
+  it("matches initial state", () => {
+    const result = Result.initial()
+    const output = Result.builder(result)
+      .onInitial(() => "loading")
+      .onSuccess(() => "success")
+      .onError(() => "error")
+      .orNull()
 
-    // Two requests should be in-flight
-    expect(deduplicator.getInFlightCount()).toBe(2)
-
-    await Promise.all([promise1, promise2])
-
-    // Two actual fetches should have been made
-    expect(callCount).toBe(2)
+    expect(output).toBe("loading")
   })
 
-  it("allows new request after previous completes", async () => {
-    const deduplicator = createDeduplicator()
-    let callCount = 0
+  it("matches success state", () => {
+    const result = Result.success("data")
+    const output = Result.builder(result)
+      .onInitial(() => "loading")
+      .onSuccess((value: string) => `got: ${value}`)
+      .onError(() => "error")
+      .orNull()
 
-    const mockFetch = () => {
-      callCount++
-      return Promise.resolve(Exit.succeed(`data-${callCount}`))
-    }
-
-    const key = generateQueryKey("user.get", { id: "123" })
-
-    // First request
-    const result1 = await deduplicator.execute(key, mockFetch)
-    expect(Exit.isSuccess(result1) && result1.value).toBe("data-1")
-    expect(callCount).toBe(1)
-
-    // Second request (after first completes)
-    const result2 = await deduplicator.execute(key, mockFetch)
-    expect(Exit.isSuccess(result2) && result2.value).toBe("data-2")
-    expect(callCount).toBe(2)
+    expect(output).toBe("got: data")
   })
 
-  it("handles errors correctly", async () => {
-    const deduplicator = createDeduplicator()
-    let callCount = 0
+  it("matches failure state", () => {
+    const result = Result.fail<string>("oops")
+    const output = Result.builder(result)
+      .onInitial(() => "loading")
+      .onSuccess(() => "success")
+      .onError((err: string) => `error: ${err}`)
+      .orNull()
 
-    const mockFetch = () => {
-      callCount++
-      return Promise.resolve(Exit.fail(new Error("fetch failed")))
-    }
+    expect(output).toBe("error: oops")
+  })
 
-    const key = generateQueryKey("user.get", { id: "123" })
+  it("uses orNull for unhandled cases", () => {
+    const result = Result.initial()
+    const output = Result.builder(result)
+      .onSuccess(() => "success")
+      .orNull()
 
-    // Start 2 concurrent requests
-    const promise1 = deduplicator.execute(key, mockFetch)
-    const promise2 = deduplicator.execute(key, mockFetch)
-
-    // Should share the same promise
-    expect(promise1).toBe(promise2)
-
-    const [result1, result2] = await Promise.all([promise1, promise2])
-
-    // Both should get the same error
-    expect(Exit.isFailure(result1)).toBe(true)
-    expect(Exit.isFailure(result2)).toBe(true)
-
-    // Only one fetch should have been made
-    expect(callCount).toBe(1)
-
-    // In-flight should be cleared even on error
-    expect(deduplicator.getInFlightCount()).toBe(0)
+    expect(output).toBeNull()
   })
 })

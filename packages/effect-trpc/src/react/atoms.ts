@@ -43,12 +43,11 @@ export type Registry = AtomRegistry.Registry
  * @since 0.1.0
  * @category context
  */
-export const RegistryContext: React.Context<AtomRegistry.Registry> = 
-  AtomReact.RegistryContext
+export const RegistryContext: React.Context<AtomRegistry.Registry> = AtomReact.RegistryContext
 
 /**
  * Hook to get the effect-atom registry from context.
- * 
+ *
  * @remarks
  * This hook provides type-safe access to the Registry without
  * requiring ugly casts at the call site. The single cast here
@@ -75,7 +74,7 @@ export const useRegistry = (): AtomRegistry.Registry => {
  * @category atoms
  */
 export const queryKeysAtom: Atom.Writable<ReadonlySet<string>> = Atom.keepAlive(
-  Atom.make(new Set<string>() as ReadonlySet<string>)
+  Atom.make(new Set<string>() as ReadonlySet<string>),
 )
 
 /**
@@ -88,10 +87,7 @@ export const queryKeysAtom: Atom.Writable<ReadonlySet<string>> = Atom.keepAlive(
  * @since 0.1.0
  * @category utils
  */
-export const registerQueryKey = (
-  registry: AtomRegistry.Registry,
-  key: string,
-): void => {
+export const registerQueryKey = (registry: AtomRegistry.Registry, key: string): void => {
   const currentKeys = registry.get(queryKeysAtom)
   if (!currentKeys.has(key)) {
     const newKeys = new Set(currentKeys)
@@ -109,9 +105,7 @@ export const registerQueryKey = (
  * @since 0.1.0
  * @category utils
  */
-export const getRegisteredQueryKeys = (
-  registry: AtomRegistry.Registry,
-): ReadonlySet<string> => {
+export const getRegisteredQueryKeys = (registry: AtomRegistry.Registry): ReadonlySet<string> => {
   return registry.get(queryKeysAtom)
 }
 
@@ -153,7 +147,7 @@ export interface RegistryProviderProps {
  * @since 0.1.0
  * @category provider
  */
- 
+
 export const RegistryProvider: (props: RegistryProviderProps) => React.ReactElement =
   AtomReact.RegistryProvider as any
 
@@ -243,7 +237,7 @@ export const generateQueryKey = (path: string, input: unknown): string => {
   }
   try {
     // Handle BigInt and other non-serializable types
-     
+
     const inputKey = JSON.stringify(input, (_key, value) =>
       typeof value === "bigint" ? `BigInt(${value.toString()})` : value,
     )
@@ -304,13 +298,15 @@ export const initialQueryState = <A, E>(): QueryAtomState<A, E> => ({
  * This is the source of truth for query data.
  * Keys are registered via registerQueryKey() when hooks mount.
  *
+ * Note: Does NOT use Atom.keepAlive so that atoms respect the registry's
+ * defaultIdleTTL (set via gcTime in defaultQueryOptions). When an atom
+ * becomes idle (no subscribers), it will be garbage collected after gcTime.
+ *
  * @since 0.1.0
  * @category atoms
  */
 export const queryAtomFamily = Atom.family((_key: string) =>
-  Atom.keepAlive(
-    Atom.make<QueryAtomState<unknown, unknown>>(initialQueryState())
-  )
+  Atom.make<QueryAtomState<unknown, unknown>>(initialQueryState()),
 )
 
 /**
@@ -325,8 +321,8 @@ export const writableQueryAtomFamily = Atom.family((key: string) =>
     (get) => get(queryAtomFamily(key)),
     (ctx, update: QueryAtomState<unknown, unknown>) => {
       ctx.set(queryAtomFamily(key), update)
-    }
-  )
+    },
+  ),
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,9 +383,7 @@ export const initialCallerState = <E>(): MutationCallerState<E> => ({
  * @category atoms
  */
 export const mutationAtomFamily = Atom.family((_path: string) =>
-  Atom.keepAlive(
-    Atom.make<MutationMainState<unknown, unknown>>(initialMutationMainState())
-  )
+  Atom.keepAlive(Atom.make<MutationMainState<unknown, unknown>>(initialMutationMainState())),
 )
 
 /**
@@ -403,8 +397,8 @@ export const writableMutationAtomFamily = Atom.family((path: string) =>
     (get) => get(mutationAtomFamily(path)),
     (ctx, update: MutationMainState<unknown, unknown>) => {
       ctx.set(mutationAtomFamily(path), update)
-    }
-  )
+    },
+  ),
 )
 
 /**
@@ -415,7 +409,7 @@ export const writableMutationAtomFamily = Atom.family((path: string) =>
  * @category atoms
  */
 export const callerAtomFamily = Atom.family((_callerKey: string) =>
-  Atom.make<MutationCallerState<unknown>>(initialCallerState())
+  Atom.make<MutationCallerState<unknown>>(initialCallerState()),
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,9 +447,7 @@ export const initialStreamState = <A, E>(): StreamAtomState<A, E> => ({
  * @category atoms
  */
 export const streamAtomFamily = Atom.family((_key: string) =>
-  Atom.keepAlive(
-    Atom.make<StreamAtomState<unknown, unknown>>(initialStreamState())
-  )
+  Atom.keepAlive(Atom.make<StreamAtomState<unknown, unknown>>(initialStreamState())),
 )
 
 /**
@@ -469,8 +461,8 @@ export const writableStreamAtomFamily = Atom.family((key: string) =>
     (get) => get(streamAtomFamily(key)),
     (ctx, update: StreamAtomState<unknown, unknown>) => {
       ctx.set(streamAtomFamily(key), update)
-    }
-  )
+    },
+  ),
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -510,9 +502,7 @@ export const initialSubscriptionState = <A, E>(): SubscriptionAtomState<A, E> =>
  * @category atoms
  */
 export const subscriptionAtomFamily = Atom.family((_key: string) =>
-  Atom.keepAlive(
-    Atom.make<SubscriptionAtomState<unknown, unknown>>(initialSubscriptionState())
-  )
+  Atom.keepAlive(Atom.make<SubscriptionAtomState<unknown, unknown>>(initialSubscriptionState())),
 )
 
 /**
@@ -526,8 +516,8 @@ export const writableSubscriptionAtomFamily = Atom.family((key: string) =>
     (get) => get(subscriptionAtomFamily(key)),
     (ctx, update: SubscriptionAtomState<unknown, unknown>) => {
       ctx.set(subscriptionAtomFamily(key), update)
-    }
-  )
+    },
+  ),
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -578,9 +568,7 @@ export const initialChatState = <E>(): ChatAtomState<E> => ({
  * @category atoms
  */
 export const chatAtomFamily = Atom.family((_key: string) =>
-  Atom.keepAlive(
-    Atom.make<ChatAtomState<unknown>>(initialChatState())
-  )
+  Atom.keepAlive(Atom.make<ChatAtomState<unknown>>(initialChatState())),
 )
 
 /**
@@ -594,8 +582,8 @@ export const writableChatAtomFamily = Atom.family((key: string) =>
     (get) => get(chatAtomFamily(key)),
     (ctx, update: ChatAtomState<unknown>) => {
       ctx.set(chatAtomFamily(key), update)
-    }
-  )
+    },
+  ),
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -616,8 +604,9 @@ export const DefaultHttpClientLayer = FetchHttpClient.layer
  * @since 0.1.0
  * @category constructors
  */
-export const createRuntimeAtom = (layer: Layer.Layer<HttpClient.HttpClient> = DefaultHttpClientLayer) =>
-  Atom.runtime(layer)
+export const createRuntimeAtom = (
+  layer: Layer.Layer<HttpClient.HttpClient> = DefaultHttpClientLayer,
+) => Atom.runtime(layer)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Optimistic Update Helpers
@@ -648,7 +637,7 @@ export interface OptimisticContext<A> {
 export const atomResultToQueryResult = <A, E>(result: AtomResult.Result<A, E>) => {
   const data = AtomResult.value(result)
   const error = AtomResult.error(result)
-  
+
   return {
     data: data._tag === "Some" ? data.value : undefined,
     error: error._tag === "Some" ? error.value : undefined,
@@ -669,7 +658,7 @@ export const atomResultToQueryResult = <A, E>(result: AtomResult.Result<A, E>) =
 export const atomResultToMutationResult = <A, E>(result: AtomResult.Result<A, E>) => {
   const data = AtomResult.value(result)
   const error = AtomResult.error(result)
-  
+
   return {
     data: data._tag === "Some" ? data.value : undefined,
     error: error._tag === "Some" ? error.value : undefined,
@@ -695,10 +684,7 @@ export const atomResultToMutationResult = <A, E>(result: AtomResult.Result<A, E>
  * @since 0.1.0
  * @category invalidation
  */
-export const invalidateQueryByKey = (
-  registry: AtomRegistry.Registry,
-  key: string,
-): void => {
+export const invalidateQueryByKey = (registry: AtomRegistry.Registry, key: string): void => {
   const registeredKeys = getRegisteredQueryKeys(registry)
   if (registeredKeys.has(key)) {
     const atom = queryAtomFamily(key)
@@ -737,9 +723,7 @@ export const invalidateQueriesByPrefix = (
  * @since 0.1.0
  * @category invalidation
  */
-export const invalidateAllQueries = (
-  registry: AtomRegistry.Registry,
-): void => {
+export const invalidateAllQueries = (registry: AtomRegistry.Registry): void => {
   const registeredKeys = getRegisteredQueryKeys(registry)
   for (const key of registeredKeys) {
     const atom = queryAtomFamily(key)
@@ -766,10 +750,10 @@ export const getQueryData = <T>(
   const key = generateQueryKey(path, input)
   const registeredKeys = getRegisteredQueryKeys(registry)
   if (!registeredKeys.has(key)) return undefined
-  
+
   const atom = queryAtomFamily(key)
   const state = registry.get(atom)
-  
+
   if (AtomResult.isSuccess(state.result)) {
     return state.result.value as T
   }
@@ -795,20 +779,20 @@ export const setQueryData = <T>(
 ): void => {
   const key = generateQueryKey(path, input)
   const atom = queryAtomFamily(key)
-  
+
   // Get current data if using updater function
   let newData: T
   if (typeof data === "function") {
     const updater = data as (old: T | undefined) => T
     const currentState = registry.get(atom)
     const currentData = AtomResult.isSuccess(currentState.result)
-      ? currentState.result.value as T
+      ? (currentState.result.value as T)
       : undefined
     newData = updater(currentData)
   } else {
     newData = data
   }
-  
+
   // Set the new data
   registry.set(atom, {
     result: AtomResult.success(newData),
@@ -852,11 +836,7 @@ export const createAtomCacheUtils = (registry: AtomRegistry.Registry): AtomCache
     return getQueryData<T>(registry, path, input)
   },
 
-  setQueryData: <T>(
-    path: string,
-    input: unknown,
-    data: T | ((old: T | undefined) => T),
-  ): void => {
+  setQueryData: <T>(path: string, input: unknown, data: T | ((old: T | undefined) => T)): void => {
     setQueryData(registry, path, input, data)
   },
 

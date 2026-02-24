@@ -73,6 +73,12 @@ import {
 } from "./atoms.js"
 
 import { Result, type QueryResult, type MutationResult } from "./result.js"
+import {
+  isStale,
+  subscribeToWindowFocus,
+  subscribeToNetworkReconnect,
+  isDocumentVisible,
+} from "./signals.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook Types
@@ -80,16 +86,113 @@ import { Result, type QueryResult, type MutationResult } from "./result.js"
 
 /**
  * Options for useQuery hook.
+ * Matches TanStack Query semantics where applicable.
  *
  * @since 0.1.0
  * @category hooks
  */
 export interface UseQueryOptions<A> {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Data Control
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Initial data to use before the first fetch completes. This IS cached. */
   readonly initialData?: A
+
+  /**
+   * Placeholder data shown while loading.
+   * Unlike initialData, this is NOT cached - it's replaced when real data arrives.
+   * Can be a static value or a function receiving previous data.
+   */
+  readonly placeholderData?: A | ((previousData: A | undefined) => A | undefined)
+
+  /**
+   * Keep the previous query result visible while fetching new data.
+   * Useful for pagination/filtering where you want to show old data while new loads.
+   * Shorthand for `placeholderData: keepPreviousData`
+   * @default false
+   */
+  readonly keepPreviousData?: boolean
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Query Control
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Whether the query should execute. @default true */
   readonly enabled?: boolean
-  readonly refetchInterval?: number
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Timing
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * How long data is considered fresh (ms).
+   * During this time, refetch triggers are ignored.
+   * @default 0 (always stale)
+   */
   readonly staleTime?: number
-  readonly cacheTime?: number
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Automatic Refetch Triggers
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Refetch when window regains focus (if data is stale).
+   * @default true
+   */
+  readonly refetchOnWindowFocus?: boolean
+
+  /**
+   * Refetch when browser reconnects to network (if data is stale).
+   * @default true
+   */
+  readonly refetchOnReconnect?: boolean
+
+  /**
+   * Refetch when component mounts (if data is stale).
+   * - `true`: Refetch if stale
+   * - `false`: Never refetch on mount
+   * - `'always'`: Always refetch, even if not stale
+   * @default true
+   */
+  readonly refetchOnMount?: boolean | "always"
+
+  /**
+   * Polling interval (ms). Set to 0 or false to disable.
+   * @default 0 (disabled)
+   */
+  readonly refetchInterval?: number | false
+
+  /**
+   * Continue polling when window is unfocused.
+   * Only relevant when refetchInterval is set.
+   * @default false
+   */
+  readonly refetchIntervalInBackground?: boolean
+}
+
+/**
+ * Global query options that can only be set via `defaultQueryOptions` in `createTRPCReact()`.
+ * Extends UseQueryOptions with settings that must be configured globally.
+ *
+ * @since 0.2.0
+ * @category hooks
+ */
+export interface GlobalQueryOptions<A> extends UseQueryOptions<A> {
+  /**
+   * How long unused/inactive cache data remains in memory (ms).
+   * After this time, unmounted queries are garbage collected.
+   *
+   * This is a **global setting only** - it cannot be set per-query because
+   * effect-atom's TTL must be configured at atom creation time.
+   *
+   * Set to `Infinity` to keep query data indefinitely (no garbage collection).
+   *
+   * Uses effect-atom's `defaultIdleTTL` under the hood.
+   *
+   * @default Infinity (no garbage collection)
+   */
+  readonly gcTime?: number
 }
 
 /**
@@ -99,21 +202,29 @@ export interface UseQueryOptions<A> {
  * @category hooks
  */
 export interface UseQueryReturn<A, E> extends QueryResult<A, E> {
+  /**
+   * True for ANY fetch in progress (initial OR background refetch).
+   * Superset of isLoading + isRefetching.
+   */
+  readonly isFetching: boolean
+
+  /**
+   * True when showing placeholder data or keepPreviousData.
+   */
+  readonly isPlaceholderData: boolean
+
+  /** Manually trigger a refetch */
   readonly refetch: () => void
 }
 
 /**
  * Options for useSuspenseQuery hook.
+ * Same as UseQueryOptions but without `enabled` (suspense always fetches).
  *
  * @since 0.1.0
  * @category hooks
  */
-export interface UseSuspenseQueryOptions<A> {
-  readonly initialData?: A
-  readonly refetchInterval?: number
-  readonly staleTime?: number
-  readonly cacheTime?: number
-}
+export interface UseSuspenseQueryOptions<A> extends Omit<UseQueryOptions<A>, "enabled"> {}
 
 /**
  * Return type for useSuspenseQuery hook.
@@ -123,6 +234,19 @@ export interface UseSuspenseQueryOptions<A> {
  */
 export interface UseSuspenseQueryReturn<A, E> extends Omit<QueryResult<A, E>, "data"> {
   readonly data: A
+
+  /**
+   * True for ANY fetch in progress (initial OR background refetch).
+   * Superset of isLoading + isRefetching.
+   */
+  readonly isFetching: boolean
+
+  /**
+   * True when showing placeholder data or keepPreviousData.
+   */
+  readonly isPlaceholderData: boolean
+
+  /** Manually trigger a refetch */
   readonly refetch: () => void
 }
 
@@ -438,6 +562,27 @@ export interface CreateTRPCReactOptions {
   readonly metadata?: ProcedureMetadataRegistry
   readonly tracing?: TracingConfig
   readonly httpClient?: Layer.Layer<HttpClient.HttpClient>
+
+  /**
+   * Default options for all queries. Per-query options override these.
+   *
+   * Note: `gcTime` can ONLY be set here (globally), not per-query.
+   *
+   * @example
+   * ```ts
+   * const trpc = createTRPCReact<AppRouter>({
+   *   url: '/api/trpc',
+   *   defaultQueryOptions: {
+   *     staleTime: 30_000,
+   *     gcTime: 5 * 60 * 1000, // 5 minutes (global only)
+   *     refetchOnWindowFocus: false,
+   *   },
+   * })
+   * ```
+   *
+   * @since 0.2.0
+   */
+  readonly defaultQueryOptions?: Partial<GlobalQueryOptions<unknown>>
 }
 
 /**
@@ -521,6 +666,7 @@ export function createTRPCReact<TRouter extends Router>(
   const url = options?.url ?? "/api/trpc"
   const metadata = options?.metadata ?? {}
   const tracing = options?.tracing
+  const defaultQueryOptions = options?.defaultQueryOptions ?? {}
 
   // Create ManagedRuntime once for proper lifecycle management
   const managedRuntime = createManagedRuntime(options?.httpClient)
@@ -575,6 +721,16 @@ export function createTRPCReact<TRouter extends Router>(
   const runFork = <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) =>
     managedRuntime.runFork(effect)
 
+  // Get global gcTime from defaultQueryOptions
+  // When undefined or Infinity, atoms persist indefinitely (no GC)
+  // When a finite number, atoms are garbage collected after that duration
+  const globalGcTime = defaultQueryOptions.gcTime
+
+  // Only pass defaultIdleTTL when gcTime is a finite number
+  // undefined/Infinity means "keep forever" (no garbage collection)
+  const shouldSetIdleTTL =
+    globalGcTime !== undefined && globalGcTime !== Infinity && Number.isFinite(globalGcTime)
+
   // Provider wraps with effect-atom RegistryProvider and manages runtime lifecycle
   const Provider = ({ children }: TRPCProviderProps) => {
     React.useEffect(() => {
@@ -599,7 +755,13 @@ export function createTRPCReact<TRouter extends Router>(
     }, [])
 
     // Wrap with RegistryProvider for effect-atom state management
-    return React.createElement(RegistryProvider, {}, children)
+    // Only set defaultIdleTTL when gcTime is finite (enables garbage collection)
+    // When gcTime is undefined/Infinity, atoms persist indefinitely
+    return React.createElement(
+      RegistryProvider,
+      shouldSetIdleTTL ? { defaultIdleTTL: globalGcTime } : {},
+      children,
+    )
   }
 
   // Invalidation utilities hook (uses effect-atom registry)
@@ -647,7 +809,20 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
 
       useQuery: (input: unknown, queryOptions?: UseQueryOptions<any>) => {
-        const { enabled = true, initialData, refetchInterval = 0 } = queryOptions ?? {}
+        // Merge with defaultQueryOptions, then apply defaults (TanStack Query compatible)
+        const mergedOptions = { ...defaultQueryOptions, ...queryOptions }
+        const {
+          enabled = true,
+          initialData,
+          placeholderData,
+          keepPreviousData = false,
+          staleTime = 0,
+          refetchOnWindowFocus = true,
+          refetchOnReconnect = true,
+          refetchOnMount = true,
+          refetchInterval = 0,
+          refetchIntervalInBackground = false,
+        } = mergedOptions
 
         // Get registry for key tracking
         const registry = useRegistry()
@@ -668,8 +843,20 @@ export function createTRPCReact<TRouter extends Router>(
         const atomState = useAtomValue(atom) as QueryAtomState<any, any>
         const setAtomState = useAtomSet(atom)
 
+        // Track previous successful data for keepPreviousData
+        const previousDataRef = React.useRef<any>(undefined)
+        if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
+          previousDataRef.current = atomState.result.value
+        }
+
         // Version ref to handle race conditions
         const versionRef = React.useRef(0)
+
+        // Check if data is stale
+        const dataIsStale = React.useMemo(
+          () => isStale(atomState.lastFetchedAt, staleTime),
+          [atomState.lastFetchedAt, staleTime],
+        )
 
         // Refetch function using effect-atom with deduplication
         const refetch = React.useCallback(() => {
@@ -720,39 +907,133 @@ export function createTRPCReact<TRouter extends Router>(
           }
         }, [initialData, atomState.result, setAtomState])
 
-        // Fetch on mount if enabled and initial
+        // Fetch on mount based on refetchOnMount option
         React.useEffect(() => {
           if (!enabled) return
+
+          // Handle refetchOnMount options
+          if (refetchOnMount === false) {
+            // Never refetch on mount, but still do initial fetch if no data
+            if (AtomResult.isInitial(atomState.result) && initialData === undefined) {
+              refetch()
+            }
+            return
+          }
+
+          if (refetchOnMount === "always") {
+            // Always refetch on mount
+            refetch()
+            return
+          }
+
+          // Default: refetch if stale or initial
           if (AtomResult.isInitial(atomState.result) && initialData === undefined) {
             refetch()
+          } else if (dataIsStale) {
+            refetch()
+          }
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []) // Only run on mount
+
+        // Window focus refetch
+        React.useEffect(() => {
+          if (!enabled || !refetchOnWindowFocus) return
+
+          return subscribeToWindowFocus(() => {
+            if (isStale(atomState.lastFetchedAt, staleTime)) {
+              refetch()
+            }
+          })
+        }, [enabled, refetchOnWindowFocus, atomState.lastFetchedAt, staleTime, refetch])
+
+        // Network reconnect refetch
+        React.useEffect(() => {
+          if (!enabled || !refetchOnReconnect) return
+
+          return subscribeToNetworkReconnect(() => {
+            if (isStale(atomState.lastFetchedAt, staleTime)) {
+              refetch()
+            }
+          })
+        }, [enabled, refetchOnReconnect, atomState.lastFetchedAt, staleTime, refetch])
+
+        // Refetch interval (with background awareness)
+        React.useEffect(() => {
+          if (!enabled) return
+          const interval = typeof refetchInterval === "number" ? refetchInterval : 0
+          if (interval <= 0) return
+
+          const intervalFn = () => {
+            if (refetchIntervalInBackground || isDocumentVisible()) {
+              refetch()
+            }
           }
 
-          // Set up refetch interval
-          let intervalId: ReturnType<typeof setInterval> | undefined
-          if (refetchInterval > 0) {
-            intervalId = setInterval(refetch, refetchInterval)
+          const intervalId = setInterval(intervalFn, interval)
+          return () => clearInterval(intervalId)
+        }, [enabled, refetchInterval, refetchIntervalInBackground, refetch])
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Compute display data (with placeholder/keepPreviousData support)
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        const computeDisplayData = (): { data: any; isPlaceholderData: boolean } => {
+          // If we have successful data (not waiting), use it
+          if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
+            return { data: atomState.result.value, isPlaceholderData: false }
           }
 
-          return () => {
-            if (intervalId) clearInterval(intervalId)
+          // If waiting with previous success (same-key refetch), show that
+          if (atomState.result.waiting && AtomResult.isSuccess(atomState.result)) {
+            return { data: atomState.result.value, isPlaceholderData: false }
           }
-        }, [enabled, refetch, refetchInterval, atomState.result, initialData])
 
-        // Convert effect-atom Result to our QueryResult format
+          // keepPreviousData: show previous data while loading new key
+          if (keepPreviousData && previousDataRef.current !== undefined) {
+            return { data: previousDataRef.current, isPlaceholderData: true }
+          }
 
-        const data = AtomResult.isSuccess(atomState.result) ? atomState.result.value : undefined
+          // placeholderData: compute placeholder
+          if (placeholderData !== undefined) {
+            const placeholder =
+              typeof placeholderData === "function"
+                ? (placeholderData as (prev: any) => any)(previousDataRef.current)
+                : placeholderData
+            if (placeholder !== undefined) {
+              return { data: placeholder, isPlaceholderData: true }
+            }
+          }
+
+          // initialData as fallback (not placeholder)
+          if (initialData !== undefined && AtomResult.isInitial(atomState.result)) {
+            return { data: initialData, isPlaceholderData: false }
+          }
+
+          return { data: undefined, isPlaceholderData: false }
+        }
+
+        const { data, isPlaceholderData } = computeDisplayData()
 
         const error = AtomResult.isFailure(atomState.result)
           ? Option.getOrUndefined(AtomResult.error(atomState.result))
           : undefined
 
+        // Compute loading states (TanStack Query semantics)
+        const hasData = AtomResult.isSuccess(atomState.result)
+        const isWaiting = atomState.result.waiting || AtomResult.isInitial(atomState.result)
+
         return {
           data,
           error,
-          isLoading: AtomResult.isInitial(atomState.result) || atomState.result.waiting,
+          // isLoading: no data + fetching (first load)
+          isLoading: !hasData && isWaiting,
+          // isFetching: any loading state
+          isFetching: isWaiting,
+          // isRefetching: has data + fetching
+          isRefetching: hasData && atomState.result.waiting,
           isError: AtomResult.isFailure(atomState.result),
           isSuccess: AtomResult.isSuccess(atomState.result),
-          isRefetching: AtomResult.isSuccess(atomState.result) && atomState.result.waiting,
+          isPlaceholderData,
           result: atomState.result,
           refetch,
         }
@@ -763,7 +1044,19 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
 
       useSuspenseQuery: (input: unknown, queryOptions?: UseSuspenseQueryOptions<any>) => {
-        const { initialData, refetchInterval = 0 } = queryOptions ?? {}
+        // Merge with defaultQueryOptions, then apply defaults (TanStack Query compatible)
+        const mergedOptions = { ...defaultQueryOptions, ...queryOptions }
+        const {
+          initialData,
+          placeholderData,
+          keepPreviousData = false,
+          staleTime = 0,
+          refetchOnWindowFocus = true,
+          refetchOnReconnect = true,
+          refetchOnMount = true,
+          refetchInterval = 0,
+          refetchIntervalInBackground = false,
+        } = mergedOptions
 
         // Get registry for key tracking
         const registry = useRegistry()
@@ -783,6 +1076,12 @@ export function createTRPCReact<TRouter extends Router>(
         // Get the current state from the atom
         const atomState = useAtomValue(atom) as QueryAtomState<any, any>
         const setAtomState = useAtomSet(atom)
+
+        // Track previous successful data for keepPreviousData
+        const previousDataRef = React.useRef<any>(undefined)
+        if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
+          previousDataRef.current = atomState.result.value
+        }
 
         // Version ref to handle race conditions
         const versionRef = React.useRef(0)
@@ -860,29 +1159,64 @@ export function createTRPCReact<TRouter extends Router>(
           throw Option.getOrUndefined(AtomResult.error(atomState.result))
         }
 
-        // Set up refetch interval
+        // Window focus refetch
         React.useEffect(() => {
-          let intervalId: ReturnType<typeof setInterval> | undefined
-          if (refetchInterval > 0) {
-            intervalId = setInterval(refetch, refetchInterval)
+          if (!refetchOnWindowFocus) return
+
+          return subscribeToWindowFocus(() => {
+            if (isStale(atomState.lastFetchedAt, staleTime)) {
+              refetch()
+            }
+          })
+        }, [refetchOnWindowFocus, atomState.lastFetchedAt, staleTime, refetch])
+
+        // Network reconnect refetch
+        React.useEffect(() => {
+          if (!refetchOnReconnect) return
+
+          return subscribeToNetworkReconnect(() => {
+            if (isStale(atomState.lastFetchedAt, staleTime)) {
+              refetch()
+            }
+          })
+        }, [refetchOnReconnect, atomState.lastFetchedAt, staleTime, refetch])
+
+        // Refetch interval (with background awareness)
+        React.useEffect(() => {
+          const interval = typeof refetchInterval === "number" ? refetchInterval : 0
+          if (interval <= 0) return
+
+          const intervalFn = () => {
+            if (refetchIntervalInBackground || isDocumentVisible()) {
+              refetch()
+            }
           }
 
-          return () => {
-            if (intervalId) clearInterval(intervalId)
-          }
-        }, [refetch, refetchInterval])
+          const intervalId = setInterval(intervalFn, interval)
+          return () => clearInterval(intervalId)
+        }, [refetchInterval, refetchIntervalInBackground, refetch])
 
         // At this point, we know we have success data
 
         const data = AtomResult.isSuccess(atomState.result) ? atomState.result.value : initialData!
 
+        // Compute loading states (TanStack Query semantics)
+        const hasData = AtomResult.isSuccess(atomState.result)
+        const isWaiting = atomState.result.waiting
+
+        // Compute isPlaceholderData (for suspense, this is typically false since we have data)
+        const isPlaceholderData =
+          keepPreviousData && previousDataRef.current !== undefined && isWaiting
+
         return {
           data,
           error: undefined,
-          isLoading: false,
+          isLoading: false, // Suspense always has data at this point
+          isFetching: isWaiting,
           isError: false,
           isSuccess: true,
-          isRefetching: atomState.result.waiting,
+          isRefetching: hasData && isWaiting,
+          isPlaceholderData,
           result: atomState.result,
           refetch,
         } as UseSuspenseQueryReturn<any, any>
