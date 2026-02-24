@@ -78,7 +78,7 @@ export { AtomResult as Result }
  * console.log(qr.isLoading) // false
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const toQueryResult = <A, E>(result: AtomResult.Result<A, E>): QueryResult<A, E> => {
   const dataOption = AtomResult.value(result)
@@ -111,7 +111,7 @@ export const toQueryResult = <A, E>(result: AtomResult.Result<A, E>): QueryResul
  * console.log(mr.isPending) // false
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const toMutationResult = <A, E>(result: AtomResult.Result<A, E>): MutationResult<A, E> => {
   const dataOption = AtomResult.value(result)

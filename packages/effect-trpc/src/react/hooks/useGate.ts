@@ -3,7 +3,7 @@
  *
  * React hook for observing Gate state.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as React from "react"
@@ -19,7 +19,7 @@ import { Gate } from "../../core/gate/index.js"
 /**
  * Return type for useGate hook.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category hooks
  */
 export interface UseGateReturn {
@@ -76,7 +76,7 @@ export interface UseGateReturn {
  * ```
  *
  * @param gate - The Gate instance to observe
- * @since 0.2.0
+ * @since 0.3.0
  * @category hooks
  */
 export function useGate(gate: GateInstance): UseGateReturn {

@@ -3,7 +3,7 @@
  *
  * Query presets and helper functions for common data freshness patterns.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import type { UseQueryOptions } from "./create-client.js"
@@ -40,7 +40,7 @@ import type { UseQueryOptions } from "./create-client.js"
  * }
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const keepPreviousData = <T>(previousData: T | undefined): T | undefined => previousData
 
@@ -72,7 +72,7 @@ export const keepPreviousData = <T>(previousData: T | undefined): T | undefined 
  * })
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const queryPresets = {
   /**

@@ -176,7 +176,7 @@ export interface UseQueryOptions<A> {
  * Global query options that can only be set via `defaultQueryOptions` in `createTRPCReact()`.
  * Extends UseQueryOptions with settings that must be configured globally.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category hooks
  */
 export interface GlobalQueryOptions<A> extends UseQueryOptions<A> {
@@ -555,7 +555,7 @@ export type ProcedureMetadataRegistry = Record<string, ProcedureMetadata>
 /**
  * Network configuration options.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category configuration
  */
 export interface NetworkConfig {
@@ -611,7 +611,7 @@ export interface CreateTRPCReactOptions {
    * })
    * ```
    *
-   * @since 0.2.0
+   * @since 0.3.0
    */
   readonly defaultQueryOptions?: Partial<GlobalQueryOptions<unknown>>
 
@@ -629,7 +629,7 @@ export interface CreateTRPCReactOptions {
    * })
    * ```
    *
-   * @since 0.2.0
+   * @since 0.3.0
    */
   readonly network?: NetworkConfig
 
@@ -638,7 +638,7 @@ export interface CreateTRPCReactOptions {
    * Fails fast with ParseError if input doesn't match schema.
    *
    * @default false
-   * @since 0.2.0
+   * @since 0.3.0
    */
   readonly clientSideValidation?: boolean
 }
@@ -646,7 +646,7 @@ export interface CreateTRPCReactOptions {
 /**
  * Network utilities exposed on the tRPC client.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category models
  */
 export interface TRPCNetworkUtils {
@@ -690,7 +690,7 @@ export interface TRPCReactClient<TRouter extends Router> {
    * const { isOnline } = trpc.network.useStatus()
    * ```
    *
-   * @since 0.2.0
+   * @since 0.3.0
    */
   readonly network: TRPCNetworkUtils
 

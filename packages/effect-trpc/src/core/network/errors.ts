@@ -3,7 +3,7 @@
  *
  * Errors for the Network service.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as Schema from "effect/Schema"
@@ -28,7 +28,7 @@ export type NetworkErrorTypeId = typeof NetworkErrorTypeId
  * for users who create custom Network implementations with fail behavior,
  * or for future versions that may support a "fail" mode.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category errors
  */
 export class NetworkOfflineError extends Schema.TaggedError<NetworkOfflineError>()(

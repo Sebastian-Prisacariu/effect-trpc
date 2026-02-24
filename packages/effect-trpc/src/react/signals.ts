@@ -14,7 +14,7 @@
  * import { useNetworkStatus } from 'effect-trpc/react'
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@
  * }
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const isStale = (lastFetchedAt: number | null, staleTime: number): boolean => {
   if (lastFetchedAt === null) return true
@@ -69,7 +69,7 @@ export const isStale = (lastFetchedAt: number | null, staleTime: number): boolea
  * }, [lastFetchedAt, staleTime, refetch])
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const subscribeToWindowFocus = (callback: () => void): (() => void) => {
   if (typeof window === "undefined" || typeof document === "undefined") {
@@ -113,7 +113,7 @@ export const subscribeToWindowFocus = (callback: () => void): (() => void) => {
  * }, [lastFetchedAt, staleTime, refetch])
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const subscribeToNetworkReconnect = (callback: () => void): (() => void) => {
   if (typeof window === "undefined") {
@@ -142,7 +142,7 @@ export const subscribeToNetworkReconnect = (callback: () => void): (() => void) 
  *
  * @returns true if document is visible, false if hidden or SSR
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const isDocumentVisible = (): boolean => {
   if (typeof document === "undefined") {

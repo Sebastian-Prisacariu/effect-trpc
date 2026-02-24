@@ -5,7 +5,7 @@
  * Uses useSyncExternalStore for React 18 concurrent mode safety.
  * Handles SSR/hydration safely via getServerSnapshot.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as React from "react"
@@ -17,7 +17,7 @@ import * as React from "react"
 /**
  * Return type for useNetworkStatus hook.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category hooks
  */
 export interface UseNetworkStatusReturn {
@@ -115,7 +115,7 @@ const getServerSnapshot = (): boolean => true
  * }
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category hooks
  */
 export function useNetworkStatus(): UseNetworkStatusReturn {

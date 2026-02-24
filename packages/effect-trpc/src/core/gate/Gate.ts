@@ -33,7 +33,7 @@
  * })
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as Effect from "effect/Effect"
@@ -54,7 +54,7 @@ import { GateClosedError } from "./errors.js"
  * - `'fail'`: Immediately fail with GateClosedError
  * - `'queue'`: Add to queue, return Deferred (for offline queue integration)
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export type ClosedBehavior = "wait" | "fail" | "queue"
@@ -62,7 +62,7 @@ export type ClosedBehavior = "wait" | "fail" | "queue"
 /**
  * Current state of a gate.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export interface GateState {
@@ -74,7 +74,7 @@ export interface GateState {
 /**
  * A Gate instance for flow control.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export interface Gate {
@@ -88,7 +88,7 @@ export interface Gate {
 /**
  * Options for creating a gate.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export interface GateOptions {
@@ -112,7 +112,7 @@ export interface GateOptions {
 /**
  * Type guard to check if a value is a Gate.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category guards
  */
 export const isGate = (u: unknown): u is Gate =>
@@ -145,7 +145,7 @@ export const isGate = (u: unknown): u is Gate =>
  * })
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category constructors
  */
 export const make = (
@@ -178,7 +178,7 @@ export const make = (
  * Create a gate without requiring Scope (for simpler use cases).
  * The gate will not be automatically cleaned up.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category constructors
  */
 export const makeUnscoped = (
@@ -198,7 +198,7 @@ export const makeUnscoped = (
  * Uses atomic state modification to prevent race conditions when
  * multiple fibers call open() concurrently.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category control
  */
 export const open = (gate: Gate): Effect.Effect<void> =>
@@ -231,7 +231,7 @@ export const open = (gate: Gate): Effect.Effect<void> =>
  * Uses atomic state modification to prevent race conditions when
  * multiple fibers call close() concurrently.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category control
  */
 export const close = (gate: Gate): Effect.Effect<void> =>
@@ -263,7 +263,7 @@ export const close = (gate: Gate): Effect.Effect<void> =>
  * Uses atomic state modification to prevent race conditions when
  * multiple fibers call toggle() concurrently.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category control
  */
 export const toggle = (gate: Gate): Effect.Effect<void> =>
@@ -304,7 +304,7 @@ export const toggle = (gate: Gate): Effect.Effect<void> =>
  * is acceptable. If you need guaranteed fail semantics, check `isOpen` before
  * calling `whenOpen`.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category usage
  */
 export const whenOpen = <A, E, R>(
@@ -339,7 +339,7 @@ export const whenOpen = <A, E, R>(
 /**
  * Compose multiple gates - effect runs only when ALL gates are open.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category usage
  */
 export const whenAllOpen = <A, E, R>(
@@ -358,7 +358,7 @@ export const whenAllOpen = <A, E, R>(
 /**
  * Check if a gate is currently open.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const isOpen = (gate: Gate): Effect.Effect<boolean> =>
@@ -367,7 +367,7 @@ export const isOpen = (gate: Gate): Effect.Effect<boolean> =>
 /**
  * Check if a gate is currently closed.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const isClosed = (gate: Gate): Effect.Effect<boolean> =>
@@ -376,7 +376,7 @@ export const isClosed = (gate: Gate): Effect.Effect<boolean> =>
 /**
  * Get the full state of a gate.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const getState = (gate: Gate): Effect.Effect<GateState> =>
@@ -389,7 +389,7 @@ export const getState = (gate: Gate): Effect.Effect<GateState> =>
  * **Race-condition safe:** Subscribes to changes before checking state
  * to avoid missing transitions that occur between check and subscribe.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const awaitOpen = (gate: Gate): Effect.Effect<void> =>
@@ -421,7 +421,7 @@ export const awaitOpen = (gate: Gate): Effect.Effect<void> =>
  * **Race-condition safe:** Subscribes to changes before checking state
  * to avoid missing transitions that occur between check and subscribe.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const awaitClose = (gate: Gate): Effect.Effect<void> =>
@@ -450,7 +450,7 @@ export const awaitClose = (gate: Gate): Effect.Effect<void> =>
  * Stream of gate open/closed state changes.
  * Only emits when the state actually changes.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const changes = (gate: Gate): Stream.Stream<boolean> =>
@@ -463,7 +463,7 @@ export const changes = (gate: Gate): Stream.Stream<boolean> =>
  * Subscribe to gate state changes (callback-based for React integration).
  * Returns a cleanup function to unsubscribe.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category observation
  */
 export const subscribe = (gate: Gate, callback: (isOpen: boolean) => void): (() => void) => {
@@ -486,7 +486,7 @@ export const subscribe = (gate: Gate, callback: (isOpen: boolean) => void): (() 
 /**
  * Gate module - all functions as a namespace.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category modules
  */
 export const Gate = {

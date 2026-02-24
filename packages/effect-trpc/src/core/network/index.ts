@@ -23,7 +23,7 @@
  * program.pipe(Effect.provide(NetworkBrowserLive))
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 // Types

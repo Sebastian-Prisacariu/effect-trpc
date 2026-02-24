@@ -3,7 +3,7 @@
  *
  * React hooks for Gate and Network.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 export { useNetworkStatus, type UseNetworkStatusReturn } from "./useNetworkStatus.js"

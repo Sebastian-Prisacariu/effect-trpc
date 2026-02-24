@@ -199,7 +199,7 @@ export const Middleware = {
    * - For Streams: `Stream.provideServiceEffect()`
    *
    * @see serviceMiddleware for full documentation and examples
-   * @since 0.2.0
+   * @since 0.3.0
    */
   withService: serviceMiddleware,
 }
@@ -295,7 +295,7 @@ export type ServiceMiddlewareTypeId = typeof ServiceMiddlewareTypeId
  * @template E - Error type the middleware can produce
  * @template R - Requirements (Effect context) the middleware needs
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export interface ServiceMiddleware<
   CtxIn extends BaseContext = BaseContext,
@@ -331,7 +331,7 @@ export interface ServiceMiddleware<
 /**
  * Check if a middleware is a ServiceMiddleware.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export const isServiceMiddleware = (
   middleware: Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
@@ -341,7 +341,7 @@ export const isServiceMiddleware = (
 /**
  * Extract the service type from a ServiceMiddleware.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export type ServiceMiddlewareService<M> = M extends ServiceMiddleware<any, any, infer S, any, any>
   ? S
@@ -404,7 +404,7 @@ export type ServiceMiddlewareService<M> = M extends ServiceMiddleware<any, any, 
  * }
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 export function serviceMiddleware<
   CtxIn extends BaseContext,

@@ -31,7 +31,7 @@
  * program.pipe(Effect.provide(Network.BrowserLive))
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as Effect from "effect/Effect"
@@ -50,7 +50,7 @@ import { Gate, type GateInstance } from "../gate/index.js"
 /**
  * Current state of network connectivity.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export interface NetworkState {
@@ -65,7 +65,7 @@ export interface NetworkState {
  * - `'browser'`: Use navigator.onLine + events (default, works everywhere)
  * - `'none'`: Always online (disable detection)
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category types
  */
 export type NetworkDetector = "browser" | "none"
@@ -77,7 +77,7 @@ export type NetworkDetector = "browser" | "none"
 /**
  * Network service interface.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category service
  */
 export interface NetworkService {
@@ -156,7 +156,7 @@ export interface NetworkService {
  * })
  * ```
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category service
  */
 export class Network extends Context.Tag("@effect-trpc/Network")<Network, NetworkService>() {}
@@ -333,7 +333,7 @@ const makeAlwaysOnline: Effect.Effect<NetworkService, never, Scope.Scope> = Effe
  * Check if currently online.
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const isOnline: Effect.Effect<boolean, never, Network> = Effect.flatMap(
@@ -345,7 +345,7 @@ export const isOnline: Effect.Effect<boolean, never, Network> = Effect.flatMap(
  * Get full network state.
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const getState: Effect.Effect<NetworkState, never, Network> = Effect.flatMap(
@@ -357,7 +357,7 @@ export const getState: Effect.Effect<NetworkState, never, Network> = Effect.flat
  * Wait until online.
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const awaitOnline: Effect.Effect<void, never, Network> = Effect.flatMap(
@@ -369,7 +369,7 @@ export const awaitOnline: Effect.Effect<void, never, Network> = Effect.flatMap(
  * Wait until offline.
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const awaitOffline: Effect.Effect<void, never, Network> = Effect.flatMap(
@@ -381,7 +381,7 @@ export const awaitOffline: Effect.Effect<void, never, Network> = Effect.flatMap(
  * Run effect when online (waits if offline).
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const whenOnline = <A, E, R>(
@@ -393,7 +393,7 @@ export const whenOnline = <A, E, R>(
  * Run effect when offline (waits if online).
  * Requires Network service in context.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category accessors
  */
 export const whenOffline = <A, E, R>(
@@ -408,7 +408,7 @@ export const whenOffline = <A, E, R>(
  * Layer that uses browser APIs for network detection.
  * Always reports online on server (SSR-safe).
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category layers
  */
 export const NetworkBrowserLive: Layer.Layer<Network> = Layer.scoped(Network, makeBrowserNetwork)
@@ -417,7 +417,7 @@ export const NetworkBrowserLive: Layer.Layer<Network> = Layer.scoped(Network, ma
  * Layer that always reports online (no detection).
  * Useful for testing or server-only code.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category layers
  */
 export const NetworkAlwaysOnline: Layer.Layer<Network> = Layer.scoped(Network, makeAlwaysOnline)

@@ -3,7 +3,7 @@
  *
  * Errors for the Gate primitive.
  *
- * @since 0.2.0
+ * @since 0.3.0
  */
 
 import * as Schema from "effect/Schema"
@@ -22,7 +22,7 @@ export type GateErrorTypeId = typeof GateErrorTypeId
 /**
  * Error thrown when attempting to pass through a closed gate with 'fail' behavior.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category errors
  */
 export class GateClosedError extends Schema.TaggedError<GateClosedError>()("GateClosedError", {
