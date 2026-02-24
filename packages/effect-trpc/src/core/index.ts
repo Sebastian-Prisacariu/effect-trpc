@@ -178,3 +178,48 @@ export type {
 
 export { ClientId, SubscriptionId } from "./types.js"
 export type { ClientId as ClientIdType, SubscriptionId as SubscriptionIdType } from "./types.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gate (Flow Control)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  // Namespace with all functions
+  Gate,
+  // Error
+  GateClosedError,
+  GateErrorTypeId,
+  // Type guard
+  isGate,
+} from "./gate/index.js"
+
+export type {
+  ClosedBehavior,
+  GateState,
+  GateInstance,
+  GateOptions,
+} from "./gate/index.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network (Online/Offline Detection)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  // Service Tag
+  Network,
+  // Layers
+  NetworkBrowserLive,
+  NetworkAlwaysOnline,
+  // Convenience accessors
+  isOnline as networkIsOnline,
+  getState as networkGetState,
+  awaitOnline as networkAwaitOnline,
+  awaitOffline as networkAwaitOffline,
+  whenOnline as networkWhenOnline,
+  whenOffline as networkWhenOffline,
+  // Errors
+  NetworkOfflineError,
+  NetworkErrorTypeId,
+} from "./network/index.js"
+
+export type { NetworkState, NetworkDetector, NetworkService } from "./network/index.js"

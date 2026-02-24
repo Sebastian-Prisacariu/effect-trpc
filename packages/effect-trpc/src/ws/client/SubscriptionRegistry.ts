@@ -5,22 +5,24 @@
  * Routes incoming messages to the correct subscription handlers.
  */
 
-import * as Effect from "effect/Effect"
 import * as Context from "effect/Context"
-import * as Layer from "effect/Layer"
-import * as Ref from "effect/Ref"
-import * as HashMap from "effect/HashMap"
-import * as Queue from "effect/Queue"
-import * as Stream from "effect/Stream"
-import * as Option from "effect/Option"
-import * as Fiber from "effect/Fiber"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
+import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as HashMap from "effect/HashMap"
+import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
+import * as Predicate from "effect/Predicate"
+import * as Queue from "effect/Queue"
+import * as Ref from "effect/Ref"
+import * as Stream from "effect/Stream"
 
+import { pipe } from "effect"
+import { SubscriptionNotFoundError } from "../errors.js"
+import type { FromServerMessage } from "../protocol.js"
 import type { SubscriptionId } from "../types.js"
 import { generateSubscriptionId } from "../types.js"
-import type { FromServerMessage } from "../protocol.js"
-import { SubscriptionNotFoundError } from "../errors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscription State
@@ -28,7 +30,7 @@ import { SubscriptionNotFoundError } from "../errors.js"
 
 /**
  * Client-side subscription state.
- * 
+ *
  * @since 0.1.0
  * @category models
  */
@@ -41,7 +43,7 @@ export type SubscriptionState =
 
 /**
  * SubscriptionState constructors.
- * 
+ *
  * @since 0.1.0
  * @category constructors
  */
@@ -65,7 +67,7 @@ export const SubscriptionState = {
 
 /**
  * Represents a client-side active subscription.
- * 
+ *
  * @since 0.1.0
  * @category models
  */
@@ -80,8 +82,8 @@ export interface ClientSubscription<A = unknown> {
   readonly input: unknown
   /** Current state */
   readonly state: SubscriptionState
-  /** Queue for incoming data */
-  readonly dataQueue: Queue.Queue<A | SubscriptionEvent>
+  /** Queue for incoming subscription events */
+  readonly dataQueue: Queue.Queue<SubscriptionEvent<A>>
   /** When the subscription was created */
   readonly createdAt: DateTimeType.Utc
   /** Ref to track consumer fiber for cleanup */
@@ -101,32 +103,32 @@ export interface ClientSubscription<A = unknown> {
 
 /**
  * Events that can be pushed to a subscription's data queue.
- * 
+ *
  * @since 0.1.0
  * @category models
  */
-export type SubscriptionEvent =
+export type SubscriptionEvent<A = unknown> =
   | { readonly _tag: "Subscribed" }
-  | { readonly _tag: "Data"; readonly data: unknown }
-  | { readonly _tag: "ServerData"; readonly data: unknown }
+  | { readonly _tag: "Data"; readonly data: A }
+  | { readonly _tag: "ServerData"; readonly data: A }
   | { readonly _tag: "Error"; readonly error: unknown }
   | { readonly _tag: "Complete" }
 
 /**
  * SubscriptionEvent constructors.
- * 
+ *
  * @since 0.1.0
  * @category constructors
  */
 export const SubscriptionEvent = {
-  Subscribed: { _tag: "Subscribed" } as SubscriptionEvent,
-  Data: (data: unknown): SubscriptionEvent => ({ _tag: "Data", data }),
-  ServerData: (data: unknown): SubscriptionEvent => ({
+  Subscribed: { _tag: "Subscribed" } as SubscriptionEvent<never>,
+  Data: <A>(data: A): SubscriptionEvent<A> => ({ _tag: "Data", data }),
+  ServerData: <A>(data: A): SubscriptionEvent<A> => ({
     _tag: "ServerData",
     data,
   }),
-  Error: (error: unknown): SubscriptionEvent => ({ _tag: "Error", error }),
-  Complete: { _tag: "Complete" } as SubscriptionEvent,
+  Error: (error: unknown): SubscriptionEvent<never> => ({ _tag: "Error", error }),
+  Complete: { _tag: "Complete" } as SubscriptionEvent<never>,
 } as const
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,7 +150,7 @@ export type BackpressureCallback = (
 
 /**
  * Service interface for client subscription registry.
- * 
+ *
  * @since 0.1.0
  * @category services
  */
@@ -173,9 +175,7 @@ export interface SubscriptionRegistryShape {
   /**
    * Get a subscription by ID.
    */
-  readonly get: (
-    id: SubscriptionId,
-  ) => Effect.Effect<ClientSubscription, SubscriptionNotFoundError>
+  readonly get: (id: SubscriptionId) => Effect.Effect<ClientSubscription, SubscriptionNotFoundError>
 
   /**
    * Remove a subscription (called when unsubscribing or complete).
@@ -210,9 +210,7 @@ export interface SubscriptionRegistryShape {
    *
    * @since 0.1.0
    */
-  readonly setBackpressureCallback: (
-    callback: BackpressureCallback | null,
-  ) => Effect.Effect<void>
+  readonly setBackpressureCallback: (callback: BackpressureCallback | null) => Effect.Effect<void>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,13 +229,14 @@ export interface SubscriptionRegistryShape {
  *   // ...
  * }).pipe(Effect.provide(SubscriptionRegistry.Live))
  * ```
- * 
+ *
  * @since 0.1.0
  * @category tags
  */
-export class SubscriptionRegistry extends Context.Tag(
-  "@effect-trpc/SubscriptionRegistry",
-)<SubscriptionRegistry, SubscriptionRegistryShape>() {
+export class SubscriptionRegistry extends Context.Tag("@effect-trpc/SubscriptionRegistry")<
+  SubscriptionRegistry,
+  SubscriptionRegistryShape
+>() {
   /**
    * Default layer for subscription registry.
    *
@@ -256,9 +255,7 @@ export class SubscriptionRegistry extends Context.Tag(
  */
 const makeSubscriptionRegistry = Effect.gen(function* () {
   // Active subscriptions by ID
-  const subscriptions = yield* Ref.make(
-    HashMap.empty<SubscriptionId, ClientSubscription>(),
-  )
+  const subscriptions = yield* Ref.make(HashMap.empty<SubscriptionId, ClientSubscription>())
 
   // Callback for backpressure state changes
   const backpressureCallbackRef = yield* Ref.make<BackpressureCallback | null>(null)
@@ -270,8 +267,8 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
         const createdAt = yield* DateTime.now
         // Use sliding bounded queue to prevent memory accumulation on slow consumers
         // 1000 messages max per subscription, drops oldest when full
-        const dataQueue = yield* Queue.sliding<A | SubscriptionEvent>(1000)
-        
+        const dataQueue = yield* Queue.sliding<SubscriptionEvent<A>>(1000)
+
         // Create fiber ref BEFORE subscription so it can be stored
         const consumerFiberRef = yield* Ref.make<Fiber.RuntimeFiber<void, unknown> | null>(null)
 
@@ -288,64 +285,27 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
           lastQueueFillPercent: 0,
         }
 
-        yield* Ref.update(
-          subscriptions,
-          HashMap.set(id, subscription as ClientSubscription),
-        )
+        yield* Ref.update(subscriptions, HashMap.set(id, subscription as ClientSubscription))
 
-        // Create stream from queue that processes events
-        const stream: Stream.Stream<A, unknown> = Stream.asyncEffect<A, unknown>(
-          (emit) =>
-            Effect.gen(function* () {
-              // Consume from queue and emit to stream
-              const consume = Effect.gen(function* () {
-                let running = true
-                while (running) {
-                  const event = yield* Queue.take(dataQueue)
-                  
-                  if (
-                    typeof event === "object" &&
-                    event !== null &&
-                    "_tag" in event
-                  ) {
-                    const e = event
-                    switch (e._tag) {
-                      case "Subscribed":
-                        // Skip
-                        break
-                      case "Data":
-                        yield* Effect.promise(() => emit.single(e.data as A))
-                        break
-                      case "ServerData":
-                        yield* Effect.promise(() => emit.single(e.data as A))
-                        break
-                      case "Error":
-                        yield* Effect.promise(() => emit.fail(e.error))
-                        running = false
-                        break
-                      case "Complete":
-                        yield* Effect.promise(() => emit.end())
-                        running = false
-                        break
-                    }
-                  } else {
-                    yield* Effect.promise(() => emit.single(event))
-                  }
-                }
-              })
-              
-              // Fork and track the fiber
-              const fiber = yield* Effect.fork(consume)
-              yield* Ref.set(consumerFiberRef, fiber)
-              
-              // Return cleanup function
-              return Effect.gen(function* () {
-                const f = yield* Ref.get(consumerFiberRef)
-                if (f) {
-                  yield* Fiber.interrupt(f)
-                }
-              })
-            }),
+        const isTerminalSubscriptionEvent = (event: SubscriptionEvent<A>): boolean =>
+          Predicate.isTagged(event, "Error") || Predicate.isTagged(event, "Complete")
+
+        // Create stream from queue and map control events to stream behavior
+        const stream: Stream.Stream<A, unknown> = pipe(
+          Stream.fromQueue(dataQueue),
+          Stream.takeUntil(isTerminalSubscriptionEvent),
+          Stream.flatMap((event) => {
+            switch (event._tag) {
+              case "Data":
+              case "ServerData":
+                return Stream.succeed(event.data)
+              case "Error":
+                return Stream.fail(event.error)
+              case "Subscribed":
+              case "Complete":
+                return Stream.empty
+            }
+          }),
         )
 
         return { id, stream }
@@ -368,7 +328,7 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
 
         const id = message.id as SubscriptionId
         const map = yield* Ref.get(subscriptions)
-        
+
         let sub = HashMap.get(map, id)
         if (Option.isNone(sub)) {
           // Try finding by serverId
@@ -400,15 +360,9 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
           )
           yield* Queue.offer(subscription.dataQueue, SubscriptionEvent.Subscribed)
         } else if (message._tag === "Data") {
-          yield* Queue.offer(
-            subscription.dataQueue,
-            SubscriptionEvent.Data(message.data),
-          )
+          yield* Queue.offer(subscription.dataQueue, SubscriptionEvent.Data(message.data))
         } else if (message._tag === "ServerData") {
-          yield* Queue.offer(
-            subscription.dataQueue,
-            SubscriptionEvent.ServerData(message.data),
-          )
+          yield* Queue.offer(subscription.dataQueue, SubscriptionEvent.ServerData(message.data))
         } else if (message._tag === "Error") {
           // Update state and push error
           yield* Ref.update(
@@ -418,10 +372,7 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
               state: SubscriptionState.Error(message.error),
             } as ClientSubscription),
           )
-          yield* Queue.offer(
-            subscription.dataQueue,
-            SubscriptionEvent.Error(message.error),
-          )
+          yield* Queue.offer(subscription.dataQueue, SubscriptionEvent.Error(message.error))
         } else if (message._tag === "Complete") {
           // Update state and offer complete event
           // Don't shutdown queue here - let the stream handle it via takeUntil
@@ -464,7 +415,11 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
             yield* callback(clientId, false).pipe(Effect.ignore)
           }
         }
-      }).pipe(Effect.withSpan("SubscriptionRegistry.routeMessage", { attributes: { messageTag: message._tag } })),
+      }).pipe(
+        Effect.withSpan("SubscriptionRegistry.routeMessage", {
+          attributes: { messageTag: message._tag },
+        }),
+      ),
 
     get: (id) =>
       Effect.gen(function* () {
@@ -472,9 +427,7 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
         const sub = HashMap.get(map, id)
 
         if (Option.isNone(sub)) {
-          return yield* Effect.fail(
-            new SubscriptionNotFoundError({ subscriptionId: id }),
-          )
+          return yield* Effect.fail(new SubscriptionNotFoundError({ subscriptionId: id }))
         }
 
         return sub.value
@@ -494,7 +447,9 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
           yield* Queue.shutdown(sub.value.dataQueue)
           yield* Ref.update(subscriptions, HashMap.remove(id))
         }
-      }).pipe(Effect.withSpan("SubscriptionRegistry.remove", { attributes: { subscriptionId: id } })),
+      }).pipe(
+        Effect.withSpan("SubscriptionRegistry.remove", { attributes: { subscriptionId: id } }),
+      ),
 
     getAll: Effect.gen(function* () {
       const map = yield* Ref.get(subscriptions)
@@ -536,10 +491,11 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
           return false
         }
         return sub.value.isPaused
-      }).pipe(Effect.withSpan("SubscriptionRegistry.isPaused", { attributes: { subscriptionId: id } })),
+      }).pipe(
+        Effect.withSpan("SubscriptionRegistry.isPaused", { attributes: { subscriptionId: id } }),
+      ),
 
-    setBackpressureCallback: (callback) =>
-      Ref.set(backpressureCallbackRef, callback),
+    setBackpressureCallback: (callback) => Ref.set(backpressureCallbackRef, callback),
   }
 
   return service
@@ -551,12 +507,14 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
 
 /**
  * Default layer for subscription registry.
- * 
+ *
  * @since 0.1.0
  * @category layers
  */
-export const SubscriptionRegistryLive: Layer.Layer<SubscriptionRegistry> =
-  Layer.effect(SubscriptionRegistry, makeSubscriptionRegistry)
+export const SubscriptionRegistryLive: Layer.Layer<SubscriptionRegistry> = Layer.effect(
+  SubscriptionRegistry,
+  makeSubscriptionRegistry,
+)
 
 // Assign static property after layer is defined
 SubscriptionRegistry.Live = SubscriptionRegistryLive

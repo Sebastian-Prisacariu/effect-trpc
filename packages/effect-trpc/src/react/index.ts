@@ -89,6 +89,8 @@ export type {
   CreateTRPCReactOptions,
   TRPCReactClient,
   TRPCProviderProps,
+  TRPCNetworkUtils,
+  NetworkConfig,
   ProcedureMetadata,
   ProcedureMetadataRegistry,
   TracingConfig,
@@ -176,6 +178,17 @@ export {
 } from "./signals.js"
 
 export { keepPreviousData, queryPresets } from "./presets.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network & Gate Hooks
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  useNetworkStatus,
+  useGate,
+  type UseNetworkStatusReturn,
+  type UseGateReturn,
+} from "./hooks/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Server Client (SSR/RSC)
