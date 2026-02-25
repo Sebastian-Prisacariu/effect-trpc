@@ -80,6 +80,16 @@ import {
 } from "./atoms.js"
 
 import { Result, type QueryResult, type MutationResult } from "./result.js"
+
+/**
+ * Return type for useQuery hook.
+ * Alias for QueryResult to match expected naming conventions.
+ *
+ * @since 0.3.1
+ * @category hooks
+ */
+export type UseQueryReturn<A, E = unknown> = QueryResult<A, E>
+
 import { useNetworkStatus } from "./hooks/index.js"
 import {
   isStale,
