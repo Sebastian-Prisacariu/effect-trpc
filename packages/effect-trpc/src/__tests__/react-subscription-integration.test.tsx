@@ -6,35 +6,49 @@ import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
 import { WebSocketServer, WebSocket as NodeWebSocket } from "ws"
+import { createWrappedMockWebSocket } from "./test-utils/index.js"
 
-class MockWebSocket extends NodeWebSocket {
+// We need a queue to capture inputs sent from the client
+const receivedMessages: any[] = []
+
+/**
+ * Enhanced MockWebSocket that wraps Node.js WebSocket for integration tests.
+ * 
+ * This uses the shared createWrappedMockWebSocket utility which provides:
+ * - Standard WebSocket API properties (readyState constants, bufferedAmount, protocol)
+ * - Proper state transitions
+ * - Event forwarding for browser-style handlers (onopen, onclose, onmessage, onerror)
+ * - Test helper methods (__getSentMessages, __clearSentMessages, etc.)
+ * 
+ * Additional functionality for this test file:
+ * - Intercepts sent messages and stores Subscribe/ClientData/Unsubscribe for assertions
+ */
+const BaseMockWebSocket = createWrappedMockWebSocket(NodeWebSocket)
+
+class MockWebSocket extends BaseMockWebSocket {
+  // Static ready state constants (W3C WebSocket API)
+  static readonly CONNECTING = 0 as const
+  static readonly OPEN = 1 as const
+  static readonly CLOSING = 2 as const
+  static readonly CLOSED = 3 as const
+
   constructor(url: string, protocols?: string | string[]) {
     super(url, protocols)
-    const originalSend = this.send.bind(this)
-    this.send = function(data: any, cb?: any) {
+    
+    // Intercept send to capture messages for test assertions
+    const self = this as any
+    const originalSend = self["send"].bind(this)
+    self["send"] = function(data: any, cb?: any) {
       try {
         const parsed = typeof data === "string" ? JSON.parse(data) : JSON.parse(data.toString())
         if (parsed._tag === "ClientData" || parsed._tag === "Unsubscribe" || parsed._tag === "Subscribe") {
           receivedMessages.push(parsed)
         }
-      } catch (e) {
-        console.error("MOCK WEBSOCKET PARSE ERROR", e)
+      } catch (_e) {
+        // Ignore parse errors for non-JSON messages
       }
       return originalSend(data, cb)
     }
-    this.on('close', () => {
-      if (this.onclose) {
-        this.onclose({} as any)
-      }
-    })
-    this.on('message', (data: any) => {
-      const str = Buffer.isBuffer(data) ? data.toString('utf8') : 
-                  data instanceof ArrayBuffer ? new TextDecoder().decode(data) : 
-                  Array.isArray(data) ? Buffer.concat(data).toString('utf8') : data
-      if (this.onmessage) {
-        this.onmessage({ data: str } as any)
-      }
-    })
   }
 }
 
@@ -45,9 +59,6 @@ if (typeof global !== "undefined") global.WebSocket = MockWebSocket as any
 import { procedure, procedures, Router } from "../index.js"
 import { createWebSocketHandler } from "../node/index.js"
 import { useSubscription, WebSocketProvider } from "../react/subscription.js"
-
-// We need a queue to capture inputs sent from the client
-const receivedMessages: any[] = []
 
 const EchoInput = Schema.Struct({ text: Schema.String })
 const EchoOutput = Schema.Struct({ text: Schema.String })
@@ -150,9 +161,14 @@ describe("useSubscription Integration", () => {
     const wrapper = createWrapper()
     const { result } = renderHook(() => useSubscription("test.echo", { text: "hello" }), { wrapper })
 
+    // Debug: Log state transitions
+    console.log("Initial state:", result.current.state._tag)
+    console.log("Connection state:", result.current.connectionState._tag)
+
     await waitFor(() => {
+      console.log("Waiting... state:", result.current.state._tag, "connection:", result.current.connectionState._tag, "received:", receivedMessages.length, receivedMessages.map(m => m._tag).join(","))
       expect(result.current.isActive).toBe(true)
-    })
+    }, { timeout: 3000, interval: 100 })
 
     // Simulate sending data from client to server
     act(() => {

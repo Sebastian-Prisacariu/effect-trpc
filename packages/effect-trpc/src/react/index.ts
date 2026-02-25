@@ -103,7 +103,10 @@ export type {
   UseMutationReturn,
   UseStreamOptions,
   UseStreamReturn,
+  UseStreamErrorContext,
   UseChatOptions,
+  UseChatFinishResult,
+  UseChatErrorContext,
   UseChatReturn,
   UseUtilsReturn,
   OptimisticUpdateConfig,
@@ -143,9 +146,14 @@ export {
   // Atom families for advanced usage
   queryAtomFamily,
   callerAtomFamily,
+  mutationAtomFamily,
+  writableMutationAtomFamily,
   streamAtomFamily,
   chatAtomFamily,
   subscriptionAtomFamily,
+  // Initial state constructors
+  initialMutationMainState,
+  initialCallerState,
 } from "./atoms.js"
 
 // ─────────────────────────────────────────────────────────────────────────────

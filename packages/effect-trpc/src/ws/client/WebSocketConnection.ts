@@ -289,8 +289,17 @@ const makeWebSocketConnection = (
           runFork(
             parseMessage(event.data).pipe(
               Effect.flatMap((message) => Queue.offer(messageQueue, message)),
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-              Effect.catchAllCause((cause) => Effect.logError("WebSocket message parse error", { cause, data: event.data })),
+              Effect.catchAllCause((cause) => {
+                // Get data length safely without exposing content
+                const dataLength = typeof event.data === "string" 
+                  ? event.data.length 
+                  : event.data instanceof ArrayBuffer 
+                    ? event.data.byteLength 
+                    : 0
+                return Effect.logError("WebSocket message parse error").pipe(
+                  Effect.annotateLogs({ cause, dataLength })
+                )
+              }),
             ),
           )
         }

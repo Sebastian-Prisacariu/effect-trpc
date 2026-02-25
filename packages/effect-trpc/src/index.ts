@@ -56,3 +56,34 @@ export {
   NetworkError,
   TRPCErrorSchema,
 } from "./errors/index.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Logging
+// ─────────────────────────────────────────────────────────────────────────────
+
+export {
+  // Types
+  type LogCategory,
+  type TrpcLoggerConfig,
+  type TrpcLogEvent,
+  type TrpcLoggerService,
+  // Service Tag
+  TrpcLogger,
+  // Configuration
+  defaultConfig as defaultLoggerConfig,
+  // Layers
+  makeTrpcLoggerLayer,
+  TrpcLoggerLive,
+  TrpcLoggerDev,
+  TrpcLoggerProd,
+  TrpcLoggerSilent,
+  // Utilities
+  redactSensitiveData,
+  generateRequestId,
+  // Convenience functions
+  logQuery,
+  logMutation,
+  logTrpcEvent,
+  // Re-export Logger from Effect
+  Logger,
+} from "./shared/logging.js"

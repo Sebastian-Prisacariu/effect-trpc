@@ -31,17 +31,17 @@ export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscrip
  *
  * @remarks
  * **Context Type Tracking (v2):**
- * 
+ *
  * The `Ctx` type parameter tracks the context type produced by the
  * middleware chain. This enables compile-time type safety for handlers:
- * 
+ *
  * ```ts
  * // Context type flows through middleware
  * procedure
  *   .use(authMiddleware)   // Ctx becomes AuthenticatedContext<User>
  *   .use(orgMiddleware)    // Ctx becomes AuthenticatedContext<User> & OrgContext
  *   .query()
- * 
+ *
  * // Handler receives typed context
  * const handlers = {
  *   myProc: (ctx, input) => {
@@ -101,8 +101,8 @@ export interface ProcedureDefinition<
   readonly tags: ReadonlyArray<string>
   readonly invalidates: ReadonlyArray<string>
   readonly invalidatesTags: ReadonlyArray<string>
-  /** Middleware chain - context type is tracked via Ctx */
-  readonly middlewares: ReadonlyArray<Middleware<any, any, any, any, any>>
+  /** Middleware chain - context type is tracked via Ctx, input type is accumulated via InputExt */
+  readonly middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
   /**
    * Phantom type to carry context type information.
    * Never actually set at runtime - only exists for type inference.
@@ -129,7 +129,7 @@ export interface ProcedureDefinition<
 
 /**
  * Extract the context type from a procedure definition.
- * 
+ *
  * @example
  * ```ts
  * const myProc = procedure.use(authMiddleware).query()
@@ -140,17 +140,8 @@ export interface ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureContext<T> = T extends ProcedureDefinition<
-  any,
-  any,
-  any,
-  infer Ctx,
-  any,
-  any,
-  any
->
-  ? Ctx
-  : BaseContext
+export type InferProcedureContext<T> =
+  T extends ProcedureDefinition<any, any, any, infer Ctx, any, any, any> ? Ctx : BaseContext
 
 /**
  * Extract the input type from a procedure definition.
@@ -165,17 +156,8 @@ export type InferProcedureContext<T> = T extends ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureInput<T> = T extends ProcedureDefinition<
-  infer I,
-  any,
-  any,
-  any,
-  any,
-  any,
-  any
->
-  ? I
-  : unknown
+export type InferProcedureInput<T> =
+  T extends ProcedureDefinition<infer I, any, any, any, any, any, any> ? I : unknown
 
 /**
  * Extract the output type from a procedure definition.
@@ -190,17 +172,8 @@ export type InferProcedureInput<T> = T extends ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureOutput<T> = T extends ProcedureDefinition<
-  any,
-  infer A,
-  any,
-  any,
-  any,
-  any,
-  any
->
-  ? A
-  : unknown
+export type InferProcedureOutput<T> =
+  T extends ProcedureDefinition<any, infer A, any, any, any, any, any> ? A : unknown
 
 /**
  * Extract the error type from a procedure definition.
@@ -215,21 +188,12 @@ export type InferProcedureOutput<T> = T extends ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureError<T> = T extends ProcedureDefinition<
-  any,
-  any,
-  infer E,
-  any,
-  any,
-  any,
-  any
->
-  ? E
-  : unknown
+export type InferProcedureError<T> =
+  T extends ProcedureDefinition<any, any, infer E, any, any, any, any> ? E : unknown
 
 /**
  * Extract the middleware requirements (R channel) from a procedure definition.
- * 
+ *
  * @example
  * ```ts
  * const myProc = procedure
@@ -243,21 +207,12 @@ export type InferProcedureError<T> = T extends ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureMiddlewareR<T> = T extends ProcedureDefinition<
-  any,
-  any,
-  any,
-  any,
-  any,
-  infer R,
-  any
->
-  ? R
-  : never
+export type InferProcedureMiddlewareR<T> =
+  T extends ProcedureDefinition<any, any, any, any, any, infer R, any> ? R : never
 
 /**
  * Extract the services provided by middleware from a procedure definition.
- * 
+ *
  * @example
  * ```ts
  * const myProc = procedure
@@ -270,17 +225,8 @@ export type InferProcedureMiddlewareR<T> = T extends ProcedureDefinition<
  * @since 0.1.0
  * @category utils
  */
-export type InferProcedureProvides<T> = T extends ProcedureDefinition<
-  any,
-  any,
-  any,
-  any,
-  any,
-  any,
-  infer Provides
->
-  ? Provides
-  : never
+export type InferProcedureProvides<T> =
+  T extends ProcedureDefinition<any, any, any, any, any, any, infer Provides> ? Provides : never
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Procedure Builder
@@ -327,7 +273,7 @@ export interface ProcedureBuilder<
   /**
    * Add a short summary to this procedure.
    * Unlike description, this should be a brief one-liner for OpenAPI.
-   * 
+   *
    * @example
    * ```ts
    * procedure
@@ -341,7 +287,7 @@ export interface ProcedureBuilder<
   /**
    * Add a link to external documentation for this procedure.
    * Used in OpenAPI externalDocs field.
-   * 
+   *
    * @example
    * ```ts
    * procedure
@@ -354,7 +300,7 @@ export interface ProcedureBuilder<
   /**
    * Add a description for the successful response.
    * Used in OpenAPI response description field.
-   * 
+   *
    * @example
    * ```ts
    * procedure
@@ -374,7 +320,7 @@ export interface ProcedureBuilder<
   /**
    * Apply middleware to this procedure.
    * Middleware can transform context, add authentication, rate limiting, etc.
-   * 
+   *
    * **Type Tracking:**
    * - Context type is updated based on the middleware's output context type
    * - Error types are accumulated from middleware that can fail
@@ -390,7 +336,7 @@ export interface ProcedureBuilder<
    *     .input(UpdateUserSchema)
    *     .mutation(),
    * })
-   * 
+   *
    * // Handler receives typed context
    * const handlers = {
    *   update: (ctx, input) => {
@@ -401,17 +347,21 @@ export interface ProcedureBuilder<
    * // Layer requires: TokenService (Database is provided by middleware)
    * ```
    */
-  use<CtxOut extends BaseContext, E2, R2, P = never>(
-    middleware: Middleware<Ctx, CtxOut, E2, R2, P>,
-  ): ProcedureBuilder<I, A, E | E2, CtxOut, R | R2, Provides | P>
+  use<CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
+    middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
+  ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>
 
   /**
    * Define the input schema for this procedure.
    * Input is validated before the handler is called.
+   *
+   * **Note:** If middleware with `withInput` has been applied, the final input
+   * type will be the intersection of the middleware's input requirements and
+   * the schema defined here: `MiddlewareInput & I2`
    */
   input<I2, IFrom = I2>(
     schema: Schema.Schema<I2, IFrom>,
-  ): ProcedureBuilder<I2, A, E, Ctx, R, Provides>
+  ): ProcedureBuilder<I & I2, A, E, Ctx, R, Provides>
 
   /**
    * Define the output schema for this procedure.
@@ -423,15 +373,15 @@ export interface ProcedureBuilder<
 
   /**
    * Define the typed error schema for this procedure.
-   * 
+   *
    * @remarks
    * **Middleware Error Types:**
-   * 
+   *
    * When using middleware that can fail (e.g., `authMiddleware`, `rateLimitMiddleware`),
    * their error types are accumulated at the type level via `.use()`. However, for
    * proper wire serialization, you should include middleware error schemas in the
    * procedure's error schema using `Schema.Union`.
-   * 
+   *
    * @example
    * ```ts
    * // Include middleware errors in error schema for full type safety
@@ -460,17 +410,13 @@ export interface ProcedureBuilder<
    * Declare which procedure paths this mutation invalidates.
    * @example procedure.invalidates(['user.list']).mutation()
    */
-  invalidates(
-    paths: ReadonlyArray<string>,
-  ): ProcedureBuilder<I, A, E, Ctx, R, Provides>
+  invalidates(paths: ReadonlyArray<string>): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
    * Declare which tags this mutation invalidates.
    * @example procedure.invalidatesTags(['users']).mutation()
    */
-  invalidatesTags(
-    tags: ReadonlyArray<string>,
-  ): ProcedureBuilder<I, A, E, Ctx, R, Provides>
+  invalidatesTags(tags: ReadonlyArray<string>): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
    * Create a query procedure (HTTP GET, cached).
@@ -496,14 +442,14 @@ export interface ProcedureBuilder<
 
   /**
    * Create a subscription procedure (WebSocket-based real-time).
-   * 
+   *
    * Handler returns Effect<Stream<A, E>, E, R>.
    * Output schema validates each streamed item.
-   * 
+   *
    * @remarks
    * Requires WebSocket transport. Will fail at runtime if only HTTP is configured.
    * See DECISION-006 for full subscription system design.
-   * 
+   *
    * @example
    * ```ts
    * const NotificationProcedures = procedures('notifications', {
@@ -533,7 +479,7 @@ interface BuilderState {
   tags: ReadonlyArray<string>
   invalidates: ReadonlyArray<string>
   invalidatesTags: ReadonlyArray<string>
-  middlewares: ReadonlyArray<Middleware<any, any, any, any, any>>
+  middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
 }
 
 /**
@@ -555,7 +501,15 @@ interface BuilderState {
  * TypeScript cannot verify the generic alignment without the cast because
  * BuilderState uses `unknown` for type-erased schema storage.
  */
-const createDefinition = <I, A, E, Ctx extends BaseContext, Type extends ProcedureType, R = never, Provides = never>(
+const createDefinition = <
+  I,
+  A,
+  E,
+  Ctx extends BaseContext,
+  Type extends ProcedureType,
+  R = never,
+  Provides = never,
+>(
   state: BuilderState,
   type: Type,
 ): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> =>
@@ -589,20 +543,22 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, externalDocs: url }),
     responseDescription: (text: string) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, responseDescription: text }),
-    deprecated: () =>
-      createBuilder<I, A, E, Ctx, R, Provides>({ ...state, deprecated: true }),
-    use: <CtxOut extends BaseContext, E2, R2, P = never>(middleware: Middleware<Ctx, CtxOut, E2, R2, P>) =>
-      createBuilder<I, A, E | E2, CtxOut, R | R2, Provides | P>({
+    deprecated: () => createBuilder<I, A, E, Ctx, R, Provides>({ ...state, deprecated: true }),
+    use: <CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
+      middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
+    ) =>
+      createBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>({
         ...state,
         middlewares: [...state.middlewares, middleware],
       }),
-    input: (schema: unknown) =>
-      createBuilder<unknown, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),
+    input: <I2>(schema: unknown) =>
+      createBuilder<I & I2, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),
     output: (schema: unknown) =>
       createBuilder<I, unknown, E, Ctx, R, Provides>({ ...state, outputSchema: schema }),
     error: (schema: unknown) =>
       createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema: schema }),
-    tags: (tags: ReadonlyArray<string>) => createBuilder<I, A, E, Ctx, R, Provides>({ ...state, tags }),
+    tags: (tags: ReadonlyArray<string>) =>
+      createBuilder<I, A, E, Ctx, R, Provides>({ ...state, tags }),
     invalidates: (paths: ReadonlyArray<string>) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, invalidates: paths }),
     invalidatesTags: (tags: ReadonlyArray<string>) =>
@@ -612,7 +568,8 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
     mutation: () => createDefinition<I, A, E, Ctx, "mutation", R, Provides>(state, "mutation"),
     stream: () => createDefinition<I, A, E, Ctx, "stream", R, Provides>(state, "stream"),
     chat: () => createDefinition<I, A, E, Ctx, "chat", R, Provides>(state, "chat"),
-    subscription: () => createDefinition<I, A, E, Ctx, "subscription", R, Provides>(state, "subscription"),
+    subscription: () =>
+      createDefinition<I, A, E, Ctx, "subscription", R, Provides>(state, "subscription"),
   }) as ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
 /**
@@ -635,12 +592,13 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
  * @since 0.1.0
  * @category constructors
  */
-export const procedure: ProcedureBuilder<unknown, unknown, never, BaseContext, never, never> = createBuilder<unknown, unknown, never, BaseContext, never, never>({
-  inputSchema: undefined,
-  outputSchema: undefined,
-  errorSchema: undefined,
-  tags: [],
-  invalidates: [],
-  invalidatesTags: [],
-  middlewares: [],
-} as BuilderState)
+export const procedure: ProcedureBuilder<unknown, unknown, never, BaseContext, never, never> =
+  createBuilder<unknown, unknown, never, BaseContext, never, never>({
+    inputSchema: undefined,
+    outputSchema: undefined,
+    errorSchema: undefined,
+    tags: [],
+    invalidates: [],
+    invalidatesTags: [],
+    middlewares: [],
+  } as BuilderState)

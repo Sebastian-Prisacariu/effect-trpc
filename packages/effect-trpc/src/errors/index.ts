@@ -36,15 +36,23 @@ const BaseFields = {
 // Input Validation Error
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Sensitive field patterns for redaction
+const SENSITIVE_PATTERNS = /"(password|token|secret|key|apikey|api_key|authorization|auth|credential|private)":\s*"[^"]*"/gi
+
+/**
+ * Redact sensitive values from a JSON string.
+ * @internal
+ */
+const redactSensitive = (str: string): string =>
+  str.replace(SENSITIVE_PATTERNS, '"$1":"[REDACTED]"')
+
 /**
  * Error for invalid procedure input.
  *
  * @remarks
- * **Security Note:** The `received` field contains the raw invalid value.
- * This may include sensitive user data. Be careful when:
- * - Logging this error (consider sanitizing or omitting `received`)
- * - Returning this error to clients (the client already has the data)
- * - Storing error logs (may violate data retention policies)
+ * **Security Note:** Raw input is NOT included in serialization to prevent
+ * sensitive data (passwords, tokens, etc.) from leaking into logs or error
+ * responses. Use `getDebugInfo()` for development debugging only.
  *
  * @since 0.1.0
  * @category errors
@@ -55,17 +63,77 @@ export class InputValidationError extends Schema.TaggedError<InputValidationErro
     ...BaseFields,
     field: Schema.optional(Schema.String),
     expected: Schema.optional(Schema.String),
-    /** Raw invalid value - may contain sensitive data, handle with care */
-    received: Schema.optional(Schema.Unknown),
+    // Note: received field removed from schema to prevent serialization
   },
 ) {
   readonly [TypeId]: TypeId = TypeId
   readonly isRetryable = false
   readonly httpStatus = 400
 
+  /**
+   * Private storage for raw input - NOT serialized.
+   * Only accessible via getDebugInfo() which redacts sensitive data.
+   * @internal
+   */
+  private readonly _rawInput?: unknown
+
+  /**
+   * Create an InputValidationError with optional raw input capture.
+   *
+   * @param props - Error properties (procedure, field, expected, description)
+   * @param rawInput - Optional raw input for debugging (NOT serialized)
+   */
+  static withInput(
+    props: {
+      readonly procedure: string
+      readonly field?: string
+      readonly expected?: string
+      readonly description?: string
+      readonly cause?: unknown
+    },
+    rawInput?: unknown,
+  ): InputValidationError {
+    const error = new InputValidationError(props)
+    // Use Object.defineProperty to set private field after construction
+    Object.defineProperty(error, "_rawInput", {
+      value: rawInput,
+      writable: false,
+      enumerable: false, // Won't show in JSON.stringify
+      configurable: false,
+    })
+    return error
+  }
+
   override get message(): string {
     const field = this.field ? ` at "${this.field}"` : ""
     return `[${this.procedure}] Input validation failed${field}: ${this.description ?? "Invalid input"}`
+  }
+
+  /**
+   * Get debug information about the invalid input.
+   *
+   * **WARNING:** Only use this for development debugging. The output is
+   * truncated and has common sensitive fields redacted, but may still
+   * contain sensitive data. Never log this in production.
+   *
+   * @param maxLength - Maximum length of the output (default: 200)
+   * @returns Truncated and redacted string representation of the input
+   */
+  getDebugInfo(maxLength = 200): string {
+    if (this._rawInput === undefined) {
+      return "[input not captured]"
+    }
+
+    try {
+      const str = JSON.stringify(this._rawInput)
+      const redacted = redactSensitive(str)
+      if (redacted.length <= maxLength) {
+        return redacted
+      }
+      return redacted.slice(0, maxLength) + "...[truncated]"
+    } catch {
+      return "[input not serializable]"
+    }
   }
 }
 

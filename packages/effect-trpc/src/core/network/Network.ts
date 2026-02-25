@@ -165,6 +165,13 @@ export class Network extends Context.Tag("@effect-trpc/Network")<Network, Networ
 // Browser Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Debounce delay in milliseconds.
+ * Prevents rapid network state transitions (flapping) from causing
+ * excessive reconnect attempts.
+ */
+const NETWORK_DEBOUNCE_MS = 500
+
 const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Effect.gen(
   function* () {
     const scope = yield* Effect.scope
@@ -194,33 +201,66 @@ const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Ef
 
     // Set up browser event listeners (client-side only)
     if (typeof window !== "undefined") {
-      const handleOnline = () => {
-        Effect.runSync(
-          Effect.gen(function* () {
-            yield* Gate.open(gate)
-            yield* SubscriptionRef.update(stateRef, (s) => ({
-              ...s,
-              isOnline: true,
-              lastOnlineAt: Date.now(),
-            }))
-          }),
-        )
-        // Notify reconnect subscribers
-        reconnectCallbacks.forEach((cb) => cb())
+      // Debounce state for network flapping protection
+      let debounceTimeout: ReturnType<typeof setTimeout> | null = null
+      let lastKnownState: boolean = initialOnline
+
+      /**
+       * Apply a network state change after debouncing.
+       * This is called after the debounce delay to actually update state.
+       */
+      const applyStateChange = (online: boolean) => {
+        lastKnownState = online
+        if (online) {
+          Effect.runSync(
+            Effect.gen(function* () {
+              yield* Gate.open(gate)
+              yield* SubscriptionRef.update(stateRef, (s) => ({
+                ...s,
+                isOnline: true,
+                lastOnlineAt: Date.now(),
+              }))
+            }),
+          )
+          // Notify reconnect subscribers
+          reconnectCallbacks.forEach((cb) => cb())
+        } else {
+          Effect.runSync(
+            Effect.gen(function* () {
+              yield* Gate.close(gate)
+              yield* SubscriptionRef.update(stateRef, (s) => ({
+                ...s,
+                isOnline: false,
+                lastOfflineAt: Date.now(),
+              }))
+            }),
+          )
+        }
       }
 
-      const handleOffline = () => {
-        Effect.runSync(
-          Effect.gen(function* () {
-            yield* Gate.close(gate)
-            yield* SubscriptionRef.update(stateRef, (s) => ({
-              ...s,
-              isOnline: false,
-              lastOfflineAt: Date.now(),
-            }))
-          }),
-        )
+      /**
+       * Handle network state change with debouncing.
+       * Prevents rapid online/offline transitions (flapping) from causing
+       * excessive reconnect attempts.
+       */
+      const handleNetworkChange = (online: boolean) => {
+        // Skip if state hasn't actually changed
+        if (online === lastKnownState) return
+
+        // Clear any pending debounced state change
+        if (debounceTimeout !== null) {
+          clearTimeout(debounceTimeout)
+        }
+
+        // Debounce the state change
+        debounceTimeout = setTimeout(() => {
+          debounceTimeout = null
+          applyStateChange(online)
+        }, NETWORK_DEBOUNCE_MS)
       }
+
+      const handleOnline = () => handleNetworkChange(true)
+      const handleOffline = () => handleNetworkChange(false)
 
       window.addEventListener("online", handleOnline)
       window.addEventListener("offline", handleOffline)
@@ -228,6 +268,10 @@ const makeBrowserNetwork: Effect.Effect<NetworkService, never, Scope.Scope> = Ef
       yield* Scope.addFinalizer(
         scope,
         Effect.sync(() => {
+          // Clear any pending debounce on cleanup
+          if (debounceTimeout !== null) {
+            clearTimeout(debounceTimeout)
+          }
           window.removeEventListener("online", handleOnline)
           window.removeEventListener("offline", handleOffline)
           reconnectCallbacks.clear()

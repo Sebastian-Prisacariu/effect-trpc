@@ -10,6 +10,12 @@
  * - Streams: 2-tier
  * - Subscriptions: 2-tier + Connection
  *
+ * @remarks
+ * Atom families are global singletons, but state is scoped per Registry.
+ * Each RegistryProvider creates isolated state. Multiple clients under
+ * the same RegistryProvider share cache (query deduplication). Use
+ * separate RegistryProviders for fully isolated clients.
+ *
  * @since 0.1.0
  */
 
@@ -66,20 +72,72 @@ export const useRegistry = (): AtomRegistry.Registry => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Atom that tracks all active query keys.
+ * Maximum number of query keys to track in the registry.
+ * Uses LRU eviction when limit is reached.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
+export const MAX_QUERY_KEY_CACHE_SIZE = 1000
+
+/**
+ * State for the LRU query key registry.
+ * Tracks both the set of keys and their access order.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface QueryKeyRegistryState {
+  /** Set of all registered query keys */
+  readonly keys: ReadonlySet<string>
+  /** Array tracking access order (oldest first, most recent last) */
+  readonly accessOrder: readonly string[]
+}
+
+/**
+ * Create initial query key registry state.
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
+export const initialQueryKeyRegistryState = (): QueryKeyRegistryState => ({
+  keys: new Set<string>(),
+  accessOrder: [],
+})
+
+/**
+ * Atom that tracks all active query keys with LRU eviction.
  * Scoped to the registry, so each test gets a fresh set.
  * Used for prefix-based invalidation.
+ *
+ * When the cache exceeds MAX_QUERY_KEY_CACHE_SIZE, the least recently
+ * accessed keys are evicted to prevent unbounded memory growth.
  *
  * @since 0.1.0
  * @category atoms
  */
-export const queryKeysAtom: Atom.Writable<ReadonlySet<string>> = Atom.keepAlive(
-  Atom.make(new Set<string>() as ReadonlySet<string>),
+export const queryKeyRegistryAtom: Atom.Writable<QueryKeyRegistryState> = Atom.keepAlive(
+  Atom.make(initialQueryKeyRegistryState()),
 )
 
 /**
- * Register a query key in the registry.
+ * Legacy atom for backward compatibility.
+ * Returns just the keys set from the new registry state.
+ *
+ * @deprecated Use queryKeyRegistryAtom instead
+ * @since 0.1.0
+ * @category atoms
+ */
+export const queryKeysAtom: Atom.Atom<ReadonlySet<string>> = Atom.readable((get) =>
+  get(queryKeyRegistryAtom).keys,
+)
+
+/**
+ * Register a query key in the registry with LRU tracking.
  * Called when a query hook mounts.
+ *
+ * If the key already exists, it's moved to the end of the access order (most recent).
+ * If adding a new key would exceed MAX_QUERY_KEY_CACHE_SIZE, the oldest key is evicted.
  *
  * @param registry - The effect-atom registry
  * @param key - The query key to register
@@ -88,12 +146,54 @@ export const queryKeysAtom: Atom.Writable<ReadonlySet<string>> = Atom.keepAlive(
  * @category utils
  */
 export const registerQueryKey = (registry: AtomRegistry.Registry, key: string): void => {
-  const currentKeys = registry.get(queryKeysAtom)
-  if (!currentKeys.has(key)) {
-    const newKeys = new Set(currentKeys)
-    newKeys.add(key)
-    registry.set(queryKeysAtom, newKeys)
+  const currentState = registry.get(queryKeyRegistryAtom)
+
+  if (currentState.keys.has(key)) {
+    // Key exists - move to end of access order (most recently used)
+    const newAccessOrder = currentState.accessOrder.filter((k) => k !== key)
+    newAccessOrder.push(key)
+    registry.set(queryKeyRegistryAtom, {
+      keys: currentState.keys,
+      accessOrder: newAccessOrder,
+    })
+    return
   }
+
+  // New key - check if we need to evict
+  const newKeys = new Set(currentState.keys)
+  const newAccessOrder = [...currentState.accessOrder]
+
+  if (newKeys.size >= MAX_QUERY_KEY_CACHE_SIZE) {
+    // Evict oldest key(s) until we have room
+    while (newKeys.size >= MAX_QUERY_KEY_CACHE_SIZE && newAccessOrder.length > 0) {
+      const oldestKey = newAccessOrder.shift()
+      if (oldestKey) {
+        newKeys.delete(oldestKey)
+      }
+    }
+  }
+
+  // Add new key
+  newKeys.add(key)
+  newAccessOrder.push(key)
+
+  registry.set(queryKeyRegistryAtom, {
+    keys: newKeys,
+    accessOrder: newAccessOrder,
+  })
+}
+
+/**
+ * Clear all query keys from the registry.
+ * Useful for cleanup on provider unmount or testing.
+ *
+ * @param registry - The effect-atom registry
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+export const clearQueryKeyRegistry = (registry: AtomRegistry.Registry): void => {
+  registry.set(queryKeyRegistryAtom, initialQueryKeyRegistryState())
 }
 
 /**
@@ -226,26 +326,62 @@ export type AtomResultType<A, E> = AtomResult.Result<A, E>
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Deterministic JSON stringify that sorts object keys.
+ * Ensures {a:1, b:2} and {b:2, a:1} produce the same string.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+export const stableStringify = (obj: unknown): string => {
+  if (obj === null) {
+    return "null"
+  }
+  if (obj === undefined) {
+    return "undefined"
+  }
+  if (typeof obj === "bigint") {
+    return `"BigInt(${obj.toString()})"`
+  }
+  if (typeof obj !== "object") {
+    return JSON.stringify(obj)
+  }
+  if (Array.isArray(obj)) {
+    return "[" + obj.map(stableStringify).join(",") + "]"
+  }
+  const keys = Object.keys(obj).sort()
+  const pairs = keys.map(
+    (k) => `${JSON.stringify(k)}:${stableStringify((obj as Record<string, unknown>)[k])}`,
+  )
+  return "{" + pairs.join(",") + "}"
+}
+
+/**
+ * Key separator that's unlikely to appear in procedure paths or inputs.
+ * Uses a double pipe which is more robust than a single colon.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+const KEY_SEPARATOR = "||"
+
+/**
  * Generate a stable key for queries/streams (includes input).
+ * Uses deterministic stringify to ensure equivalent inputs produce the same key.
  *
  * @since 0.1.0
  * @category utils
  */
 export const generateQueryKey = (path: string, input: unknown): string => {
   if (input === undefined) {
-    return `${path}:`
+    return `${path}${KEY_SEPARATOR}`
   }
   try {
-    // Handle BigInt and other non-serializable types
-
-    const inputKey = JSON.stringify(input, (_key, value) =>
-      typeof value === "bigint" ? `BigInt(${value.toString()})` : value,
-    )
-    return `${path}:${inputKey}`
+    const inputKey = stableStringify(input)
+    return `${path}${KEY_SEPARATOR}${inputKey}`
   } catch {
     // Fallback for circular references or other serialization issues
     // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Intentional fallback for non-serializable input
-    return `${path}:${String(input)}`
+    return `${path}${KEY_SEPARATOR}${String(input)}`
   }
 }
 
@@ -264,10 +400,32 @@ export const generateMutationKey = (path: string): string => path
  * @category utils
  */
 export const generateCallerKey = (path: string, callerId: string): string =>
-  `${path}:caller:${callerId}`
+  `${path}${KEY_SEPARATOR}caller${KEY_SEPARATOR}${callerId}`
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query Atoms (2-tier: Main + Writable)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ARCHITECTURE NOTE: Atom Families are Global, State is Per-Registry
+//
+// The atom families below (queryAtomFamily, mutationAtomFamily, etc.) are
+// module-level singletons. This is INTENTIONAL and correct for effect-atom's
+// architecture:
+//
+// - Atom families are just factories that create atom instances by key
+// - The actual state lives in the Registry, not in the atoms themselves
+// - Each RegistryProvider creates a fresh Registry with isolated state
+// - When you call `registry.get(someAtomFamily(key))`, the value comes from
+//   THAT specific registry, not from a global cache
+//
+// This means:
+// - Multiple tRPC clients with DIFFERENT RegistryProviders have isolated state
+// - Multiple tRPC clients under the SAME RegistryProvider share state
+//   (query deduplication, shared cache for SSR hydration)
+//
+// If you need fully isolated clients, wrap each in its own RegistryProvider.
+// This is consistent with React Query's QueryClientProvider pattern.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -280,6 +438,12 @@ export const generateCallerKey = (path: string, callerId: string): string =>
 export interface QueryAtomState<A, E> {
   readonly result: AtomResult.Result<A, E>
   readonly lastFetchedAt: number | null
+  /**
+   * The previous error that occurred before the current retry attempt.
+   * Preserved during retries so UI can show both loading and error state.
+   * Cleared only on successful fetch.
+   */
+  readonly previousError: E | null
 }
 
 /**
@@ -291,6 +455,7 @@ export interface QueryAtomState<A, E> {
 export const initialQueryState = <A, E>(): QueryAtomState<A, E> => ({
   result: AtomResult.initial(),
   lastFetchedAt: null,
+  previousError: null,
 })
 
 /**
@@ -405,12 +570,99 @@ export const writableMutationAtomFamily = Atom.family((path: string) =>
  * Caller atom family - one per useMutation() hook instance.
  * Isolated isPending/error state.
  *
+ * NOTE: Unlike query atoms which are shared/cached, caller atoms are unique
+ * per component instance (using React.useId()). They must be cleaned up
+ * when the component unmounts to prevent memory leaks.
+ *
  * @since 0.1.0
  * @category atoms
  */
 export const callerAtomFamily = Atom.family((_callerKey: string) =>
   Atom.make<MutationCallerState<unknown>>(initialCallerState()),
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Caller Atom Cleanup Registry
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Registry tracking active caller atoms.
+ * Used to clean up caller atoms when components unmount.
+ *
+ * We use a WeakMap keyed by Registry to ensure cleanup per-registry,
+ * which is important for tests that create fresh registries.
+ *
+ * @since 0.3.0
+ * @category internal
+ */
+const callerAtomCleanupRegistry = new WeakMap<
+  AtomRegistry.Registry,
+  Map<string, { refCount: number }>
+>()
+
+/**
+ * Get or create the cleanup map for a registry.
+ *
+ * @since 0.3.0
+ * @category internal
+ */
+const getCallerCleanupMap = (
+  registry: AtomRegistry.Registry,
+): Map<string, { refCount: number }> => {
+  let map = callerAtomCleanupRegistry.get(registry)
+  if (!map) {
+    map = new Map()
+    callerAtomCleanupRegistry.set(registry, map)
+  }
+  return map
+}
+
+/**
+ * Register a caller atom for cleanup tracking.
+ * Increments the ref count for this caller key.
+ *
+ * @param registry - The effect-atom registry
+ * @param callerKey - The caller key to track
+ *
+ * @since 0.3.0
+ * @category internal
+ */
+export const registerCallerAtom = (registry: AtomRegistry.Registry, callerKey: string): void => {
+  const map = getCallerCleanupMap(registry)
+  const entry = map.get(callerKey)
+  if (entry) {
+    entry.refCount++
+  } else {
+    map.set(callerKey, { refCount: 1 })
+  }
+}
+
+/**
+ * Unregister a caller atom and clean up if no more references.
+ * Decrements the ref count and removes the atom from the family cache
+ * when the ref count reaches zero.
+ *
+ * @param registry - The effect-atom registry
+ * @param callerKey - The caller key to unregister
+ *
+ * @since 0.3.0
+ * @category internal
+ */
+export const unregisterCallerAtom = (registry: AtomRegistry.Registry, callerKey: string): void => {
+  const map = getCallerCleanupMap(registry)
+  const entry = map.get(callerKey)
+  if (entry) {
+    entry.refCount--
+    if (entry.refCount <= 0) {
+      map.delete(callerKey)
+      // Reset the atom to initial state to help with GC
+      // The atom family cache entry will be cleaned up by effect-atom's
+      // idle TTL mechanism when no subscribers remain
+      const atom = callerAtomFamily(callerKey)
+      registry.set(atom, initialCallerState())
+    }
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stream Atoms (2-tier: Main + Writable)
@@ -793,10 +1045,11 @@ export const setQueryData = <T>(
     newData = data
   }
 
-  // Set the new data
+  // Set the new data - clear previousError since we have fresh data
   registry.set(atom, {
     result: AtomResult.success(newData),
     lastFetchedAt: Date.now(),
+    previousError: null,
   })
 }
 

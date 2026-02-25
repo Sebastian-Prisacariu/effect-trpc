@@ -134,8 +134,10 @@ export type MetadataRegistry = internal.MetadataRegistry
  * @since 0.1.0
  * @category type-level
  */
-export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string = ""> =
-  internal.ExtractProcedures<Routes, Prefix>
+export type ExtractProcedures<
+  Routes extends RouterRecord,
+  Prefix extends string = "",
+> = internal.ExtractProcedures<Routes, Prefix>
 
 /**
  * Recursively extract all RpcGroup types from a router record.
@@ -144,8 +146,10 @@ export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string
  * @since 0.1.0
  * @category type-level
  */
-export type ExtractRpcGroups<Routes extends RouterRecord, Prefix extends string = ""> =
-  internal.ExtractRpcGroups<Routes, Prefix>
+export type ExtractRpcGroups<
+  Routes extends RouterRecord,
+  Prefix extends string = "",
+> = internal.ExtractRpcGroups<Routes, Prefix>
 
 /**
  * Infer the input type of a procedure.
@@ -162,6 +166,30 @@ export type InferInput<T> = internal.InferInput<T>
  * @category type-level
  */
 export type InferOutput<T> = internal.InferOutput<T>
+
+/**
+ * Infer the error type of a procedure (includes middleware errors).
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferError<T> = internal.InferError<T>
+
+/**
+ * Infer the requirements (R channel) of a procedure (includes middleware requirements).
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferRequirements<T> = internal.InferRequirements<T>
+
+/**
+ * Infer the services provided by middleware for a procedure.
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferProvides<T> = internal.InferProvides<T>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type Guards
@@ -307,4 +335,3 @@ export const Router = {
 export const extractMetadata: <Routes extends RouterRecord>(
   routerInstance: Router<Routes>,
 ) => MetadataRegistry = internal.extractMetadata
-

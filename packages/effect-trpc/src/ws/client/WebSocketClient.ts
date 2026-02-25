@@ -153,6 +153,18 @@ export interface WebSocketClientShape {
   ) => Effect.Effect<void, WebSocketSendError | SubscriptionNotFoundError>
 
   /**
+   * Update the input for a subscription.
+   * This ensures resubscription after reconnection uses the latest input value.
+   * Call this whenever the input changes to avoid stale input on reconnection.
+   *
+   * @since 0.1.0
+   */
+  readonly updateSubscriptionInput: (
+    id: SubscriptionId,
+    input: unknown,
+  ) => Effect.Effect<void>
+
+  /**
    * Get the current client state.
    */
   readonly state: Effect.Effect<ClientState>
@@ -368,11 +380,47 @@ const makeWebSocketClient = (
       )
     })
 
-    // Handle reconnection events
-    // Track previous connection state to detect transitions
+    // ─────────────────────────────────────────────────────────────────────────
+    // Connection State Machine
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // State transitions we care about:
+    //
+    //   * -> Disconnected (unexpected)  → Start reconnection attempts
+    //   * -> Connected (after disconnect) → Reauthenticate + resubscribe
+    //
+    // Manual disconnect bypasses reconnection logic entirely.
+    // ─────────────────────────────────────────────────────────────────────────
+
     const prevConnStateRef = yield* Ref.make<ConnectionState | null>(null)
     const reconnectionFiber = yield* Ref.make<Fiber.RuntimeFiber<void, never> | null>(null)
     const manualDisconnectRef = yield* Ref.make(false)
+
+    /**
+     * Represents a connection state transition for the state machine.
+     */
+    type StateTransition = {
+      readonly from: ConnectionState["_tag"] | null
+      readonly to: ConnectionState["_tag"]
+    }
+
+    /**
+     * Determines if a transition represents an unexpected disconnect.
+     * This occurs when we transition TO Disconnected from any connected state.
+     */
+    const isUnexpectedDisconnect = (transition: StateTransition): boolean =>
+      transition.to === "Disconnected" && 
+      transition.from !== null && 
+      transition.from !== "Disconnected"
+
+    /**
+     * Determines if a transition represents a successful reconnection.
+     * This occurs when we transition TO Connected from a non-connected state.
+     */
+    const isReconnection = (transition: StateTransition): boolean =>
+      transition.to === "Connected" && 
+      transition.from !== null && 
+      transition.from !== "Connected"
 
     // Calculate delay with jitter using Effect.random for referential transparency
     const calculateDelayMs = (attempt: number): Effect.Effect<number> =>
@@ -393,62 +441,89 @@ const makeWebSocketClient = (
         return delay
       })
 
+    /**
+     * Handles state transitions using a state machine pattern.
+     * Each transition type has a dedicated handler for clarity.
+     */
+    const handleStateTransition = (
+      transition: StateTransition,
+      reconnectAttemptRef: { current: number },
+    ): Effect.Effect<void, never> =>
+      Effect.gen(function* () {
+        const isManuallyDisconnected = yield* Ref.get(manualDisconnectRef)
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Transition: * -> Disconnected (unexpected disconnect)
+        // Action: Start reconnection with exponential backoff
+        // ─────────────────────────────────────────────────────────────────────
+        if (isUnexpectedDisconnect(transition) && !isManuallyDisconnected) {
+          yield* updateState(ClientState.Disconnected)
+
+          reconnectAttemptRef.current++
+          const maxAttempts = config.reconnect?.maxAttempts
+
+          // Check if we've exceeded max attempts
+          if (maxAttempts !== undefined && reconnectAttemptRef.current > maxAttempts) {
+            yield* updateState(
+              ClientState.Error(
+                new WebSocketConnectionError({
+                  url: config.url,
+                  reason: "MaxAttemptsReached",
+                  description: `Max reconnection attempts (${maxAttempts}) reached`,
+                }),
+              ),
+            )
+            return
+          }
+
+          // Calculate delay and attempt reconnection
+          const delayMs = yield* calculateDelayMs(reconnectAttemptRef.current)
+          yield* updateState(ClientState.Reconnecting(reconnectAttemptRef.current))
+          yield* Effect.sleep(delayMs)
+          yield* connection.connect.pipe(Effect.ignore)
+          return
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Transition: * -> Connected (successful reconnection)
+        // Action: Reauthenticate and restore subscriptions
+        // ─────────────────────────────────────────────────────────────────────
+        if (isReconnection(transition)) {
+          reconnectAttemptRef.current = 0 // Reset attempts on successful connection
+          yield* Effect.logDebug("WebSocket reconnected, reauthenticating...")
+          yield* reauthenticate.pipe(
+            Effect.tap(() => Effect.logDebug("Reauthenticated, resubscribing...")),
+            Effect.tap(() => resubscribe),
+            Effect.tap(() => Effect.logDebug("Resubscribed to all subscriptions")),
+            Effect.catchAll((error) =>
+              Effect.logWarning("Failed to reauthenticate after reconnection", {
+                error: error._tag,
+                message: error.message,
+              }),
+            ),
+          )
+          return
+        }
+
+        // Other transitions (Connecting, Error, etc.) are logged but don't require action
+      })
+
     const startReconnectionHandler: Effect.Effect<void> = Effect.gen(function* () {
-      let reconnectAttempt = 0
+      // Use an object ref so the mutable counter survives across stream iterations
+      const reconnectAttemptRef = { current: 0 }
 
       const fiber = yield* Effect.fork(
         Stream.runForEach(connection.stateChanges, (connState) =>
           Effect.gen(function* () {
             const prevState = yield* Ref.get(prevConnStateRef)
             yield* Ref.set(prevConnStateRef, connState)
-            const isManuallyDisconnected = yield* Ref.get(manualDisconnectRef)
 
-            if (connState._tag === "Disconnected" && !isManuallyDisconnected) {
-              yield* updateState(ClientState.Disconnected)
-
-              // Start reconnection loop
-              reconnectAttempt++
-              const maxAttempts = config.reconnect?.maxAttempts
-
-              if (maxAttempts !== undefined && reconnectAttempt > maxAttempts) {
-                yield* updateState(ClientState.Error(
-                  new WebSocketConnectionError({
-                    url: config.url,
-                    reason: "MaxAttemptsReached",
-                    description: `Max reconnection attempts (${maxAttempts}) reached`,
-                  })
-                ))
-                return
-              }
-
-              const delayMs = yield* calculateDelayMs(reconnectAttempt)
-              yield* updateState(ClientState.Reconnecting(reconnectAttempt))
-              yield* Effect.sleep(delayMs)
-              
-              yield* connection.connect.pipe(Effect.ignore)
+            const transition: StateTransition = {
+              from: prevState?._tag ?? null,
+              to: connState._tag,
             }
 
-            const wasDisconnected =
-              prevState?._tag === "Disconnected" || 
-              (prevState?._tag === "Connected" === false && connState._tag === "Connected")
-              
-            const nowConnected = connState._tag === "Connected"
-
-            if (wasDisconnected && nowConnected) {
-              reconnectAttempt = 0 // Reset attempts
-              yield* Effect.logDebug("WebSocket reconnected, reauthenticating...")
-              yield* reauthenticate.pipe(
-                Effect.tap(() => Effect.logDebug("Reauthenticated, resubscribing...")),
-                Effect.tap(() => resubscribe),
-                Effect.tap(() => Effect.logDebug("Resubscribed to all subscriptions")),
-                Effect.catchAll((error) =>
-                  Effect.logWarning("Failed to reauthenticate after reconnection", {
-                    error: error._tag,
-                    message: error.message,
-                  }),
-                ),
-              )
-            }
+            yield* handleStateTransition(transition, reconnectAttemptRef)
           }),
         ).pipe(Effect.asVoid),
       )
@@ -575,6 +650,11 @@ const makeWebSocketClient = (
           yield* connection.send(new ClientDataMessage({ id: serverId, data }))
         }).pipe(Effect.withSpan("WebSocketClient.send", { attributes: { subscriptionId: id } })),
 
+      updateSubscriptionInput: (id, input) =>
+        registry.updateInput(id, input).pipe(
+          Effect.withSpan("WebSocketClient.updateSubscriptionInput", { attributes: { subscriptionId: id } }),
+        ),
+
       state: SubscriptionRef.get(stateRef),
 
       // Use SubscriptionRef.changes to get all state updates including Ready
@@ -593,7 +673,24 @@ const makeWebSocketClient = (
 
     // Auto-connect if configured
     if (config.autoConnect !== false) {
-      yield* service.connect.pipe(Effect.ignore, Effect.fork)
+      yield* Effect.gen(function* () {
+        yield* Effect.logDebug("Auto-connect starting")
+        yield* service.connect.pipe(
+          Effect.catchAll((error) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("Auto-connect failed").pipe(
+                Effect.annotateLogs({
+                  error: error._tag,
+                  message: error.message,
+                  url: config.url,
+                })
+              )
+              // Update state to reflect the failure
+              yield* updateState(ClientState.Error(error))
+            })
+          )
+        )
+      }).pipe(Effect.fork)
     }
 
     // Cleanup on scope close

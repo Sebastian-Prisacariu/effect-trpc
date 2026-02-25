@@ -30,6 +30,7 @@ import * as Effect from "effect/Effect"
 import * as Context from "effect/Context"
 import * as Layer from "effect/Layer"
 import * as Metric from "effect/Metric"
+import * as Ref from "effect/Ref"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Metric Prefix
@@ -280,46 +281,90 @@ export class WebSocketMetrics extends Context.Tag("@effect-trpc/WebSocketMetrics
 // Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
-const makeWebSocketMetrics = Effect.sync(() => {
-  const service: WebSocketMetricsService = {
-    connectionOpened: Effect.all([
-      Metric.increment(connectionsOpened),
-      Metric.increment(activeConnections),
-    ]).pipe(Effect.asVoid),
+/**
+ * Safely decrement a gauge, preventing negative values.
+ * Logs a warning if a decrement is attempted when the count is already zero.
+ *
+ * @internal
+ */
+const safeDecrementGauge = (
+  countRef: Ref.Ref<number>,
+  gauge: Metric.Metric.Gauge<number>,
+  metricName: string,
+): Effect.Effect<void> =>
+  Ref.get(countRef).pipe(
+    Effect.flatMap((currentCount) => {
+      if (currentCount <= 0) {
+        return Effect.logWarning(
+          `Attempted to decrement ${metricName} below zero (current: ${currentCount}). ` +
+            "This indicates a bug: decrement called without matching increment.",
+        )
+      }
+      return Effect.zipRight(
+        Ref.set(countRef, currentCount - 1),
+        Metric.incrementBy(gauge, -1),
+      )
+    }),
+  )
 
-    connectionClosed: Effect.all([
-      Metric.increment(connectionsClosed),
-      Metric.incrementBy(activeConnections, -1),
-    ]).pipe(Effect.asVoid),
+/**
+ * Safely increment a gauge with internal tracking.
+ *
+ * @internal
+ */
+const safeIncrementGauge = (
+  countRef: Ref.Ref<number>,
+  gauge: Metric.Metric.Gauge<number>,
+): Effect.Effect<void> =>
+  Effect.zipRight(
+    Ref.update(countRef, (n) => n + 1),
+    Metric.increment(gauge),
+  )
 
-    subscriptionCreated: Effect.all([
-      Metric.increment(subscriptionsCreated),
-      Metric.increment(activeSubscriptions),
-    ]).pipe(Effect.asVoid),
+const makeWebSocketMetrics: Effect.Effect<WebSocketMetricsService> = Effect.map(
+  Effect.all([Ref.make(0), Ref.make(0)]),
+  ([connectionCountRef, subscriptionCountRef]) => {
+    // Internal refs to track actual counts and prevent negative gauges
+    const service: WebSocketMetricsService = {
+      connectionOpened: Effect.all([
+        Metric.increment(connectionsOpened),
+        safeIncrementGauge(connectionCountRef, activeConnections),
+      ]).pipe(Effect.asVoid),
 
-    subscriptionCompleted: Effect.all([
-      Metric.increment(subscriptionsCompleted),
-      Metric.incrementBy(activeSubscriptions, -1),
-    ]).pipe(Effect.asVoid),
+      connectionClosed: Effect.all([
+        Metric.increment(connectionsClosed),
+        safeDecrementGauge(connectionCountRef, activeConnections, "activeConnections"),
+      ]).pipe(Effect.asVoid),
 
-    subscriptionErrored: Effect.all([
-      Metric.increment(subscriptionsErrored),
-      Metric.incrementBy(activeSubscriptions, -1),
-    ]).pipe(Effect.asVoid),
+      subscriptionCreated: Effect.all([
+        Metric.increment(subscriptionsCreated),
+        safeIncrementGauge(subscriptionCountRef, activeSubscriptions),
+      ]).pipe(Effect.asVoid),
 
-    messageReceived: Metric.increment(messagesReceived),
+      subscriptionCompleted: Effect.all([
+        Metric.increment(subscriptionsCompleted),
+        safeDecrementGauge(subscriptionCountRef, activeSubscriptions, "activeSubscriptions"),
+      ]).pipe(Effect.asVoid),
 
-    messageSent: Metric.increment(messagesSent),
+      subscriptionErrored: Effect.all([
+        Metric.increment(subscriptionsErrored),
+        safeDecrementGauge(subscriptionCountRef, activeSubscriptions, "activeSubscriptions"),
+      ]).pipe(Effect.asVoid),
 
-    authFailed: Metric.increment(authFailures),
+      messageReceived: Metric.increment(messagesReceived),
 
-    broadcastSent: (sent: number) => Metric.incrementBy(broadcastsSent, sent),
+      messageSent: Metric.increment(messagesSent),
 
-    broadcastFailed: (failed: number) => Metric.incrementBy(broadcastFailures, failed),
-  }
+      authFailed: Metric.increment(authFailures),
 
-  return service
-})
+      broadcastSent: (sent: number) => Metric.incrementBy(broadcastsSent, sent),
+
+      broadcastFailed: (failed: number) => Metric.incrementBy(broadcastFailures, failed),
+    }
+
+    return service
+  },
+)
 
 const makeNoOpMetrics = Effect.succeed<WebSocketMetricsService>({
   connectionOpened: Effect.void,

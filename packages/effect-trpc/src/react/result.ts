@@ -80,7 +80,10 @@ export { AtomResult as Result }
  *
  * @since 0.3.0
  */
-export const toQueryResult = <A, E>(result: AtomResult.Result<A, E>): QueryResult<A, E> => {
+export const toQueryResult = <A, E>(
+  result: AtomResult.Result<A, E>,
+  previousError: E | null = null,
+): QueryResult<A, E> => {
   const dataOption = AtomResult.value(result)
   const errorOption = AtomResult.error(result)
   const hasData = AtomResult.isSuccess(result)
@@ -89,6 +92,7 @@ export const toQueryResult = <A, E>(result: AtomResult.Result<A, E>): QueryResul
   return {
     data: Option.isSome(dataOption) ? dataOption.value : undefined,
     error: Option.isSome(errorOption) ? errorOption.value : undefined,
+    previousError,
     isLoading: !hasData && isWaiting,
     isError: AtomResult.isFailure(result),
     isSuccess: AtomResult.isSuccess(result) && !result.waiting,
@@ -158,6 +162,21 @@ export interface QueryResult<A, E = unknown> {
   readonly data: A | undefined
   /** The error if query failed */
   readonly error: E | undefined
+  /**
+   * The previous error that occurred before the current retry attempt.
+   * Preserved during retries so UI can show both loading and error state.
+   * Cleared only on successful fetch.
+   *
+   * @example
+   * ```typescript
+   * const { error, previousError, isFetching } = api.user.list.useQuery()
+   *
+   * if (isFetching && previousError) {
+   *   return <div>Retrying... (Previous error: {previousError.message})</div>
+   * }
+   * ```
+   */
+  readonly previousError: E | null
   /**
    * True only when loading with NO data (first load).
    * False once we have data, even if refetching.

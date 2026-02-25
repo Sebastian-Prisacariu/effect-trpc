@@ -243,6 +243,13 @@ export declare namespace ConnectionRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Maximum number of connection events to buffer in the PubSub.
+ * Using sliding strategy - drops oldest events when full.
+ * This prevents memory issues if event consumers are slow.
+ */
+const MAX_EVENT_QUEUE_SIZE = 1000
+
+/**
  * Create the connection registry implementation.
  *
  * @param config - Optional configuration for connection limits
@@ -254,8 +261,9 @@ const makeConnectionRegistry = (config: ConnectionRegistryConfig = {}) =>
     // In-memory storage of connections
     const connections = yield* Ref.make(HashMap.empty<ClientId, Connection>())
 
-    // PubSub for connection events
-    const eventsPubSub = yield* PubSub.unbounded<ConnectionEvent>()
+    // PubSub for connection events (bounded with sliding strategy)
+    // Sliding drops oldest events when queue is full, ensuring we don't run out of memory
+    const eventsPubSub = yield* PubSub.sliding<ConnectionEvent>(MAX_EVENT_QUEUE_SIZE)
 
     const service: ConnectionRegistry.Service = {
       register: Effect.fn("ConnectionRegistry.register")(

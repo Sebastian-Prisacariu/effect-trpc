@@ -100,11 +100,11 @@ export const UserProceduresLive = UserProcedures.toLayer({
 
 ```typescript
 // src/server/router.ts
-import { createRouter } from 'effect-trpc'
+import { Router } from 'effect-trpc'
 import { UserProcedures, UserProceduresLive } from './procedures/user'
 import { PostProcedures, PostProceduresLive } from './procedures/post'
 
-export const appRouter = createRouter({
+export const appRouter = Router.make({
   user: UserProcedures,
   post: PostProcedures,
 })
@@ -581,10 +581,10 @@ Add cross-cutting concerns like authentication, logging, and rate limiting.
 ### Creating Middleware
 
 ```typescript
-import { middleware } from 'effect-trpc'
+import { Middleware } from 'effect-trpc'
 import type { BaseContext, AuthenticatedContext } from 'effect-trpc'
 
-const authMiddleware = middleware<BaseContext, AuthenticatedContext<User>, AuthError, never>(
+const authMiddleware = Middleware.make<BaseContext, AuthenticatedContext<User>, AuthError, never>(
   'auth',
   (ctx, next) =>
     Effect.gen(function* () {
@@ -761,9 +761,9 @@ To use declarative invalidation on the client, extract metadata from your router
 
 ```typescript
 // Server: src/server/router.ts
-import { createRouter, extractMetadata } from 'effect-trpc'
+import { Router, extractMetadata } from 'effect-trpc'
 
-export const appRouter = createRouter({
+export const appRouter = Router.make({
   user: UserProcedures,
   post: PostProcedures,
 })
@@ -918,9 +918,9 @@ Core functionality - procedures, router, errors, middleware:
 import {
   procedures,
   procedure,
-  createRouter,
-  createClient,
-  middleware,
+  Router,
+  Client,
+  Middleware,
   // Errors
   NotFoundError,
   UnauthorizedError,

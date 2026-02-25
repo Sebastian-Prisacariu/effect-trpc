@@ -149,3 +149,20 @@ export {
   makeBackpressureControllerLayer,
   defaultBackpressureConfig,
 } from "./BackpressureController.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MessageRateLimiter
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  RateLimitConfig,
+  MessageRateLimiterService,
+} from "./MessageRateLimiter.js"
+
+export {
+  MessageRateLimiter,
+  MessageRateLimiterLive,
+  MessageRateLimiterDisabled,
+  makeMessageRateLimiterLayer,
+  defaultRateLimitConfig,
+} from "./MessageRateLimiter.js"

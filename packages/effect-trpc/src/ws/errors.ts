@@ -120,13 +120,13 @@ export class WebSocketAuthError extends Schema.TaggedError<WebSocketAuthError>()
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Error related to a specific subscription.
+ * Error related to a specific WebSocket subscription.
  *
  * @since 0.1.0
  * @category errors
  */
-export class SubscriptionError extends Schema.TaggedError<SubscriptionError>()(
-  "SubscriptionError",
+export class WebSocketSubscriptionError extends Schema.TaggedError<WebSocketSubscriptionError>()(
+  "WebSocketSubscriptionError",
   {
     subscriptionId: Schema.String,
     path: Schema.String,
@@ -137,6 +137,7 @@ export class SubscriptionError extends Schema.TaggedError<SubscriptionError>()(
       "HandlerError",
       "Interrupted",
       "Unauthorized",
+      "SetupTimeout",
     ),
     description: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect),
@@ -146,9 +147,23 @@ export class SubscriptionError extends Schema.TaggedError<SubscriptionError>()(
 
   override get message(): string {
     const desc = this.description ? `: ${this.description}` : ""
-    return `Subscription error [${this.path}] (${this.subscriptionId}): ${this.reason}${desc}`
+    return `WebSocket subscription error [${this.path}] (${this.subscriptionId}): ${this.reason}${desc}`
   }
 }
+
+/**
+ * @deprecated Use {@link WebSocketSubscriptionError} instead
+ * @since 0.1.0
+ * @category errors
+ */
+export const SubscriptionError = WebSocketSubscriptionError
+
+/**
+ * @deprecated Use {@link WebSocketSubscriptionError} instead
+ * @since 0.1.0
+ * @category errors
+ */
+export type SubscriptionError = WebSocketSubscriptionError
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol Errors
@@ -307,6 +322,59 @@ export class HeartbeatTimeoutError extends Schema.TaggedError<HeartbeatTimeoutEr
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Rate Limiting Errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Message rate limit exceeded - client is sending messages too quickly.
+ * Used for DoS protection.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
+export class MessageRateLimitExceededError extends Schema.TaggedError<MessageRateLimitExceededError>()(
+  "MessageRateLimitExceededError",
+  {
+    clientId: Schema.String,
+    currentCount: Schema.Number,
+    maxMessages: Schema.Number,
+    retryAfterMs: Schema.Number,
+  },
+) {
+  readonly [WebSocketErrorTypeId]: WebSocketErrorTypeId = WebSocketErrorTypeId
+
+  override get message(): string {
+    const retrySeconds = Math.ceil(this.retryAfterMs / 1000)
+    return `Rate limit exceeded for client ${this.clientId}: ${this.currentCount}/${this.maxMessages} messages. Retry after ${retrySeconds}s`
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Path Validation Errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Invalid subscription path.
+ * Used for security validation of procedure paths.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
+export class InvalidPathError extends Schema.TaggedError<InvalidPathError>()(
+  "InvalidPathError",
+  {
+    path: Schema.String,
+    reason: Schema.String,
+  },
+) {
+  readonly [WebSocketErrorTypeId]: WebSocketErrorTypeId = WebSocketErrorTypeId
+
+  override get message(): string {
+    return `Invalid subscription path "${this.path}": ${this.reason}`
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Union Type
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -321,7 +389,7 @@ export type WebSocketError =
   | WebSocketSendError
   | WebSocketCloseError
   | WebSocketAuthError
-  | SubscriptionError
+  | WebSocketSubscriptionError
   | WebSocketProtocolError
   | ConnectionNotFoundError
   | ConnectionLimitExceededError
@@ -329,3 +397,5 @@ export type WebSocketError =
   | HandlerNotFoundError
   | ReconnectGaveUpError
   | HeartbeatTimeoutError
+  | MessageRateLimitExceededError
+  | InvalidPathError

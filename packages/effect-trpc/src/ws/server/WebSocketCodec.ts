@@ -106,7 +106,7 @@ const makeNdjsonCodec = Effect.sync((): WebSocketCodecShape => ({
         catch: (cause) =>
           new WebSocketProtocolError({
             reason: "ParseError",
-            description: `Failed to parse JSON: ${text.slice(0, 100)}`,
+            description: "Failed to parse JSON message",
             cause,
           }),
       })

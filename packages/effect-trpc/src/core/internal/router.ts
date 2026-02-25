@@ -9,8 +9,7 @@
 import * as Layer from "effect/Layer"
 import * as Data from "effect/Data"
 import * as Record from "effect/Record"
-import type * as Schema from "effect/Schema"
-import type { RpcGroup} from "@effect/rpc";
+import type { RpcGroup } from "@effect/rpc"
 import { RpcServer, RpcSerialization } from "@effect/rpc"
 import type { ProceduresGroup, ProcedureRecord } from "../procedures.js"
 import type { ProcedureDefinition } from "../procedure.js"
@@ -129,7 +128,7 @@ export type RouterRecord = {
 /**
  * Recursively extract all procedure definitions from a router record.
  * Returns a flattened record with full path keys.
- * 
+ *
  * @since 0.1.0
  * @category type-level
  */
@@ -217,7 +216,9 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
    * Router-level middlewares applied to all procedures in this router.
    * Includes both regular middleware and service-providing middleware.
    */
-  readonly middlewares?: ReadonlyArray<Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>>
+  readonly middlewares?: ReadonlyArray<
+    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+  >
 
   /**
    * Apply middleware to all procedures in this router.
@@ -226,7 +227,9 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
    * Supports both regular middleware and service-providing middleware.
    * Service middleware properly provides services to both Effect and Stream handlers.
    */
-  use(middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>): Router<Routes>
+  use(
+    middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
+  ): Router<Routes>
 
   /**
    * Create a Layer that serves this router over HTTP.
@@ -244,10 +247,7 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
  * Used for type inference on the client side.
  * @internal
  */
-export type FlattenRouterRecord<
-  Routes extends RouterRecord,
-  Prefix extends string = "",
-> = {
+export type FlattenRouterRecord<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes & string]: Routes[K] extends ProceduresGroup<infer Name, infer Procs>
     ? FlattenProceduresGroup<Name, Procs, Prefix, K>
     : Routes[K] extends Router<infer R>
@@ -318,7 +318,16 @@ type ProcedureClient<P> = P extends { type: "query" }
 
 /**
  * Validates that a router record contains no duplicate procedure paths.
- * Throws RouterValidationError if a collision is detected.
+ *
+ * **Why throw is appropriate here:**
+ * This is a programmer error (defect) detected at module initialization time.
+ * Duplicate procedure paths indicate a bug in the router definition that must
+ * be fixed before the application can run correctly. Using a plain throw is
+ * consistent with Effect's approach to defects and similar to Zod schema
+ * validation errors - these should fail fast during development, not be
+ * handled as recoverable runtime errors.
+ *
+ * @throws RouterValidationError if a collision is detected
  * @internal
  */
 function validateNoDuplicatePaths(routes: RouterRecord): void {
@@ -368,7 +377,7 @@ function validateNoDuplicatePaths(routes: RouterRecord): void {
 
 /**
  * Result of flattening a router structure.
- * 
+ *
  * Generic over the router record type to preserve procedure types through flattening.
  * The type parameters are computed using ExtractProcedures and ExtractRpcGroups,
  * ensuring compile-time verification of the flattened structure.
@@ -389,7 +398,7 @@ interface FlattenResult<Routes extends RouterRecord> {
 
 /**
  * Internal mutable accumulator for building flatten result.
- * 
+ *
  * Uses mutable state internally for performance, but returns immutable FlattenResult.
  * This pattern is safe because the mutation is isolated within flattenRoutes.
  * @internal
@@ -414,20 +423,20 @@ interface FlattenAccumulator {
 
 /**
  * Assert that a value from ProceduresGroup.procedures is a ProcedureDefinition.
- * 
+ *
  * **Why this assertion is safe:**
- * 
+ *
  * ProcedureRecord is typed as `Record<string, any>` for flexibility in accepting
  * heterogeneous procedure types. However, at runtime, all values are guaranteed
  * to be ProcedureDefinition objects because:
- * 
+ *
  * 1. They can only be created via procedure.query/mutation/stream/chat/subscription
  * 2. The procedure builder always returns ProcedureDefinition
  * 3. TypeScript enforces this at the call site via InferHandlers<P>
- * 
+ *
  * This is similar to Effect's pattern of using `any` in intermediate types
  * while maintaining type safety at API boundaries.
- * 
+ *
  * @internal
  */
 function unsafeAssertProcedureDefinition(procValue: unknown): ProcedureDefinition {
@@ -436,20 +445,20 @@ function unsafeAssertProcedureDefinition(procValue: unknown): ProcedureDefinitio
 
 /**
  * Assert that an RpcGroup can be widened to RpcGroup<AnyRpc> for collection.
- * 
+ *
  * **Why this assertion is safe:**
- * 
+ *
  * proceduresGroupToRpcGroup returns `RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>>`
  * which is a specific union of Rpc types. We widen to `RpcGroup<AnyRpc>` to collect
  * groups with different Rpc types into a single array for merging.
- * 
+ *
  * The type information is preserved at the Router level via:
  * - ExtractRpcGroups<TRoutes> at the type level
  * - RpcGroup.merge() at runtime, which combines the groups
- * 
+ *
  * This matches Effect's pattern in RpcGroup.toHandlersContext where handlers
  * are stored in Map<string, unknown> but retrieved with proper types.
- * 
+ *
  * @internal
  */
 function unsafeWidenRpcGroup(
@@ -461,22 +470,22 @@ function unsafeWidenRpcGroup(
 
 /**
  * Assert that the accumulated flatten result matches the computed type.
- * 
+ *
  * **Why this assertion is safe:**
- * 
+ *
  * The FlattenAccumulator is built by flattenRoutes which:
  * 1. Visits every entry in the router record (exhaustive iteration)
  * 2. Constructs paths using `${prefix}${key}.${procName}` (matches ExtractProcedures)
  * 3. Collects all RpcGroups from procedure groups (matches ExtractRpcGroups)
- * 
+ *
  * The type-level computation in ExtractProcedures<TRoutes> exactly mirrors
  * the runtime iteration logic, ensuring structural compatibility.
- * 
+ *
  * This is the same pattern Effect uses in Context.unsafeMake:
  * - Runtime: Map<string, any> with dynamic content
  * - Type: Context<Services> with precise service types
  * - Safety: Caller ensures map contents match Services
- * 
+ *
  * @internal
  */
 function unsafeAssertFlattenResult<Routes extends RouterRecord>(
@@ -491,21 +500,21 @@ function unsafeAssertFlattenResult<Routes extends RouterRecord>(
 
 /**
  * Recursively flatten a router structure into procedures and RpcGroups.
- * 
+ *
  * **Type Safety Strategy:**
- * 
+ *
  * This function is generic over TRoutes. The return type uses ExtractProcedures<TRoutes>
  * which is computed at compile-time using TypeScript's type-level recursion.
- * 
+ *
  * We use Effect's Record.reduce for iteration, which preserves key types better
  * than Object.entries. However, we still need boundary assertions because:
  * - RouterRecord values are heterogeneous (Router | ProceduresGroup)
  * - Type guards narrow to AnyRouter | AnyProceduresGroup (using `any`)
  * - The accumulated result type can't be computed incrementally
- * 
+ *
  * The assertions are isolated to named functions (unsafeAssert*) that document
  * why each boundary crossing is safe.
- * 
+ *
  * @internal
  */
 function flattenRoutes<Routes extends RouterRecord>(
@@ -552,7 +561,9 @@ function flattenRoutes<Routes extends RouterRecord>(
  * @internal
  */
 export interface MakeOptions {
-  readonly middlewares?: ReadonlyArray<Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>>
+  readonly middlewares?: ReadonlyArray<
+    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+  >
 }
 
 /**
@@ -565,7 +576,7 @@ export interface MakeOptions {
  */
 export const make = <Routes extends RouterRecord>(
   routes: Routes,
-  options?: MakeOptions
+  options?: MakeOptions,
 ): Router<Routes> => {
   validateNoDuplicatePaths(routes)
 
@@ -586,10 +597,7 @@ export const make = <Routes extends RouterRecord>(
 
   // Merge all RpcGroups into one using reduce (functional pattern)
   // The non-null assertion is safe: we validated rpcGroups.length > 0 above
-  const combinedGroup = rpcGroups.slice(1).reduce(
-    (acc, group) => acc.merge(group),
-    rpcGroups[0]!,
-  )
+  const combinedGroup = rpcGroups.slice(1).reduce((acc, group) => acc.merge(group), rpcGroups[0]!)
 
   return {
     [TypeId]: TypeId,
@@ -599,7 +607,9 @@ export const make = <Routes extends RouterRecord>(
     rpcGroup: combinedGroup,
     ...(options?.middlewares ? { middlewares: options.middlewares } : {}),
 
-    use: (middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>) => {
+    use: (
+      middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
+    ) => {
       const existingMiddlewares = options?.middlewares ?? []
       return make(routes, { middlewares: [...existingMiddlewares, middleware] })
     },
@@ -612,10 +622,7 @@ export const make = <Routes extends RouterRecord>(
         group: combinedGroup,
         path,
         protocol,
-      }).pipe(
-        Layer.provide(RpcSerialization.layerNdjson),
-        Layer.provide(httpOptions.handlers),
-      )
+      }).pipe(Layer.provide(RpcSerialization.layerNdjson), Layer.provide(httpOptions.handlers))
     },
   }
 }
@@ -675,10 +682,7 @@ export const extractMetadata = <Routes extends RouterRecord>(
    * Recursively extract metadata using functional reduce pattern.
    * No mutation - builds up immutable result through recursion.
    */
-  const extractFromRoutes = (
-    entries: RouterRecord,
-    pathPrefix: string = "",
-  ): MetadataRegistry =>
+  const extractFromRoutes = (entries: RouterRecord, pathPrefix: string = ""): MetadataRegistry =>
     Object.entries(entries).reduce<MetadataRegistry>((acc, [key, entry]) => {
       if (isRouter(entry)) {
         // Nested router - recurse and merge results
@@ -701,14 +705,25 @@ export const extractMetadata = <Routes extends RouterRecord>(
             }
 
             // Only include if there's actual metadata
-            if (def.description || def.summary || def.externalDocs || def.responseDescription || def.deprecated || def.invalidates?.length || def.invalidatesTags?.length || def.tags?.length) {
+            if (
+              def.description ||
+              def.summary ||
+              def.externalDocs ||
+              def.responseDescription ||
+              def.deprecated ||
+              def.invalidates?.length ||
+              def.invalidatesTags?.length ||
+              def.tags?.length
+            ) {
               return {
                 ...procAcc,
                 [fullPath]: {
                   ...(def.description ? { description: def.description } : {}),
                   ...(def.summary ? { summary: def.summary } : {}),
                   ...(def.externalDocs ? { externalDocs: def.externalDocs } : {}),
-                  ...(def.responseDescription ? { responseDescription: def.responseDescription } : {}),
+                  ...(def.responseDescription
+                    ? { responseDescription: def.responseDescription }
+                    : {}),
                   ...(def.deprecated ? { deprecated: def.deprecated } : {}),
                   ...(def.invalidates?.length ? { invalidates: def.invalidates } : {}),
                   ...(def.invalidatesTags?.length ? { invalidatesTags: def.invalidatesTags } : {}),
@@ -735,21 +750,22 @@ export const extractMetadata = <Routes extends RouterRecord>(
 /**
  * Infer the input type of a procedure.
  *
+ * This extracts the `I` type parameter from `ProcedureDefinition`, which
+ * includes both:
+ * - Input from middleware `withInput` extensions
+ * - Input from the procedure's `.input()` schema
+ *
  * @since 0.1.0
  * @category type-level
  */
-export type InferInput<T> = T extends ProceduresGroup<
-  any,
-  infer P extends ProcedureRecord
->
-  ? {
-      [K in keyof P]: P[K] extends { inputSchema: infer S }
-        ? S extends Schema.Schema<infer I, any>
+export type InferInput<T> =
+  T extends ProceduresGroup<any, infer P extends ProcedureRecord>
+    ? {
+        [K in keyof P]: P[K] extends ProcedureDefinition<infer I, any, any, any, any, any, any>
           ? I
           : unknown
-        : unknown
-    }
-  : never
+      }
+    : never
 
 /**
  * Infer the output type of a procedure.
@@ -757,15 +773,74 @@ export type InferInput<T> = T extends ProceduresGroup<
  * @since 0.1.0
  * @category type-level
  */
-export type InferOutput<T> = T extends ProceduresGroup<
-  any,
-  infer P extends ProcedureRecord
->
-  ? {
-      [K in keyof P]: P[K] extends { outputSchema: infer S }
-        ? S extends Schema.Schema<infer O, any>
-          ? O
+export type InferOutput<T> =
+  T extends ProceduresGroup<any, infer P extends ProcedureRecord>
+    ? {
+        [K in keyof P]: P[K] extends ProcedureDefinition<any, infer A, any, any, any, any, any>
+          ? A
           : unknown
-        : unknown
-    }
-  : never
+      }
+    : never
+
+/**
+ * Infer the error type of a procedure.
+ *
+ * This extracts the `E` type parameter from `ProcedureDefinition`, which
+ * includes both:
+ * - Errors from middleware (accumulated via `.use()`)
+ * - Errors from the procedure's `.error()` schema
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferError<T> =
+  T extends ProceduresGroup<any, infer P extends ProcedureRecord>
+    ? {
+        [K in keyof P]: P[K] extends ProcedureDefinition<any, any, infer E, any, any, any, any>
+          ? E
+          : never
+      }
+    : never
+
+/**
+ * Infer the requirements (R channel) of a procedure.
+ *
+ * This extracts the `R` type parameter from `ProcedureDefinition`, which
+ * includes requirements from middleware (accumulated via `.use()`).
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferRequirements<T> =
+  T extends ProceduresGroup<any, infer P extends ProcedureRecord>
+    ? {
+        [K in keyof P]: P[K] extends ProcedureDefinition<any, any, any, any, any, infer R, any>
+          ? R
+          : never
+      }
+    : never
+
+/**
+ * Infer the services provided by middleware for a procedure.
+ *
+ * This extracts the `Provides` type parameter from `ProcedureDefinition`.
+ *
+ * @since 0.4.0
+ * @category type-level
+ */
+export type InferProvides<T> =
+  T extends ProceduresGroup<any, infer P extends ProcedureRecord>
+    ? {
+        [K in keyof P]: P[K] extends ProcedureDefinition<
+          any,
+          any,
+          any,
+          any,
+          any,
+          any,
+          infer Provides
+        >
+          ? Provides
+          : never
+      }
+    : never

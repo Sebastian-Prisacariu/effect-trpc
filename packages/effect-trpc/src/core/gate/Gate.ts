@@ -39,7 +39,7 @@
 import * as Effect from "effect/Effect"
 import * as SubscriptionRef from "effect/SubscriptionRef"
 import * as Stream from "effect/Stream"
-import * as Scope from "effect/Scope"
+import type * as Scope from "effect/Scope"
 import * as Fiber from "effect/Fiber"
 import { GateClosedError } from "./errors.js"
 
@@ -475,7 +475,13 @@ export const subscribe = (gate: Gate, callback: (isOpen: boolean) => void): (() 
   )
 
   return () => {
-    Effect.runFork(Fiber.interrupt(fiber))
+    Effect.runFork(
+      Fiber.interrupt(fiber).pipe(
+        Effect.catchAll((err) =>
+          Effect.logWarning("Gate.subscribe interrupt failed", { err, gate: gate.name }),
+        ),
+      ),
+    )
   }
 }
 

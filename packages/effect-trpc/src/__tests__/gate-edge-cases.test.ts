@@ -166,6 +166,8 @@ describe("Gate Edge Cases", () => {
           Effect.gen(function* () {
             const gate = yield* Gate.make("test", { initiallyOpen: true })
             const log = yield* Ref.make<string[]>([])
+            const started = yield* Deferred.make<void>()
+            const canComplete = yield* Deferred.make<void>()
 
             // Start a long-running effect
             const fiber = yield* Effect.fork(
@@ -173,15 +175,21 @@ describe("Gate Edge Cases", () => {
                 gate,
                 Effect.gen(function* () {
                   yield* Ref.update(log, (l) => [...l, "started"])
-                  yield* Effect.sleep("50 millis")
+                  yield* Deferred.succeed(started, void 0)
+                  // Wait for signal to continue
+                  yield* Deferred.await(canComplete)
                   yield* Ref.update(log, (l) => [...l, "completed"])
                   return "done"
                 }),
               ),
             )
 
-            // Close gate while effect is running
-            yield* Effect.sleep("10 millis")
+            // Wait for effect to start
+            yield* Deferred.await(started)
+
+            // Signal effect to complete AND close gate concurrently
+            // close() will wait for the effect to release the semaphore permit
+            yield* Deferred.succeed(canComplete, void 0)
             yield* Gate.close(gate)
 
             // Effect should complete (semaphore permit was already acquired)
@@ -215,8 +223,8 @@ describe("Gate Edge Cases", () => {
               ),
             )
 
-            // Give fiber time to start waiting
-            yield* Effect.sleep("10 millis")
+            // Yield control to allow fiber to start and block on gate
+            yield* Effect.yieldNow()
             yield* Ref.update(log, (l) => [...l, "before open"])
 
             // Open the gate
@@ -250,11 +258,20 @@ describe("Gate Edge Cases", () => {
             const cleanup2 = Gate.subscribe(gate, (isOpen) => changes2.push(isOpen))
             const cleanup3 = Gate.subscribe(gate, (isOpen) => changes3.push(isOpen))
 
-            // Make some changes
+            // Make some changes - subscribers run in forked fibers, need to yield
             yield* Gate.close(gate)
-            yield* Effect.sleep("10 millis")
+            // Poll until subscribers have received the close event
+            yield* Effect.repeat(
+              Effect.sync(() => changes1.length),
+              { until: (n) => n >= 1 },
+            ).pipe(Effect.timeout("1 second"), Effect.orDie)
+
             yield* Gate.open(gate)
-            yield* Effect.sleep("10 millis")
+            // Poll until subscribers have received the open event
+            yield* Effect.repeat(
+              Effect.sync(() => changes1.length),
+              { until: (n) => n >= 2 },
+            ).pipe(Effect.timeout("1 second"), Effect.orDie)
 
             // Clean up
             cleanup1()
@@ -284,16 +301,24 @@ describe("Gate Edge Cases", () => {
             const cleanup1 = Gate.subscribe(gate, (isOpen) => changes1.push(isOpen))
             const cleanup2 = Gate.subscribe(gate, (isOpen) => changes2.push(isOpen))
 
-            // First change - both see it
+            // First change - both see it (subscribers run in forked fibers)
             yield* Gate.close(gate)
-            yield* Effect.sleep("10 millis")
+            // Poll until both subscribers have received the close event
+            yield* Effect.repeat(
+              Effect.sync(() => changes1.length + changes2.length),
+              { until: (n) => n >= 2 },
+            ).pipe(Effect.timeout("1 second"), Effect.orDie)
 
             // Unsubscribe first
             cleanup1()
 
             // Second change - only second sees it
             yield* Gate.open(gate)
-            yield* Effect.sleep("10 millis")
+            // Poll until second subscriber has received the open event
+            yield* Effect.repeat(
+              Effect.sync(() => changes2.length),
+              { until: (n) => n >= 2 },
+            ).pipe(Effect.timeout("1 second"), Effect.orDie)
 
             cleanup2()
 
@@ -368,12 +393,14 @@ describe("Gate Edge Cases", () => {
           Effect.gen(function* () {
             const gate = yield* Gate.make("test", { initiallyOpen: false })
             const resolved = yield* Ref.make(0)
+            const waitersStarted = yield* Ref.make(0)
 
             // Start multiple waiters
             const fibers = yield* Effect.all(
               Array.from({ length: 5 }, () =>
                 Effect.fork(
                   Effect.gen(function* () {
+                    yield* Ref.update(waitersStarted, (n) => n + 1)
                     yield* Gate.awaitOpen(gate)
                     yield* Ref.update(resolved, (n) => n + 1)
                   }),
@@ -381,8 +408,11 @@ describe("Gate Edge Cases", () => {
               ),
             )
 
-            // Give them time to start waiting
-            yield* Effect.sleep("10 millis")
+            // Wait for all fibers to start waiting (poll until 5 waiters started)
+            yield* Effect.repeat(
+              Ref.get(waitersStarted),
+              { until: (n) => n === 5 },
+            )
 
             // Open gate - all should resolve
             yield* Gate.open(gate)
@@ -404,12 +434,14 @@ describe("Gate Edge Cases", () => {
           Effect.gen(function* () {
             const gate = yield* Gate.make("test", { initiallyOpen: true })
             const resolved = yield* Ref.make(0)
+            const waitersStarted = yield* Ref.make(0)
 
             // Start multiple waiters
             const fibers = yield* Effect.all(
               Array.from({ length: 5 }, () =>
                 Effect.fork(
                   Effect.gen(function* () {
+                    yield* Ref.update(waitersStarted, (n) => n + 1)
                     yield* Gate.awaitClose(gate)
                     yield* Ref.update(resolved, (n) => n + 1)
                   }),
@@ -417,8 +449,11 @@ describe("Gate Edge Cases", () => {
               ),
             )
 
-            // Give them time to start waiting
-            yield* Effect.sleep("10 millis")
+            // Wait for all fibers to start waiting (poll until 5 waiters started)
+            yield* Effect.repeat(
+              Ref.get(waitersStarted),
+              { until: (n) => n === 5 },
+            )
 
             // Close gate - all should resolve
             yield* Gate.close(gate)
@@ -506,14 +541,12 @@ describe("Gate Edge Cases", () => {
             const initial = yield* Gate.getState(gate)
             timestamps.push(initial.openedAt!)
 
-            // Close and record closedAt
-            yield* Effect.sleep("5 millis")
+            // Close the gate - timestamp is set on state change
             yield* Gate.close(gate)
             const afterClose = yield* Gate.getState(gate)
             timestamps.push(afterClose.closedAt!)
 
-            // Open and record openedAt
-            yield* Effect.sleep("5 millis")
+            // Open the gate - timestamp is set on state change
             yield* Gate.open(gate)
             const afterOpen = yield* Gate.getState(gate)
             timestamps.push(afterOpen.openedAt!)
@@ -523,10 +556,11 @@ describe("Gate Edge Cases", () => {
         ),
       )
 
-      // Each timestamp should be greater than the previous
+      // Each timestamp should be greater than or equal to the previous
+      // (monotonically non-decreasing - may be equal if same millisecond)
       expect(result.length).toBe(3)
-      expect(result[1]!).toBeGreaterThan(result[0]!)
-      expect(result[2]!).toBeGreaterThan(result[1]!)
+      expect(result[1]!).toBeGreaterThanOrEqual(result[0]!)
+      expect(result[2]!).toBeGreaterThanOrEqual(result[1]!)
     })
   })
 })

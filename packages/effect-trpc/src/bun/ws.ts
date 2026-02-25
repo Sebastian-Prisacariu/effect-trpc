@@ -45,6 +45,7 @@
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Fiber from "effect/Fiber"
+import * as Ref from "effect/Ref"
 import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as DateTime from "effect/DateTime"
 import * as Duration from "effect/Duration"
@@ -86,6 +87,8 @@ interface WebSocketData {
   authResult?: AuthResult
   /** Fiber for auth timeout - interrupted when authenticated or closed */
   authTimeoutFiber?: Fiber.RuntimeFiber<void, never>
+  /** Cleanup guard to prevent race conditions during connection cleanup */
+  cleanupGuard?: Ref.Ref<boolean>
 }
 
 /**
@@ -341,6 +344,15 @@ export function createWebSocketHandler<TRouter extends Router>(
   // Handle incoming message
   const handleMessage = (ws: BunWebSocket<WebSocketData>, data: string) =>
     Effect.gen(function* () {
+      // Check cleanup guard before processing - skip if cleanup has started
+      if (ws.data.cleanupGuard) {
+        const isCleaningUp = yield* Ref.get(ws.data.cleanupGuard)
+        if (isCleaningUp) {
+          yield* Effect.logDebug("Skipping message processing: connection cleanup in progress")
+          return
+        }
+      }
+
       const codec = yield* WebSocketCodec
       const authService = yield* WebSocketAuth
       const registry = yield* ConnectionRegistry
@@ -568,6 +580,16 @@ export function createWebSocketHandler<TRouter extends Router>(
   // Handle connection close
   const handleClose = (ws: BunWebSocket<WebSocketData>) =>
     Effect.gen(function* () {
+      // Atomically set cleanup guard to prevent race conditions with message handling
+      if (ws.data.cleanupGuard) {
+        const wasCleaningUp = yield* Ref.getAndSet(ws.data.cleanupGuard, true)
+        if (wasCleaningUp) {
+          // Already cleaning up - skip to prevent double cleanup
+          yield* Effect.logDebug("Skipping cleanup: already in progress", { clientId: ws.data.clientId })
+          return
+        }
+      }
+
       // Cancel auth timeout if still pending
       if (ws.data.authTimeoutFiber) {
         yield* Fiber.interrupt(ws.data.authTimeoutFiber)
@@ -598,8 +620,11 @@ export function createWebSocketHandler<TRouter extends Router>(
           return
         }
 
+        // Create cleanup guard for this connection (prevents race conditions during cleanup)
+        const cleanupGuard = Effect.runSync(Ref.make(false))
+
         // Initialize connection data
-        ws.data = { authenticated: false }
+        ws.data = { authenticated: false, cleanupGuard }
 
         // Start auth timeout
         const authTimeoutFiber = managedRuntime.runFork(

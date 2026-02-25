@@ -34,7 +34,14 @@ import * as Layer from "effect/Layer"
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
 import type { Router } from "../core/router.js"
-import { type CorsOptions, buildCorsHeaders, createRpcWebHandler } from "../shared/index.js"
+import {
+  type CorsOptions,
+  type SecurityHeadersOptions,
+  buildCorsHeaders,
+  buildSecurityHeaders,
+  addSecurityHeaders,
+  createRpcWebHandler,
+} from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -86,10 +93,24 @@ export interface CreateServerOptions<TRouter extends Router, R> {
    * @default false
    */
   readonly cors?: boolean | CorsOptions
+
+  /**
+   * Enable security headers on responses.
+   * Pass `true` for defaults, `false` to disable, or an object to customize.
+   *
+   * Default headers:
+   * - X-Content-Type-Options: nosniff
+   * - X-Frame-Options: DENY
+   * - X-XSS-Protection: 1; mode=block
+   * - Referrer-Policy: strict-origin-when-cross-origin
+   *
+   * @default true
+   */
+  readonly securityHeaders?: boolean | SecurityHeadersOptions
 }
 
-// Re-export CorsOptions for convenience
-export type { CorsOptions }
+// Re-export CorsOptions and SecurityHeadersOptions for convenience
+export type { CorsOptions, SecurityHeadersOptions }
 
 export interface FetchHandler {
   /**
@@ -166,7 +187,15 @@ declare const Bun: {
 export function createFetchHandler<TRouter extends Router, R>(
   options: Omit<CreateServerOptions<TRouter, R>, "port" | "host">,
 ): FetchHandler {
-  const { router, handlers, path = "/rpc", disableTracing, spanPrefix, cors } = options
+  const {
+    router,
+    handlers,
+    path = "/rpc",
+    disableTracing,
+    spanPrefix,
+    cors,
+    securityHeaders: securityHeadersOption = true,
+  } = options
 
   const handlersWithBunRuntime = handlers.pipe(
     Layer.provide(BunHttpPlatform.layer),
@@ -184,56 +213,57 @@ export function createFetchHandler<TRouter extends Router, R>(
   // Build CORS headers if enabled
   const corsHeaders = cors ? buildCorsHeaders(cors === true ? {} : cors) : null
 
-  if (corsHeaders) {
-    return {
-      fetch: async (request: Request) => {
-        // Handle preflight
-        if (request.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: corsHeaders })
-        }
+  // Build security headers (enabled by default)
+  const securityHeaders = buildSecurityHeaders(securityHeadersOption)
 
-        // Check path - must be exact match or have path separator after
-        // This prevents "/rpc-admin" from matching when path is "/rpc"
-        const url = new URL(request.url)
-        const pathname = url.pathname
-        const pathMatches =
-          pathname === path || pathname.startsWith(path + "/") || pathname.startsWith(path + "?")
-
-        if (!pathMatches) {
-          return new Response("Not Found", { status: 404 })
-        }
-
-        // Handle RPC request
-        const response = await webHandler.handler(request)
-
-        // Add CORS headers to response
-        const headers = new Headers(response.headers)
-        for (const [key, value] of Object.entries(corsHeaders)) {
-          headers.set(key, value)
-        }
-
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers,
-        })
-      },
-      dispose: webHandler.dispose,
-    }
-  }
-
-  // No CORS - just check path
   return {
     fetch: async (request: Request) => {
+      // Handle preflight for CORS
+      if (corsHeaders && request.method === "OPTIONS") {
+        const preflightHeaders = new Headers(corsHeaders)
+        if (securityHeaders) {
+          addSecurityHeaders(preflightHeaders, securityHeaders)
+        }
+        return new Response(null, { status: 204, headers: preflightHeaders })
+      }
+
+      // Check path - must be exact match or have path separator after
+      // This prevents "/rpc-admin" from matching when path is "/rpc"
       const url = new URL(request.url)
       const pathname = url.pathname
       const pathMatches =
         pathname === path || pathname.startsWith(path + "/") || pathname.startsWith(path + "?")
 
       if (!pathMatches) {
-        return new Response("Not Found", { status: 404 })
+        const notFoundHeaders = new Headers()
+        if (securityHeaders) {
+          addSecurityHeaders(notFoundHeaders, securityHeaders)
+        }
+        return new Response("Not Found", { status: 404, headers: notFoundHeaders })
       }
-      return webHandler.handler(request)
+
+      // Handle RPC request
+      const response = await webHandler.handler(request)
+
+      // Add headers if needed (CORS and/or security)
+      if (corsHeaders || securityHeaders) {
+        const headers = new Headers(response.headers)
+        if (corsHeaders) {
+          for (const [key, value] of Object.entries(corsHeaders)) {
+            headers.set(key, value)
+          }
+        }
+        if (securityHeaders) {
+          addSecurityHeaders(headers, securityHeaders)
+        }
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        })
+      }
+
+      return response
     },
     dispose: webHandler.dispose,
   }

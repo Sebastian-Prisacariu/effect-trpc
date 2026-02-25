@@ -59,7 +59,7 @@ const RpcCauseSchema = Schema.Union(
   Schema.Struct({
     _tag: Schema.Literal("Interrupt"),
     fiberId: Schema.optional(Schema.Unknown),
-  })
+  }),
 )
 
 /**
@@ -128,10 +128,7 @@ const RpcStreamErrorSchema = Schema.Struct({
  * Union of all RPC response message types.
  * @internal
  */
-const RpcResponseMessageSchema = Schema.Union(
-  RpcExitMessageSchema,
-  RpcDefectMessageSchema,
-)
+const RpcResponseMessageSchema = Schema.Union(RpcExitMessageSchema, RpcDefectMessageSchema)
 
 /**
  * Union of all stream message types.
@@ -203,7 +200,10 @@ export const safeStringify = (value: unknown): string => {
  * Create RPC request body with safe JSON serialization.
  * @internal
  */
-export const createRpcRequestBody = (rpcName: string, input: unknown): Effect.Effect<string, RpcClientError> =>
+export const createRpcRequestBody = (
+  rpcName: string,
+  input: unknown,
+): Effect.Effect<string, RpcClientError> =>
   Effect.gen(function* () {
     const requestId = yield* generateRequestId
     return yield* Effect.try({
@@ -237,7 +237,9 @@ export const parseRpcLine = <A>(line: string): Effect.Effect<Option.Option<A>, R
 
     // Try to decode as a response message using Schema
     const decodeResult = yield* Schema.decodeUnknown(RpcResponseMessageSchema)(rawJson).pipe(
-      Effect.mapError((e) => new RpcClientError({ message: `Invalid RPC message format`, cause: e })),
+      Effect.mapError(
+        (e) => new RpcClientError({ message: `Invalid RPC message format`, cause: e }),
+      ),
       Effect.option,
     )
 
@@ -253,7 +255,18 @@ export const parseRpcLine = <A>(line: string): Effect.Effect<Option.Option<A>, R
       }
       const cause = msg.exit.cause
       if (cause?._tag === "Fail") {
-        return yield* Effect.fail(new RpcClientError({ message: "Request failed", cause: cause.error }))
+        // Preserve typed errors so Effect.catchTag works
+        // If the error has a _tag property, return it directly
+        const error = cause.error
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "_tag" in error &&
+          typeof (error as { _tag: unknown })._tag === "string"
+        ) {
+          return yield* Effect.fail(error as RpcClientError)
+        }
+        return yield* Effect.fail(new RpcClientError({ message: "Request failed", cause: error }))
       }
       if (cause?._tag === "Die") {
         const defectMsg = typeof cause.defect === "string" ? cause.defect : "Unexpected error"
@@ -300,13 +313,17 @@ export const createRpcEffect = <A>(
   procedurePath: string,
   input: unknown,
   tracing?: TracingConfig,
-): Effect.Effect<A, RpcClientError | RpcResponseError | HttpClientError.HttpClientError, HttpClient.HttpClient> => {
+): Effect.Effect<
+  A,
+  RpcClientError | RpcResponseError | HttpClientError.HttpClientError,
+  HttpClient.HttpClient
+> => {
   // Handle deeply nested paths like "user.posts.list" or "admin.settings.update"
   // The procedure name is always the last segment, the rest is the group path
   const parts = procedurePath.split(".")
   const procedureName = parts.pop()
   const groupPath = parts.join(".")
-  
+
   if (!groupPath || !procedureName) {
     return Effect.fail(new RpcClientError({ message: `Invalid procedure path: ${procedurePath}` }))
   }
@@ -325,7 +342,10 @@ export const createRpcEffect = <A>(
 
     if (response.status >= 400) {
       return yield* Effect.fail(
-        new RpcResponseError({ message: `HTTP error: ${response.status}`, status: response.status }),
+        new RpcResponseError({
+          message: `HTTP error: ${response.status}`,
+          status: response.status,
+        }),
       )
     }
 
@@ -340,9 +360,7 @@ export const createRpcEffect = <A>(
 
     return effect.pipe(
       Effect.withSpan(spanName, {
-        attributes: tracing.includeInput
-          ? { "rpc.input": safeStringify(input) }
-          : undefined,
+        attributes: tracing.includeInput ? { "rpc.input": safeStringify(input) } : undefined,
       }),
     )
   }
@@ -386,9 +404,11 @@ export const createStreamEffect = <A>(
   const parts = procedurePath.split(".")
   const procedureName = parts.pop()
   const groupPath = parts.join(".")
-  
+
   if (!groupPath || !procedureName) {
-    return Stream.fail<ReactStreamError>(new RpcClientError({ message: `Invalid procedure path: ${procedurePath}` }))
+    return Stream.fail<ReactStreamError>(
+      new RpcClientError({ message: `Invalid procedure path: ${procedurePath}` }),
+    )
   }
 
   const rpcName = `${groupPath}.${procedureName}`
@@ -406,7 +426,10 @@ export const createStreamEffect = <A>(
 
       if (response.status >= 400) {
         return Stream.fail<ReactStreamError>(
-          new RpcResponseError({ message: `HTTP error: ${response.status}`, status: response.status }),
+          new RpcResponseError({
+            message: `HTTP error: ${response.status}`,
+            status: response.status,
+          }),
         )
       }
 
@@ -420,7 +443,8 @@ export const createStreamEffect = <A>(
             const rawJson = yield* Effect.try({
               // eslint-disable-next-line @typescript-eslint/no-unsafe-return
               try: () => JSON.parse(line),
-              catch: (e) => new RpcClientError({ message: `Failed to parse stream line: ${line}`, cause: e }),
+              catch: (e) =>
+                new RpcClientError({ message: `Failed to parse stream line: ${line}`, cause: e }),
             })
 
             const decodeResult = yield* Schema.decodeUnknown(RpcStreamMessageSchema)(rawJson).pipe(
@@ -440,7 +464,19 @@ export const createStreamEffect = <A>(
               return new StreamEnd()
             }
             if (msg._tag === "Error" || msg._tag === "Failure") {
-              return yield* Effect.fail(new RpcClientError({ message: "Stream error", cause: msg.error }))
+              // Preserve typed errors so Effect.catchTag works
+              const error = msg.error
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                "_tag" in error &&
+                typeof (error as { _tag: unknown })._tag === "string"
+              ) {
+                return yield* Effect.fail(error as RpcClientError)
+              }
+              return yield* Effect.fail(
+                new RpcClientError({ message: "Stream error", cause: error }),
+              )
             }
 
             return new StreamSkip()

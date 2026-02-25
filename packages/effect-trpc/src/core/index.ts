@@ -45,10 +45,7 @@ export type {
   UnsubscribeReason,
 } from "./procedures.js"
 
-export {
-  procedures,
-  UnsubscribeReason as UnsubscribeReasonCtor,
-} from "./procedures.js"
+export { procedures, UnsubscribeReason as UnsubscribeReasonCtor } from "./procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Router
@@ -73,6 +70,9 @@ export type {
   ExtractRpcGroups,
   InferInput,
   InferOutput,
+  InferError,
+  InferRequirements,
+  InferProvides,
   AnyProceduresGroup,
   AnyRouter,
   RouterEntry,
@@ -164,6 +164,7 @@ export {
 export type {
   RetryConfig,
   BatchConfig,
+  LoggerConfig,
   CreateClientOptions,
   RpcClientErrorTypeId as RpcClientErrorTypeIdType,
   RpcResponseErrorTypeId as RpcResponseErrorTypeIdType,
@@ -193,12 +194,7 @@ export {
   isGate,
 } from "./gate/index.js"
 
-export type {
-  ClosedBehavior,
-  GateState,
-  GateInstance,
-  GateOptions,
-} from "./gate/index.js"
+export type { ClosedBehavior, GateState, GateInstance, GateOptions } from "./gate/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Network (Online/Offline Detection)

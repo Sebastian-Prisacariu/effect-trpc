@@ -11,7 +11,7 @@ import { Middleware, type BaseContext } from "../core/middleware.js"
  * Helper to cast MiddlewareResult (Effect | Stream) to runnable Effect for tests.
  * Uses `any` because MiddlewareResult is a union of Effect | Stream.
  */
- 
+
 const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
   effect as Effect.Effect<A, E, never>
 
@@ -19,7 +19,7 @@ const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
  * Helper to cast procedure to AnyProcedure for tests.
  * Needed due to exactOptionalPropertyTypes making never not assignable to any.
  */
- 
+
 const asProcedure = <T>(proc: T): any => proc
 
 describe("router", () => {
@@ -89,9 +89,7 @@ describe("rpc-bridge", () => {
   })
 
   it("converts a stream procedure with stream flag", () => {
-    const def = procedure
-      .output(Schema.String)
-      .stream()
+    const def = procedure.output(Schema.String).stream()
 
     const rpc = procedureToRpc("test.stream", asProcedure(def))
 
@@ -326,10 +324,7 @@ describe("nested router metadata extraction", () => {
 describe("extractMetadata", () => {
   it("extracts invalidation metadata from procedures", () => {
     const UserProcedures = procedures("user", {
-      list: procedure
-        .output(Schema.Array(Schema.String))
-        .tags(["users"])
-        .query(),
+      list: procedure.output(Schema.Array(Schema.String)).tags(["users"]).query(),
       create: procedure
         .input(Schema.Struct({ name: Schema.String }))
         .output(Schema.String)
@@ -368,10 +363,7 @@ describe("extractMetadata", () => {
         .deprecated()
         .output(Schema.String)
         .query(),
-      simpleGet: procedure
-        .summary("Simple endpoint")
-        .output(Schema.String)
-        .query(),
+      simpleGet: procedure.summary("Simple endpoint").output(Schema.String).query(),
     })
 
     const router = Router.make({ api: ApiProcedures })
@@ -406,17 +398,11 @@ describe("extractMetadata", () => {
 
   it("works with multiple procedure groups", () => {
     const UserProcedures = procedures("user", {
-      create: procedure
-        .input(Schema.String)
-        .invalidates(["user.list"])
-        .mutation(),
+      create: procedure.input(Schema.String).invalidates(["user.list"]).mutation(),
     })
 
     const PostProcedures = procedures("post", {
-      create: procedure
-        .input(Schema.String)
-        .invalidates(["post.list", "user.stats"])
-        .mutation(),
+      create: procedure.input(Schema.String).invalidates(["post.list", "user.stats"]).mutation(),
     })
 
     const router = Router.make({
@@ -436,16 +422,13 @@ describe("extractMetadata", () => {
 
 describe("router-level middleware", () => {
   it("stores middleware on the router", () => {
-    const loggingMiddleware = Middleware.make("logging", (ctx, next) => next(ctx))
+    const loggingMiddleware = Middleware.make("logging", (ctx, _input, next) => next(ctx))
 
     const TestProcedures = procedures("test", {
       get: procedure.output(Schema.String).query(),
     })
 
-    const testRouter = Router.make(
-      { test: TestProcedures },
-      { middlewares: [loggingMiddleware] }
-    )
+    const testRouter = Router.make({ test: TestProcedures }, { middlewares: [loggingMiddleware] })
 
     expect(testRouter.middlewares).toBeDefined()
     expect(testRouter.middlewares).toHaveLength(1)
@@ -453,8 +436,8 @@ describe("router-level middleware", () => {
   })
 
   it("adds middleware via .use() method", () => {
-    const firstMiddleware = Middleware.make("first", (ctx, next) => next(ctx))
-    const secondMiddleware = Middleware.make("second", (ctx, next) => next(ctx))
+    const firstMiddleware = Middleware.make("first", (ctx, _input, next) => next(ctx))
+    const secondMiddleware = Middleware.make("second", (ctx, _input, next) => next(ctx))
 
     const TestProcedures = procedures("test", {
       get: procedure.output(Schema.String).query(),
@@ -474,7 +457,7 @@ describe("router-level middleware", () => {
     const executionOrder: string[] = []
 
     // Create a router-level middleware that tracks execution
-    const routerMiddleware = Middleware.make("router", (ctx, next) => {
+    const routerMiddleware = Middleware.make("router", (ctx, _input, next) => {
       executionOrder.push("router-before")
       return Effect.map(next(ctx), (result) => {
         executionOrder.push("router-after")
@@ -483,7 +466,7 @@ describe("router-level middleware", () => {
     })
 
     // Create a procedure-level middleware
-    const procedureMiddleware = Middleware.make("procedure", (ctx, next) => {
+    const procedureMiddleware = Middleware.make("procedure", (ctx, _input, next) => {
       executionOrder.push("procedure-before")
       return Effect.map(next(ctx), (result) => {
         executionOrder.push("procedure-after")
@@ -492,10 +475,7 @@ describe("router-level middleware", () => {
     })
 
     const TestProcedures = procedures("test", {
-      action: procedure
-        .use(procedureMiddleware)
-        .output(Schema.String)
-        .query(),
+      action: procedure.use(procedureMiddleware).output(Schema.String).query(),
     })
 
     // Convert handlers with router middleware
@@ -508,13 +488,13 @@ describe("router-level middleware", () => {
         },
       },
       "",
-      [routerMiddleware]
+      [routerMiddleware],
     )
 
     // Call the handler
     const handler = rpcHandlers["test.action"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     // Router middleware should run first, then procedure middleware
@@ -530,7 +510,7 @@ describe("router-level middleware", () => {
   it("applies middleware from nested routers in correct order", async () => {
     const executionOrder: string[] = []
 
-    const rootMiddleware = Middleware.make("root", (ctx, next) => {
+    const rootMiddleware = Middleware.make("root", (ctx, _input, next) => {
       executionOrder.push("root-before")
       return Effect.map(next(ctx), (result) => {
         executionOrder.push("root-after")
@@ -538,7 +518,7 @@ describe("router-level middleware", () => {
       })
     })
 
-    const nestedMiddleware = Middleware.make("nested", (ctx, next) => {
+    const nestedMiddleware = Middleware.make("nested", (ctx, _input, next) => {
       executionOrder.push("nested-before")
       return Effect.map(next(ctx), (result) => {
         executionOrder.push("nested-after")
@@ -546,7 +526,7 @@ describe("router-level middleware", () => {
       })
     })
 
-    const procedureMiddleware = Middleware.make("procedure", (ctx, next) => {
+    const procedureMiddleware = Middleware.make("procedure", (ctx, _input, next) => {
       executionOrder.push("procedure-before")
       return Effect.map(next(ctx), (result) => {
         executionOrder.push("procedure-after")
@@ -555,21 +535,15 @@ describe("router-level middleware", () => {
     })
 
     const ActionProcedures = procedures("action", {
-      run: procedure
-        .use(procedureMiddleware)
-        .output(Schema.String)
-        .query(),
+      run: procedure.use(procedureMiddleware).output(Schema.String).query(),
     })
 
     const nestedRouter = Router.make(
       { action: ActionProcedures },
-      { middlewares: [nestedMiddleware] }
+      { middlewares: [nestedMiddleware] },
     )
 
-    const rootRouter = Router.make(
-      { nested: nestedRouter },
-      { middlewares: [rootMiddleware] }
-    )
+    const rootRouter = Router.make({ nested: nestedRouter }, { middlewares: [rootMiddleware] })
 
     // The root router should have accumulated middleware info
     // To test the full chain, we need to simulate how rpc-handler.ts would process this

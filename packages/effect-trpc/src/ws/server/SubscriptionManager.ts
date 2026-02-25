@@ -19,12 +19,14 @@ import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
+import * as Duration from "effect/Duration"
 
 import type { ClientId, SubscriptionId } from "../types.js"
 import { generateSubscriptionId } from "../types.js"
 import {
   SubscriptionError,
   SubscriptionNotFoundError,
+  InvalidPathError,
 } from "../errors.js"
 import {
   DataMessage,
@@ -118,6 +120,98 @@ export const MAX_SUBSCRIPTIONS_PER_CLIENT = 100
  * @category Configuration
  */
 export const MAX_CLIENT_MESSAGE_QUEUE_SIZE = 1000
+
+/**
+ * Default timeout for subscription handler setup.
+ * Prevents handlers from blocking indefinitely during initialization.
+ *
+ * @since 0.1.0
+ * @category Configuration
+ */
+export const DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT = Duration.seconds(30)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Path Validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Valid path format regex.
+ * Paths must:
+ * - Start with a letter
+ * - Contain only alphanumeric characters, dots, and underscores
+ * - Dots separate path segments (e.g., "user.notifications.watch")
+ *
+ * @since 0.1.0
+ * @category Configuration
+ */
+export const PATH_REGEX = /^[a-zA-Z][a-zA-Z0-9_.]*$/
+
+/**
+ * Maximum path length.
+ * Prevents excessively long paths that could cause performance issues.
+ *
+ * @since 0.1.0
+ * @category Configuration
+ */
+export const MAX_PATH_LENGTH = 256
+
+/**
+ * Validate a subscription path.
+ *
+ * Checks:
+ * - Path is not empty
+ * - Path does not exceed maximum length
+ * - Path matches valid format (alphanumeric, dots, underscores, starts with letter)
+ * - Path does not have leading/trailing dots
+ * - Path does not have consecutive dots
+ *
+ * @since 0.1.0
+ * @category Path Validation
+ */
+export const validatePath = (path: string): Effect.Effect<string, InvalidPathError> =>
+  Effect.gen(function* () {
+    // Check for empty path
+    if (!path || path.length === 0) {
+      return yield* Effect.fail(new InvalidPathError({ 
+        path, 
+        reason: "Path cannot be empty" 
+      }))
+    }
+
+    // Check path length
+    if (path.length > MAX_PATH_LENGTH) {
+      return yield* Effect.fail(new InvalidPathError({ 
+        path, 
+        reason: `Path too long (max ${MAX_PATH_LENGTH} characters)` 
+      }))
+    }
+
+    // Check for leading/trailing dots (slashes in path notation)
+    if (path.startsWith(".") || path.endsWith(".")) {
+      return yield* Effect.fail(new InvalidPathError({ 
+        path, 
+        reason: "Path cannot have leading or trailing dots" 
+      }))
+    }
+
+    // Check for consecutive dots (empty segments)
+    if (path.includes("..")) {
+      return yield* Effect.fail(new InvalidPathError({ 
+        path, 
+        reason: "Path cannot have consecutive dots (empty segments)" 
+      }))
+    }
+
+    // Check format with regex
+    if (!PATH_REGEX.test(path)) {
+      return yield* Effect.fail(new InvalidPathError({ 
+        path, 
+        reason: "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter." 
+      }))
+    }
+
+    return path
+  })
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Service
@@ -297,17 +391,29 @@ const makeSubscriptionManager = Effect.gen(function* () {
           )
         : input
 
-      // Call onSubscribe to get the stream
+      // Call onSubscribe to get the stream (with timeout to prevent indefinite blocking)
       const stream = yield* Effect.suspend(() => handler.handler.onSubscribe(validatedInput, ctx)).pipe(
-        Effect.mapError(
-          (cause) =>
+        Effect.timeoutFail({
+          duration: DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT,
+          onTimeout: () =>
             new SubscriptionError({
               subscriptionId,
               path: handler.path,
-              reason: "HandlerError",
-              description: "Handler setup failed",
-              cause,
+              reason: "SetupTimeout",
+              description: `Subscription handler setup timed out after ${Duration.toMillis(DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT)}ms`,
             }),
+        }),
+        Effect.mapError(
+          (cause) =>
+            cause instanceof SubscriptionError
+              ? cause
+              : new SubscriptionError({
+                  subscriptionId,
+                  path: handler.path,
+                  reason: "HandlerError",
+                  description: "Handler setup failed",
+                  cause,
+                }),
         ),
         Effect.catchAllDefect((defect) => Effect.logError("Subscription handler defect", { subscriptionId, path: handler.path, defect }).pipe(Effect.flatMap(() => Effect.fail(
             new SubscriptionError({
@@ -425,6 +531,19 @@ const makeSubscriptionManager = Effect.gen(function* () {
         yield* Effect.annotateCurrentSpan("correlationId", correlationId)
         yield* Effect.annotateCurrentSpan("path", path)
 
+        // Validate path format FIRST (before any resource allocation)
+        // This prevents malformed paths from consuming server resources
+        const validatedPath = yield* validatePath(path).pipe(
+          Effect.mapError((err) =>
+            new SubscriptionError({
+              subscriptionId: "pending", // No ID yet since validation failed early
+              path: err.path,
+              reason: "InputValidation",
+              description: err.reason,
+            }),
+          ),
+        )
+
         // Generate server-side subscription ID (security: never trust client IDs)
         const subscriptionId = yield* generateSubscriptionId
 
@@ -437,24 +556,24 @@ const makeSubscriptionManager = Effect.gen(function* () {
           return yield* Effect.fail(
             new SubscriptionError({
               subscriptionId,
-              path,
+              path: validatedPath,
               reason: "Unauthorized",
               description: `Maximum subscriptions per client (${MAX_SUBSCRIPTIONS_PER_CLIENT}) exceeded`,
             }),
           )
         }
 
-        // Get handler
+        // Get handler - validates that the procedure exists
         const handlerMap = yield* Ref.get(handlers)
-        const handler = HashMap.get(handlerMap, path)
+        const handler = HashMap.get(handlerMap, validatedPath)
 
         if (Option.isNone(handler)) {
           return yield* Effect.fail(
             new SubscriptionError({
               subscriptionId,
-              path,
+              path: validatedPath,
               reason: "NotFound",
-              description: `No handler registered for path: ${path}`,
+              description: `No handler registered for path: ${validatedPath}`,
             }),
           )
         }
@@ -465,7 +584,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
             () =>
               new SubscriptionError({
                 subscriptionId,
-                path,
+                path: validatedPath,
                 reason: "NotFound",
                 description: "Client connection not found",
               }),
@@ -487,7 +606,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
         const active: ActiveSubscription = {
           id: subscriptionId,
           clientId,
-          path,
+          path: validatedPath,
           input,
           startedAt,
           fiber: Option.none(), // Will be set after fork
@@ -496,8 +615,10 @@ const makeSubscriptionManager = Effect.gen(function* () {
 
         yield* Ref.update(subscriptions, HashMap.set(subscriptionId, active))
 
-        // Fork the subscription runner
-        const fiber = yield* Effect.fork(
+        // Fork the subscription runner as a daemon so it survives the parent message handler
+        // (the parent Effect from handleMessage completes after sending Subscribed, but the
+        // subscription stream needs to keep running independently)
+        const fiber = yield* Effect.forkDaemon(
           runSubscription(
             connection,
             subscriptionId,

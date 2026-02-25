@@ -183,6 +183,14 @@ export interface SubscriptionRegistryShape {
   readonly remove: (id: SubscriptionId) => Effect.Effect<void>
 
   /**
+   * Update the input for a subscription.
+   * This ensures resubscription after reconnection uses the latest input.
+   *
+   * @since 0.1.0
+   */
+  readonly updateInput: (id: SubscriptionId, input: unknown) => Effect.Effect<void>
+
+  /**
    * Get all active subscriptions (for resubscription on reconnect).
    */
   readonly getAll: Effect.Effect<ReadonlyArray<ClientSubscription>>
@@ -449,6 +457,24 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
         }
       }).pipe(
         Effect.withSpan("SubscriptionRegistry.remove", { attributes: { subscriptionId: id } }),
+      ),
+
+    updateInput: (id, input) =>
+      Effect.gen(function* () {
+        const map = yield* Ref.get(subscriptions)
+        const sub = HashMap.get(map, id)
+
+        if (Option.isSome(sub)) {
+          yield* Ref.update(
+            subscriptions,
+            HashMap.set(id, {
+              ...sub.value,
+              input,
+            } as ClientSubscription),
+          )
+        }
+      }).pipe(
+        Effect.withSpan("SubscriptionRegistry.updateInput", { attributes: { subscriptionId: id } }),
       ),
 
     getAll: Effect.gen(function* () {

@@ -34,7 +34,14 @@ import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform"
 import * as NodeStream from "@effect/platform-node/NodeStream"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { Router } from "../core/router.js"
-import { type CorsOptions, buildCorsHeaders, createRpcWebHandler } from "../shared/index.js"
+import {
+  type CorsOptions,
+  type SecurityHeadersOptions,
+  buildCorsHeaders,
+  buildSecurityHeaders,
+  addSecurityHeaders,
+  createRpcWebHandler,
+} from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -119,10 +126,24 @@ export interface CreateHandlerOptions<TRouter extends Router, R> {
    * @default false
    */
   readonly cors?: boolean | CorsOptions
+
+  /**
+   * Enable security headers on responses.
+   * Pass `true` for defaults, `false` to disable, or an object to customize.
+   *
+   * Default headers:
+   * - X-Content-Type-Options: nosniff
+   * - X-Frame-Options: DENY
+   * - X-XSS-Protection: 1; mode=block
+   * - Referrer-Policy: strict-origin-when-cross-origin
+   *
+   * @default true
+   */
+  readonly securityHeaders?: boolean | SecurityHeadersOptions
 }
 
-// Re-export CorsOptions for convenience
-export type { CorsOptions }
+// Re-export CorsOptions and SecurityHeadersOptions for convenience
+export type { CorsOptions, SecurityHeadersOptions }
 
 export interface FetchHandler {
   /**
@@ -167,7 +188,15 @@ export interface FetchHandler {
 export function createHandler<TRouter extends Router, R>(
   options: CreateHandlerOptions<TRouter, R>,
 ): FetchHandler {
-  const { router, handlers, path = "/rpc", disableTracing, spanPrefix, cors } = options
+  const {
+    router,
+    handlers,
+    path = "/rpc",
+    disableTracing,
+    spanPrefix,
+    cors,
+    securityHeaders: securityHeadersOption = true,
+  } = options
 
   const handlersWithNodeRuntime = handlers.pipe(
     Layer.provide(NodeHttpPlatform.layer),
@@ -185,13 +214,20 @@ export function createHandler<TRouter extends Router, R>(
   // Build CORS headers if enabled
   const corsHeaders = cors ? buildCorsHeaders(cors === true ? {} : cors) : null
 
+  // Build security headers (enabled by default)
+  const securityHeaders = buildSecurityHeaders(securityHeadersOption)
+
   return {
     fetch: async (request: Request) => {
       const url = new URL(request.url)
 
       // Handle preflight for CORS
       if (corsHeaders && request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders })
+        const preflightHeaders = new Headers(corsHeaders)
+        if (securityHeaders) {
+          addSecurityHeaders(preflightHeaders, securityHeaders)
+        }
+        return new Response(null, { status: 204, headers: preflightHeaders })
       }
 
       // Check path - must be exact match or have path separator after
@@ -203,17 +239,26 @@ export function createHandler<TRouter extends Router, R>(
         pathname.startsWith(path + "?")
       
       if (!pathMatches) {
-        return new Response("Not Found", { status: 404 })
+        const notFoundHeaders = new Headers()
+        if (securityHeaders) {
+          addSecurityHeaders(notFoundHeaders, securityHeaders)
+        }
+        return new Response("Not Found", { status: 404, headers: notFoundHeaders })
       }
 
       // Handle RPC request
       const response = await webHandler.handler(request)
 
-      // Add CORS headers if enabled
-      if (corsHeaders) {
+      // Add headers if needed (CORS and/or security)
+      if (corsHeaders || securityHeaders) {
         const headers = new Headers(response.headers)
-        for (const [key, value] of Object.entries(corsHeaders)) {
-          headers.set(key, value)
+        if (corsHeaders) {
+          for (const [key, value] of Object.entries(corsHeaders)) {
+            headers.set(key, value)
+          }
+        }
+        if (securityHeaders) {
+          addSecurityHeaders(headers, securityHeaders)
         }
         return new Response(response.body, {
           status: response.status,

@@ -102,8 +102,11 @@ export interface BackpressureState {
   /** Last recorded queue fill percentage */
   readonly lastFillPercent: number
 
-  /** Connection for sending signals */
-  readonly connection: Connection
+  /**
+   * Ref to connection for sending signals.
+   * Using a Ref allows getting a fresh connection reference to avoid stale refs.
+   */
+  readonly connectionRef: Ref.Ref<Option.Option<Connection>>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,6 +179,15 @@ export interface BackpressureControllerService {
    * Force resume a subscription (e.g., on client reconnect).
    */
   readonly forceResume: (subscriptionId: SubscriptionId) => Effect.Effect<void>
+
+  /**
+   * Update the connection reference for a subscription (e.g., on client reconnect).
+   * This ensures signals are sent to the current connection, not a stale one.
+   */
+  readonly updateConnection: (
+    subscriptionId: SubscriptionId,
+    connection: Connection,
+  ) => Effect.Effect<void>
 
   /**
    * Clean up all backpressure state for a client.
@@ -252,13 +264,14 @@ const makeBackpressureController = (config: BackpressureConfig) =>
     const service: BackpressureControllerService = {
       register: (subscriptionId, clientId, connection) =>
         Effect.gen(function* () {
+          const connectionRef = yield* Ref.make(Option.some(connection))
           const state: BackpressureState = {
             subscriptionId,
             clientId,
             isPaused: false,
             isAcknowledged: true, // Not paused = acknowledged
             lastFillPercent: 0,
-            connection,
+            connectionRef,
           }
           yield* Ref.update(states, HashMap.set(subscriptionId, state))
         }),
@@ -273,69 +286,120 @@ const makeBackpressureController = (config: BackpressureConfig) =>
           }
 
           const fillPercent = maxSize > 0 ? (currentSize / maxSize) * 100 : 0
-          const stateMap = yield* Ref.get(states)
-          const maybeState = HashMap.get(stateMap, subscriptionId)
 
-          if (Option.isNone(maybeState)) {
-            return true // No state = accept
+          // Result type for the modify operation
+          interface ModifyResult {
+            readonly shouldSendSignal: boolean
+            readonly signalType: "pause" | "resume" | null
+            readonly connectionRef: Ref.Ref<Option.Option<Connection>> | null
+            readonly canAccept: boolean
           }
 
-          const state = maybeState.value
-          let newState = { ...state, lastFillPercent: fillPercent }
-          let shouldSendSignal = false
-          let signalType: "pause" | "resume" | null = null
-
-          // Check if we need to pause
-          if (!state.isPaused && fillPercent >= config.pauseThreshold) {
-            newState = { ...newState, isPaused: true, isAcknowledged: false }
-            shouldSendSignal = true
-            signalType = "pause"
-          }
-          // Check if we can resume
-          else if (state.isPaused && fillPercent <= config.resumeThreshold) {
-            newState = { ...newState, isPaused: false, isAcknowledged: true }
-            shouldSendSignal = true
-            signalType = "resume"
+          const noChangeResult: ModifyResult = {
+            shouldSendSignal: false,
+            signalType: null,
+            connectionRef: null,
+            canAccept: true,
           }
 
-          // Update state
-          yield* Ref.update(states, HashMap.set(subscriptionId, newState))
+          // Use Ref.modify for atomic read-modify-write without object spread
+          const result = yield* Ref.modify(states, (map): [ModifyResult, HashMap.HashMap<SubscriptionId, BackpressureState>] => {
+            const maybeState = HashMap.get(map, subscriptionId)
+            if (Option.isNone(maybeState)) {
+              return [noChangeResult, map]
+            }
 
-          // Send signal if needed
-          if (shouldSendSignal && signalType) {
-            if (signalType === "pause") {
-              yield* state.connection
-                .send(new PauseMessage({ id: subscriptionId, queueFillPercent: fillPercent }))
-                .pipe(Effect.ignore)
-            } else {
-              yield* state.connection
-                .send(new ResumeMessage({ id: subscriptionId }))
-                .pipe(Effect.ignore)
+            const state = maybeState.value
+
+            // Determine new state values without creating intermediate objects
+            let newIsPaused = state.isPaused
+            let newIsAcknowledged = state.isAcknowledged
+            let shouldSendSignal = false
+            let signalType: "pause" | "resume" | null = null
+
+            // Check if we need to pause
+            if (!state.isPaused && fillPercent >= config.pauseThreshold) {
+              newIsPaused = true
+              newIsAcknowledged = false
+              shouldSendSignal = true
+              signalType = "pause"
+            }
+            // Check if we can resume
+            else if (state.isPaused && fillPercent <= config.resumeThreshold) {
+              newIsPaused = false
+              newIsAcknowledged = true
+              shouldSendSignal = true
+              signalType = "resume"
+            }
+
+            const modifyResult: ModifyResult = {
+              shouldSendSignal,
+              signalType,
+              connectionRef: state.connectionRef,
+              canAccept: !newIsPaused || newIsAcknowledged,
+            }
+
+            // Only create new state object if something changed
+            if (
+              newIsPaused !== state.isPaused ||
+              newIsAcknowledged !== state.isAcknowledged ||
+              fillPercent !== state.lastFillPercent
+            ) {
+              const newState: BackpressureState = {
+                subscriptionId: state.subscriptionId,
+                clientId: state.clientId,
+                isPaused: newIsPaused,
+                isAcknowledged: newIsAcknowledged,
+                lastFillPercent: fillPercent,
+                connectionRef: state.connectionRef,
+              }
+              return [modifyResult, HashMap.set(map, subscriptionId, newState)]
+            }
+
+            return [modifyResult, map]
+          })
+
+          // Send signal if needed - get fresh connection ref to avoid stale references
+          if (result.shouldSendSignal && result.signalType && result.connectionRef) {
+            const maybeConnection = yield* Ref.get(result.connectionRef)
+            if (Option.isSome(maybeConnection)) {
+              const connection = maybeConnection.value
+              if (result.signalType === "pause") {
+                yield* connection
+                  .send(new PauseMessage({ id: subscriptionId, queueFillPercent: fillPercent }))
+                  .pipe(Effect.ignore)
+              } else {
+                yield* connection
+                  .send(new ResumeMessage({ id: subscriptionId }))
+                  .pipe(Effect.ignore)
+              }
             }
           }
 
-          // Return whether we can accept data
-          // Accept if not paused, or if paused but client acknowledged
-          return !newState.isPaused || newState.isAcknowledged
+          return result.canAccept
         }),
 
       handleAck: (subscriptionId, paused) =>
-        Effect.gen(function* () {
-          yield* Ref.update(states, (map) => {
-            const maybeState = HashMap.get(map, subscriptionId)
-            if (Option.isNone(maybeState)) {
-              return map
-            }
-            const state = maybeState.value
-            // Only acknowledge if the ack matches current pause state
-            if (state.isPaused === paused) {
-              return HashMap.set(map, subscriptionId, {
-                ...state,
-                isAcknowledged: true,
-              })
-            }
+        Ref.update(states, (map) => {
+          const maybeState = HashMap.get(map, subscriptionId)
+          if (Option.isNone(maybeState)) {
             return map
-          })
+          }
+          const state = maybeState.value
+          // Only acknowledge if the ack matches current pause state
+          if (state.isPaused === paused && !state.isAcknowledged) {
+            // Create new state object only when actually changing
+            const newState: BackpressureState = {
+              subscriptionId: state.subscriptionId,
+              clientId: state.clientId,
+              isPaused: state.isPaused,
+              isAcknowledged: true,
+              lastFillPercent: state.lastFillPercent,
+              connectionRef: state.connectionRef,
+            }
+            return HashMap.set(map, subscriptionId, newState)
+          }
+          return map
         }),
 
       canAcceptData: (subscriptionId) =>
@@ -369,21 +433,44 @@ const makeBackpressureController = (config: BackpressureConfig) =>
 
       forceResume: (subscriptionId) =>
         Effect.gen(function* () {
+          // Use Ref.modify to atomically check and update, returning connection ref if signal needed
+          const connectionRef = yield* Ref.modify(states, (map): [Ref.Ref<Option.Option<Connection>> | null, HashMap.HashMap<SubscriptionId, BackpressureState>] => {
+            const maybeState = HashMap.get(map, subscriptionId)
+            if (Option.isNone(maybeState) || !maybeState.value.isPaused) {
+              return [null, map]
+            }
+
+            const state = maybeState.value
+            const newState: BackpressureState = {
+              subscriptionId: state.subscriptionId,
+              clientId: state.clientId,
+              isPaused: false,
+              isAcknowledged: true,
+              lastFillPercent: state.lastFillPercent,
+              connectionRef: state.connectionRef,
+            }
+            return [state.connectionRef, HashMap.set(map, subscriptionId, newState)]
+          })
+
+          // Send resume signal if we transitioned from paused
+          if (connectionRef) {
+            const maybeConnection = yield* Ref.get(connectionRef)
+            if (Option.isSome(maybeConnection)) {
+              yield* maybeConnection.value
+                .send(new ResumeMessage({ id: subscriptionId }))
+                .pipe(Effect.ignore)
+            }
+          }
+        }),
+
+      updateConnection: (subscriptionId, connection) =>
+        Effect.gen(function* () {
           const stateMap = yield* Ref.get(states)
           const maybeState = HashMap.get(stateMap, subscriptionId)
 
-          if (Option.isSome(maybeState) && maybeState.value.isPaused) {
-            const state = maybeState.value
-            const newState: BackpressureState = {
-              ...state,
-              isPaused: false,
-              isAcknowledged: true,
-            }
-            yield* Ref.update(states, HashMap.set(subscriptionId, newState))
-            // Send resume signal
-            yield* state.connection
-              .send(new ResumeMessage({ id: subscriptionId }))
-              .pipe(Effect.ignore)
+          if (Option.isSome(maybeState)) {
+            // Update the connection ref with the new connection
+            yield* Ref.set(maybeState.value.connectionRef, Option.some(connection))
           }
         }),
 
@@ -409,6 +496,7 @@ const makeNoOpBackpressureController = Effect.succeed<BackpressureControllerServ
   getState: () => Effect.succeed(Option.none()),
   getPausedSubscriptions: Effect.succeed([]),
   forceResume: () => Effect.void,
+  updateConnection: () => Effect.void,
   cleanupClient: () => Effect.void,
 })
 

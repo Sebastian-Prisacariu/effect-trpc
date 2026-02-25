@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from "vitest"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import * as Option from "effect/Option"
@@ -33,11 +34,11 @@ import { convertHandlers } from "../core/rpc-bridge.js"
  * The convertHandlers returns MiddlewareResult<unknown, unknown, unknown> but
  * runPromise needs Effect<_, _, never>. In tests we know the handlers don't have
  * actual requirements, so this cast is safe.
- * 
+ *
  * Uses `any` because MiddlewareResult is a union of Effect | Stream and we
  * need to cast it for test purposes.
  */
- 
+
 const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
   effect as Effect.Effect<A, E, never>
 
@@ -52,7 +53,10 @@ const createBaseContext = (procedure = "test.procedure"): BaseContext => ({
   clientId: 1,
 })
 
-const _createAuthContext = (user: { id: string; name: string }): AuthenticatedContext<typeof user> => ({
+const _createAuthContext = (user: {
+  id: string
+  name: string
+}): AuthenticatedContext<typeof user> => ({
   ...createBaseContext(),
   user,
 })
@@ -63,7 +67,7 @@ const _createAuthContext = (user: { id: string; name: string }): AuthenticatedCo
 
 describe("middleware", () => {
   it("creates a middleware with name and function", () => {
-    const m = Middleware.make("test", (ctx, next) => next(ctx))
+    const m = Middleware.make("test", (ctx, _input, next) => next(ctx))
 
     expect(m._tag).toBe("Middleware")
     expect(m.name).toBe("test")
@@ -73,7 +77,8 @@ describe("middleware", () => {
   it("middleware can transform context", async () => {
     const m = Middleware.make<BaseContext, BaseContext & { extra: string }, never, never>(
       "addExtra",
-      (ctx, next) => next({ ...ctx, extra: "added" }) as Effect.Effect<unknown, never, never>,
+      (ctx, _input, next) =>
+        next({ ...ctx, extra: "added" }) as Effect.Effect<unknown, never, never>,
     )
 
     let receivedContext: any = null
@@ -82,21 +87,20 @@ describe("middleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(m.fn(createBaseContext(), handler))
+    await Effect.runPromise(m.fn(createBaseContext(), {}, handler))
 
     expect(receivedContext).toBeDefined()
     expect(receivedContext.extra).toBe("added")
   })
 
   it("middleware can short-circuit with error", async () => {
-    const m = Middleware.make<BaseContext, BaseContext, Error>(
-      "block",
-      () => Effect.fail(new Error("blocked")),
+    const m = Middleware.make<BaseContext, BaseContext, Error>("block", (_ctx, _input, _next) =>
+      Effect.fail(new Error("blocked")),
     )
 
     const handler = () => Effect.succeed("should not reach")
 
-    const result = await Effect.runPromiseExit(m.fn(createBaseContext(), handler))
+    const result = await Effect.runPromiseExit(m.fn(createBaseContext(), {}, handler))
 
     expect(result._tag).toBe("Failure")
   })
@@ -110,7 +114,7 @@ describe("composeMiddleware", () => {
   it("composes two middleware in order", async () => {
     const order: string[] = []
 
-    const m1 = Middleware.make("first", (ctx, next) => {
+    const m1 = Middleware.make("first", (ctx, _input, next) => {
       order.push("first-before")
       return Effect.map(next(ctx), (result) => {
         order.push("first-after")
@@ -118,7 +122,7 @@ describe("composeMiddleware", () => {
       })
     })
 
-    const m2 = Middleware.make("second", (ctx, next) => {
+    const m2 = Middleware.make("second", (ctx, _input, next) => {
       order.push("second-before")
       return Effect.map(next(ctx), (result) => {
         order.push("second-after")
@@ -133,7 +137,9 @@ describe("composeMiddleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(composed.fn(createBaseContext(), handler) as Effect.Effect<unknown, never, never>)
+    await Effect.runPromise(
+      composed.fn(createBaseContext(), {}, handler) as Effect.Effect<unknown, never, never>,
+    )
 
     expect(order).toEqual([
       "first-before",
@@ -145,8 +151,8 @@ describe("composeMiddleware", () => {
   })
 
   it("composed middleware has combined name", () => {
-    const m1 = Middleware.make("first", (ctx, next) => next(ctx))
-    const m2 = Middleware.make("second", (ctx, next) => next(ctx))
+    const m1 = Middleware.make("first", (ctx, _input, next) => next(ctx))
+    const m2 = Middleware.make("second", (ctx, _input, next) => next(ctx))
 
     const composed = composeMiddleware(m1, m2)
 
@@ -156,19 +162,19 @@ describe("composeMiddleware", () => {
   it("composes 4 middleware in order", async () => {
     const order: string[] = []
 
-    const m1 = Middleware.make("m1", (ctx, next) => {
+    const m1 = Middleware.make("m1", (ctx, _input, next) => {
       order.push("m1")
       return next(ctx)
     })
-    const m2 = Middleware.make("m2", (ctx, next) => {
+    const m2 = Middleware.make("m2", (ctx, _input, next) => {
       order.push("m2")
       return next(ctx)
     })
-    const m3 = Middleware.make("m3", (ctx, next) => {
+    const m3 = Middleware.make("m3", (ctx, _input, next) => {
       order.push("m3")
       return next(ctx)
     })
-    const m4 = Middleware.make("m4", (ctx, next) => {
+    const m4 = Middleware.make("m4", (ctx, _input, next) => {
       order.push("m4")
       return next(ctx)
     })
@@ -180,7 +186,9 @@ describe("composeMiddleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(composed.fn(createBaseContext(), handler) as Effect.Effect<unknown, never, never>)
+    await Effect.runPromise(
+      composed.fn(createBaseContext(), {}, handler) as Effect.Effect<unknown, never, never>,
+    )
 
     expect(order).toEqual(["m1", "m2", "m3", "m4", "handler"])
     expect(composed.name).toBe("m1 -> m2 -> m3 -> m4")
@@ -189,11 +197,26 @@ describe("composeMiddleware", () => {
   it("composes 5 middleware in order", async () => {
     const order: string[] = []
 
-    const m1 = Middleware.make("m1", (ctx, next) => { order.push("m1"); return next(ctx) })
-    const m2 = Middleware.make("m2", (ctx, next) => { order.push("m2"); return next(ctx) })
-    const m3 = Middleware.make("m3", (ctx, next) => { order.push("m3"); return next(ctx) })
-    const m4 = Middleware.make("m4", (ctx, next) => { order.push("m4"); return next(ctx) })
-    const m5 = Middleware.make("m5", (ctx, next) => { order.push("m5"); return next(ctx) })
+    const m1 = Middleware.make("m1", (ctx, _input, next) => {
+      order.push("m1")
+      return next(ctx)
+    })
+    const m2 = Middleware.make("m2", (ctx, _input, next) => {
+      order.push("m2")
+      return next(ctx)
+    })
+    const m3 = Middleware.make("m3", (ctx, _input, next) => {
+      order.push("m3")
+      return next(ctx)
+    })
+    const m4 = Middleware.make("m4", (ctx, _input, next) => {
+      order.push("m4")
+      return next(ctx)
+    })
+    const m5 = Middleware.make("m5", (ctx, _input, next) => {
+      order.push("m5")
+      return next(ctx)
+    })
 
     const composed = composeMiddleware(m1, m2, m3, m4, m5)
 
@@ -202,7 +225,9 @@ describe("composeMiddleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(composed.fn(createBaseContext(), handler) as Effect.Effect<unknown, never, never>)
+    await Effect.runPromise(
+      composed.fn(createBaseContext(), {}, handler) as Effect.Effect<unknown, never, never>,
+    )
 
     expect(order).toEqual(["m1", "m2", "m3", "m4", "m5", "handler"])
     expect(composed.name).toBe("m1 -> m2 -> m3 -> m4 -> m5")
@@ -211,12 +236,30 @@ describe("composeMiddleware", () => {
   it("composes 6 middleware in order", async () => {
     const order: string[] = []
 
-    const m1 = Middleware.make("m1", (ctx, next) => { order.push("m1"); return next(ctx) })
-    const m2 = Middleware.make("m2", (ctx, next) => { order.push("m2"); return next(ctx) })
-    const m3 = Middleware.make("m3", (ctx, next) => { order.push("m3"); return next(ctx) })
-    const m4 = Middleware.make("m4", (ctx, next) => { order.push("m4"); return next(ctx) })
-    const m5 = Middleware.make("m5", (ctx, next) => { order.push("m5"); return next(ctx) })
-    const m6 = Middleware.make("m6", (ctx, next) => { order.push("m6"); return next(ctx) })
+    const m1 = Middleware.make("m1", (ctx, _input, next) => {
+      order.push("m1")
+      return next(ctx)
+    })
+    const m2 = Middleware.make("m2", (ctx, _input, next) => {
+      order.push("m2")
+      return next(ctx)
+    })
+    const m3 = Middleware.make("m3", (ctx, _input, next) => {
+      order.push("m3")
+      return next(ctx)
+    })
+    const m4 = Middleware.make("m4", (ctx, _input, next) => {
+      order.push("m4")
+      return next(ctx)
+    })
+    const m5 = Middleware.make("m5", (ctx, _input, next) => {
+      order.push("m5")
+      return next(ctx)
+    })
+    const m6 = Middleware.make("m6", (ctx, _input, next) => {
+      order.push("m6")
+      return next(ctx)
+    })
 
     const composed = composeMiddleware(m1, m2, m3, m4, m5, m6)
 
@@ -225,7 +268,9 @@ describe("composeMiddleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(composed.fn(createBaseContext(), handler) as Effect.Effect<unknown, never, never>)
+    await Effect.runPromise(
+      composed.fn(createBaseContext(), {}, handler) as Effect.Effect<unknown, never, never>,
+    )
 
     expect(order).toEqual(["m1", "m2", "m3", "m4", "m5", "m6", "handler"])
     expect(composed.name).toBe("m1 -> m2 -> m3 -> m4 -> m5 -> m6")
@@ -251,7 +296,7 @@ describe("timingMiddleware", () => {
       return Effect.succeed("done")
     }
 
-    await Effect.runPromise(timingMiddleware.fn(createBaseContext(), handler))
+    await Effect.runPromise(timingMiddleware.fn(createBaseContext(), {}, handler))
 
     expect(receivedContext).toBeDefined()
     expect(typeof receivedContext.startTime).toBe("number")
@@ -263,16 +308,16 @@ describe("timeoutMiddleware", () => {
   it("allows fast requests to succeed", async () => {
     const tm = timeoutMiddleware(100)
     const handler = () => Effect.sleep("10 millis").pipe(Effect.map(() => "ok"))
-    
-    const result = await Effect.runPromise(tm.fn(createBaseContext(), handler))
+
+    const result = await Effect.runPromise(tm.fn(createBaseContext(), {}, handler))
     expect(result).toBe("ok")
   })
 
   it("fails slow requests with MiddlewareTimeoutError", async () => {
     const tm = timeoutMiddleware(10)
     const handler = () => Effect.sleep("50 millis").pipe(Effect.map(() => "ok"))
-    
-    const result = await Effect.runPromiseExit(tm.fn(createBaseContext(), handler))
+
+    const result = await Effect.runPromiseExit(tm.fn(createBaseContext(), {}, handler))
     expect(result._tag).toBe("Failure")
     if (result._tag === "Failure") {
       // Extract the error from the failure
@@ -299,10 +344,10 @@ describe("rateLimitMiddleware", () => {
 
         // Should allow 5 requests
         for (let i = 0; i < 5; i++) {
-          const result = yield* rateLimit.fn(createBaseContext(), handler)
+          const result = yield* rateLimit.fn(createBaseContext(), {}, handler)
           expect(result).toBe("ok")
         }
-      })
+      }),
     )
   })
 
@@ -318,13 +363,13 @@ describe("rateLimitMiddleware", () => {
         const ctx = createBaseContext()
 
         // First 2 should succeed
-        yield* rateLimit.fn(ctx, handler)
-        yield* rateLimit.fn(ctx, handler)
+        yield* rateLimit.fn(ctx, {}, handler)
+        yield* rateLimit.fn(ctx, {}, handler)
 
         // Third should fail
-        const exit = yield* Effect.exit(rateLimit.fn(ctx, handler))
+        const exit = yield* Effect.exit(rateLimit.fn(ctx, {}, handler))
         expect(exit._tag).toBe("Failure")
-      })
+      }),
     )
   })
 })
@@ -337,14 +382,16 @@ describe("authMiddleware", () => {
     const ctx = createBaseContext()
     const handler = () => Effect.succeed("ok")
 
-    const result = await Effect.runPromiseExit(auth.fn(ctx, handler))
+    const result = await Effect.runPromiseExit(auth.fn(ctx, {}, handler))
     expect(result._tag).toBe("Failure")
   })
 
   it("adds user to context when token is valid", async () => {
     const user = { id: "1", name: "Test User" }
     const verifyToken = (token: string) =>
-      token === "valid-token" ? Effect.succeed(user) : Effect.fail(new MiddlewareAuthError({ procedure: "test", reason: "Invalid" }))
+      token === "valid-token"
+        ? Effect.succeed(user)
+        : Effect.fail(new MiddlewareAuthError({ procedure: "test", reason: "Invalid" }))
 
     const auth = authMiddleware(verifyToken)
 
@@ -357,10 +404,112 @@ describe("authMiddleware", () => {
       return Effect.succeed("ok")
     }
 
-    await Effect.runPromise(auth.fn(ctx, handler))
+    await Effect.runPromise(auth.fn(ctx, {}, handler))
 
     expect(receivedContext).toBeDefined()
     expect(receivedContext.user).toEqual(user)
+  })
+
+  it("rejects tokens without Bearer scheme", async () => {
+    const verifyToken = (_token: string) => Effect.succeed({ id: "1", name: "Test" })
+    const auth = authMiddleware(verifyToken)
+
+    const ctx = createBaseContext()
+    ctx.headers.set("authorization", "Basic dXNlcjpwYXNz")
+
+    const handler = () => Effect.succeed("ok")
+    const result = await Effect.runPromiseExit(auth.fn(ctx, {}, handler))
+
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      const error = Cause.failureOption(result.cause)
+      expect(Option.isSome(error)).toBe(true)
+      if (Option.isSome(error)) {
+        const authError = error.value as MiddlewareAuthError
+        expect(authError.reason).toBe("Authorization header must use Bearer scheme")
+      }
+    }
+  })
+
+  it("rejects empty token after Bearer", async () => {
+    const verifyToken = (_token: string) => Effect.succeed({ id: "1", name: "Test" })
+    const auth = authMiddleware(verifyToken)
+
+    const ctx = createBaseContext()
+    ctx.headers.set("authorization", "Bearer ")
+
+    const handler = () => Effect.succeed("ok")
+    const result = await Effect.runPromiseExit(auth.fn(ctx, {}, handler))
+
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      const error = Cause.failureOption(result.cause)
+      expect(Option.isSome(error)).toBe(true)
+      if (Option.isSome(error)) {
+        const authError = error.value as MiddlewareAuthError
+        expect(authError.reason).toBe("No token provided after Bearer scheme")
+      }
+    }
+  })
+
+  it("rejects tokens containing spaces", async () => {
+    const verifyToken = (_token: string) => Effect.succeed({ id: "1", name: "Test" })
+    const auth = authMiddleware(verifyToken)
+
+    const ctx = createBaseContext()
+    ctx.headers.set("authorization", "Bearer invalid token with spaces")
+
+    const handler = () => Effect.succeed("ok")
+    const result = await Effect.runPromiseExit(auth.fn(ctx, {}, handler))
+
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      const error = Cause.failureOption(result.cause)
+      expect(Option.isSome(error)).toBe(true)
+      if (Option.isSome(error)) {
+        const authError = error.value as MiddlewareAuthError
+        expect(authError.reason).toBe("Token contains invalid characters")
+      }
+    }
+  })
+
+  it("accepts Bearer scheme case-insensitively", async () => {
+    const user = { id: "1", name: "Test User" }
+    const verifyToken = () => Effect.succeed(user)
+    const auth = authMiddleware(verifyToken)
+
+    // Test various case combinations
+    for (const scheme of ["bearer", "BEARER", "BeArEr"]) {
+      const ctx = createBaseContext()
+      ctx.headers.set("authorization", `${scheme} valid-token`)
+
+      let receivedContext: any = null
+      const handler = (c: any) => {
+        receivedContext = c
+        return Effect.succeed("ok")
+      }
+
+      await Effect.runPromise(auth.fn(ctx, {}, handler))
+      expect(receivedContext?.user).toEqual(user)
+    }
+  })
+
+  it("handles whitespace around header value", async () => {
+    const user = { id: "1", name: "Test User" }
+    const verifyToken = () => Effect.succeed(user)
+    const auth = authMiddleware(verifyToken)
+
+    const ctx = createBaseContext()
+    ctx.headers.set("authorization", "  Bearer valid-token  ")
+
+    let receivedContext: any = null
+    const handler = (c: any) => {
+      receivedContext = c
+      return Effect.succeed("ok")
+    }
+
+    await Effect.runPromise(auth.fn(ctx, {}, handler))
+    expect(receivedContext?.user).toEqual(user)
   })
 })
 
@@ -376,7 +525,7 @@ describe("requirePermission", () => {
     }
 
     const handler = () => Effect.succeed("ok")
-    const result = await Effect.runPromise(requireAdmin.fn(ctx, handler))
+    const result = await Effect.runPromise(requireAdmin.fn(ctx, {}, handler))
 
     expect(result).toBe("ok")
   })
@@ -392,7 +541,7 @@ describe("requirePermission", () => {
     }
 
     const handler = () => Effect.succeed("ok")
-    const result = await Effect.runPromiseExit(requireAdmin.fn(ctx, handler))
+    const result = await Effect.runPromiseExit(requireAdmin.fn(ctx, {}, handler))
 
     expect(result._tag).toBe("Failure")
   })
@@ -407,7 +556,7 @@ describe("middleware in RPC bridge", () => {
     const middlewareExecuted: string[] = []
 
     // Create a middleware that tracks execution
-    const trackingMiddleware = Middleware.make("tracking", (ctx, next) => {
+    const trackingMiddleware = Middleware.make("tracking", (ctx, _input, next) => {
       middlewareExecuted.push("before")
       return Effect.map(next(ctx), (result) => {
         middlewareExecuted.push("after")
@@ -435,7 +584,7 @@ describe("middleware in RPC bridge", () => {
     // Call the handler
     const handler = rpcHandlers["test.greet"]!
     const result = await Effect.runPromise(
-      asRunnable(handler({ name: "World" }, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler({ name: "World" }, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe("Hello, World!")
@@ -445,7 +594,7 @@ describe("middleware in RPC bridge", () => {
   it("applies multiple middleware in correct order", async () => {
     const order: string[] = []
 
-    const first = Middleware.make("first", (ctx, next) => {
+    const first = Middleware.make("first", (ctx, _input, next) => {
       order.push("first-before")
       return Effect.map(next(ctx), (result) => {
         order.push("first-after")
@@ -453,7 +602,7 @@ describe("middleware in RPC bridge", () => {
       })
     })
 
-    const second = Middleware.make("second", (ctx, next) => {
+    const second = Middleware.make("second", (ctx, _input, next) => {
       order.push("second-before")
       return Effect.map(next(ctx), (result) => {
         order.push("second-after")
@@ -462,11 +611,7 @@ describe("middleware in RPC bridge", () => {
     })
 
     const TestProcedures = procedures("test", {
-      action: procedure
-        .use(first)
-        .use(second)
-        .output(Schema.String)
-        .mutation(),
+      action: procedure.use(first).use(second).output(Schema.String).mutation(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -478,7 +623,7 @@ describe("middleware in RPC bridge", () => {
 
     const handler = rpcHandlers["test.action"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(order).toEqual([
@@ -497,15 +642,12 @@ describe("middleware in RPC bridge", () => {
       readonly _tag = "BlockError"
     }
 
-    const blockingMiddleware = Middleware.make("block", () => 
-      Effect.fail(new BlockError("Blocked!"))
+    const blockingMiddleware = Middleware.make("block", () =>
+      Effect.fail(new BlockError("Blocked!")),
     )
 
     const TestProcedures = procedures("test", {
-      blocked: procedure
-        .use(blockingMiddleware)
-        .output(Schema.String)
-        .query(),
+      blocked: procedure.use(blockingMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -517,7 +659,7 @@ describe("middleware in RPC bridge", () => {
 
     const handler = rpcHandlers["test.blocked"]!
     const result = await Effect.runPromiseExit(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result._tag).toBe("Failure")
@@ -526,10 +668,7 @@ describe("middleware in RPC bridge", () => {
 
   it("procedures without middleware work normally", async () => {
     const TestProcedures = procedures("test", {
-      simple: procedure
-        .input(Schema.Number)
-        .output(Schema.Number)
-        .query(),
+      simple: procedure.input(Schema.Number).output(Schema.Number).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -538,7 +677,7 @@ describe("middleware in RPC bridge", () => {
 
     const handler = rpcHandlers["test.simple"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(5, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(5, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe(10)
@@ -547,16 +686,13 @@ describe("middleware in RPC bridge", () => {
   it("passes clientId through to middleware context", async () => {
     let receivedClientId: number | undefined
 
-    const clientIdMiddleware = Middleware.make("clientId", (ctx: any, next) => {
+    const clientIdMiddleware = Middleware.make("clientId", (ctx: any, _input, next) => {
       receivedClientId = ctx.clientId
       return next(ctx)
     })
 
     const TestProcedures = procedures("test", {
-      action: procedure
-        .use(clientIdMiddleware)
-        .output(Schema.String)
-        .query(),
+      action: procedure.use(clientIdMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -565,7 +701,7 @@ describe("middleware in RPC bridge", () => {
 
     const handler = rpcHandlers["test.action"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 42, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 42, headers: new Headers() as any })),
     )
 
     expect(receivedClientId).toBe(42)
@@ -574,16 +710,13 @@ describe("middleware in RPC bridge", () => {
   it("converts headers to standard web Headers", async () => {
     let receivedHeaders: Headers | undefined
 
-    const headersMiddleware = Middleware.make("headers", (ctx: any, next) => {
+    const headersMiddleware = Middleware.make("headers", (ctx: any, _input, next) => {
       receivedHeaders = ctx.headers
       return next(ctx)
     })
 
     const TestProcedures = procedures("test", {
-      action: procedure
-        .use(headersMiddleware)
-        .output(Schema.String)
-        .query(),
+      action: procedure.use(headersMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -598,7 +731,7 @@ describe("middleware in RPC bridge", () => {
 
     const handler = rpcHandlers["test.action"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: platformHeaders as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: platformHeaders as any })),
     )
 
     expect(receivedHeaders).toBeInstanceOf(Headers)
@@ -609,7 +742,7 @@ describe("middleware in RPC bridge", () => {
   it("aborts signal when Effect fiber is interrupted", async () => {
     let signalAborted = false
 
-    const signalMiddleware = Middleware.make("signal", (ctx: any, next) => {
+    const signalMiddleware = Middleware.make("signal", (ctx: any, _input, next) => {
       ctx.signal.addEventListener("abort", () => {
         signalAborted = true
       })
@@ -617,10 +750,7 @@ describe("middleware in RPC bridge", () => {
     })
 
     const TestProcedures = procedures("test", {
-      slow: procedure
-        .use(signalMiddleware)
-        .output(Schema.String)
-        .query(),
+      slow: procedure.use(signalMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -631,7 +761,7 @@ describe("middleware in RPC bridge", () => {
 
     // Run with immediate interruption
     const fiber = Effect.runFork(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     // Interrupt after a small delay
@@ -652,25 +782,33 @@ describe("middleware in RPC bridge", () => {
 describe("handler context access via FiberRef", () => {
   it("handlers can access middleware context via getMiddlewareContext", async () => {
     // Create middleware that adds a user to context
-    const addUserMiddleware = Middleware.make<BaseContext, AuthenticatedContext<{ id: string; name: string }>, never, never>(
+    const addUserMiddleware = Middleware.make<
+      BaseContext,
+      AuthenticatedContext<{ id: string; name: string }>,
+      never,
+      never
+    >(
       "addUser",
-      (ctx, next) => next({ ...ctx, user: { id: "123", name: "Test User" } }) as Effect.Effect<unknown, never, never>,
+      (ctx, _input, next) =>
+        next({ ...ctx, user: { id: "123", name: "Test User" } }) as Effect.Effect<
+          unknown,
+          never,
+          never
+        >,
     )
 
     let receivedUser: { id: string; name: string } | undefined
 
     const TestProcedures = procedures("test", {
-      getUser: procedure
-        .use(addUserMiddleware)
-        .output(Schema.String)
-        .query(),
+      getUser: procedure.use(addUserMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
       getUser: () =>
         Effect.gen(function* () {
           // Handler accesses context via getMiddlewareContext
-          const ctxOpt = yield* getMiddlewareContext<AuthenticatedContext<{ id: string; name: string }>>()
+          const ctxOpt =
+            yield* getMiddlewareContext<AuthenticatedContext<{ id: string; name: string }>>()
           const ctx = Option.getOrUndefined(ctxOpt)
           receivedUser = ctx?.user
           return `Hello, ${ctx?.user?.name ?? "Unknown"}!`
@@ -679,7 +817,7 @@ describe("handler context access via FiberRef", () => {
 
     const handler = rpcHandlers["test.getUser"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe("Hello, Test User!")
@@ -691,9 +829,7 @@ describe("handler context access via FiberRef", () => {
     let receivedClientId: number | undefined
 
     const TestProcedures = procedures("test", {
-      noMiddleware: procedure
-        .output(Schema.String)
-        .query(),
+      noMiddleware: procedure.output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -709,7 +845,7 @@ describe("handler context access via FiberRef", () => {
 
     const handler = rpcHandlers["test.noMiddleware"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 42, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 42, headers: new Headers() as any })),
     )
 
     expect(result).toBe("ok")
@@ -725,8 +861,8 @@ describe("handler context access via FiberRef", () => {
     // Test requireMiddlewareContext outside of middleware chain
     const result = await Effect.runPromiseExit(
       requireMiddlewareContext<BaseContext, ContextMissingError>(
-        new ContextMissingError("No context")
-      )
+        new ContextMissingError("No context"),
+      ),
     )
 
     expect(result._tag).toBe("Failure")
@@ -748,7 +884,7 @@ describe("handler context access via FiberRef", () => {
       withContext: () =>
         Effect.gen(function* () {
           const ctx = yield* requireMiddlewareContext<BaseContext, ContextMissingError>(
-            new ContextMissingError("No context")
+            new ContextMissingError("No context"),
           )
           return `Procedure: ${ctx.procedure}`
         }),
@@ -756,7 +892,7 @@ describe("handler context access via FiberRef", () => {
 
     const handler = rpcHandlers["test.withContext"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe("Procedure: test.withContext")
@@ -765,7 +901,9 @@ describe("handler context access via FiberRef", () => {
   it("auth middleware context is accessible in handler via getMiddlewareContext", async () => {
     const user = { id: "user-1", email: "test@example.com" }
     const verifyToken = (token: string) =>
-      token === "valid-token" ? Effect.succeed(user) : Effect.fail(new MiddlewareAuthError({ procedure: "test", reason: "Invalid" }))
+      token === "valid-token"
+        ? Effect.succeed(user)
+        : Effect.fail(new MiddlewareAuthError({ procedure: "test", reason: "Invalid" }))
 
     const auth = authMiddleware(verifyToken)
 
@@ -782,7 +920,9 @@ describe("handler context access via FiberRef", () => {
           const ctxOpt = yield* getMiddlewareContext<AuthenticatedContext<typeof user>>()
           const ctx = Option.getOrUndefined(ctxOpt)
           if (!ctx?.user) {
-            return yield* Effect.die("No user in context")
+            // This is a test invariant: if auth middleware ran, user must exist.
+            // Effect.die is correct here - this indicates a bug in the middleware.
+            return yield* Effect.die(new Error("No user in context - middleware bug"))
           }
           return { userId: ctx.user.id, email: ctx.user.email }
         }),
@@ -794,7 +934,7 @@ describe("handler context access via FiberRef", () => {
 
     const handler = rpcHandlers["test.protectedAction"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: headers as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: headers as any })),
     )
 
     expect(result).toEqual({ userId: "user-1", email: "test@example.com" })
@@ -802,15 +942,27 @@ describe("handler context access via FiberRef", () => {
 
   it("composed middleware builds up context accessible in handler", async () => {
     // Middleware that adds timing info
-    const timingMw = Middleware.make<BaseContext, BaseContext & { startTime: number }, never, never>(
+    const timingMw = Middleware.make<
+      BaseContext,
+      BaseContext & { startTime: number },
+      never,
+      never
+    >(
       "timing",
-      (ctx, next) => next({ ...ctx, startTime: Date.now() }) as Effect.Effect<unknown, never, never>,
+      (ctx, _input, next) =>
+        next({ ...ctx, startTime: Date.now() }) as Effect.Effect<unknown, never, never>,
     )
 
     // Middleware that adds request ID
-    const requestIdMw = Middleware.make<BaseContext & { startTime: number }, BaseContext & { startTime: number; requestId: string }, never, never>(
+    const requestIdMw = Middleware.make<
+      BaseContext & { startTime: number },
+      BaseContext & { startTime: number; requestId: string },
+      never,
+      never
+    >(
       "requestId",
-      (ctx, next) => next({ ...ctx, requestId: "req-12345" }) as Effect.Effect<unknown, never, never>,
+      (ctx, _input, next) =>
+        next({ ...ctx, requestId: "req-12345" }) as Effect.Effect<unknown, never, never>,
     )
 
     const composed = composeMiddleware(timingMw, requestIdMw)
@@ -819,16 +971,15 @@ describe("handler context access via FiberRef", () => {
     let receivedRequestId: string | undefined
 
     const TestProcedures = procedures("test", {
-      composedContext: procedure
-        .use(composed)
-        .output(Schema.String)
-        .query(),
+      composedContext: procedure.use(composed).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
       composedContext: () =>
         Effect.gen(function* () {
-          const ctxOpt = yield* getMiddlewareContext<BaseContext & { startTime: number; requestId: string }>()
+          const ctxOpt = yield* getMiddlewareContext<
+            BaseContext & { startTime: number; requestId: string }
+          >()
           const ctx = Option.getOrUndefined(ctxOpt)
           receivedStartTime = ctx?.startTime
           receivedRequestId = ctx?.requestId
@@ -838,7 +989,7 @@ describe("handler context access via FiberRef", () => {
 
     const handler = rpcHandlers["test.composedContext"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(receivedStartTime).toBeDefined()
@@ -874,7 +1025,7 @@ describe("v2 typed context handlers", () => {
 
     const handler = rpcHandlers["test.greet"]!
     const result = await Effect.runPromise(
-      asRunnable(handler({ name: "World" }, { clientId: 42, headers: new Headers() as any }))
+      asRunnable(handler({ name: "World" }, { clientId: 42, headers: new Headers() as any })),
     )
 
     expect(result).toBe("Hello, World!")
@@ -893,17 +1044,19 @@ describe("v2 typed context handlers", () => {
     let receivedUser: User | undefined
 
     // Create a simple auth middleware that adds user to context
-    const testAuthMiddleware = Middleware.make<BaseContext, AuthenticatedContext<User>, never, never>(
+    const testAuthMiddleware = Middleware.make<
+      BaseContext,
+      AuthenticatedContext<User>,
+      never,
+      never
+    >(
       "testAuth",
-       
-      (ctx, next) => next({ ...ctx, user: { id: "user-1", name: "Alice" } }) as any,
+
+      (ctx, _input, next) => next({ ...ctx, user: { id: "user-1", name: "Alice" } }) as any,
     )
 
     const TestProcedures = procedures("test", {
-      getProfile: procedure
-        .use(testAuthMiddleware)
-        .output(Schema.String)
-        .query(),
+      getProfile: procedure.use(testAuthMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -917,7 +1070,7 @@ describe("v2 typed context handlers", () => {
 
     const handler = rpcHandlers["test.getProfile"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe("Profile: Alice")
@@ -939,23 +1092,24 @@ describe("v2 typed context handlers", () => {
     // First middleware adds user
     const userMiddleware = Middleware.make<BaseContext, BaseContext & { user: User }, never, never>(
       "user",
-       
-      (ctx, next) => next({ ...ctx, user: { id: "user-1" } }) as any,
+
+      (ctx, _input, next) => next({ ...ctx, user: { id: "user-1" } }) as any,
     )
 
     // Second middleware adds org (requires user context)
-    const orgMiddleware = Middleware.make<BaseContext & { user: User }, BaseContext & { user: User; org: Org }, never, never>(
+    const orgMiddleware = Middleware.make<
+      BaseContext & { user: User },
+      BaseContext & { user: User; org: Org },
+      never,
+      never
+    >(
       "org",
-       
-      (ctx, next) => next({ ...ctx, org: { id: "org-1", name: "Acme Corp" } }) as any,
+
+      (ctx, _input, next) => next({ ...ctx, org: { id: "org-1", name: "Acme Corp" } }) as any,
     )
 
     const TestProcedures = procedures("test", {
-      getData: procedure
-        .use(userMiddleware)
-        .use(orgMiddleware)
-        .output(Schema.String)
-        .query(),
+      getData: procedure.use(userMiddleware).use(orgMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
@@ -969,7 +1123,7 @@ describe("v2 typed context handlers", () => {
 
     const handler = rpcHandlers["test.getData"]!
     const result = await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     expect(result).toBe("user-1 @ Acme Corp")
@@ -982,39 +1136,175 @@ describe("v2 typed context handlers", () => {
       id: string
     }
 
-    let contextFromParam: BaseContext & { user: User } | undefined
-    let contextFromFiberRef: BaseContext & { user: User } | undefined
+    let contextFromParam: (BaseContext & { user: User }) | undefined
+    let contextFromFiberRef: (BaseContext & { user: User }) | undefined
 
     const userMiddleware = Middleware.make<BaseContext, BaseContext & { user: User }, never, never>(
       "user",
-       
-      (ctx, next) => next({ ...ctx, user: { id: "user-1" } }) as any,
+
+      (ctx, _input, next) => next({ ...ctx, user: { id: "user-1" } }) as any,
     )
 
     const TestProcedures = procedures("test", {
-      checkContext: procedure
-        .use(userMiddleware)
-        .output(Schema.String)
-        .query(),
+      checkContext: procedure.use(userMiddleware).output(Schema.String).query(),
     })
 
     const rpcHandlers = convertHandlers(TestProcedures, {
       checkContext: (ctx, _input) =>
         Effect.gen(function* () {
           contextFromParam = ctx
-          contextFromFiberRef = Option.getOrUndefined(yield* getMiddlewareContext<BaseContext & { user: User }>())
+          contextFromFiberRef = Option.getOrUndefined(
+            yield* getMiddlewareContext<BaseContext & { user: User }>(),
+          )
           return "ok"
         }),
     })
 
     const handler = rpcHandlers["test.checkContext"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any }))
+      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
     )
 
     // Both should have the same context
     expect(contextFromParam?.user.id).toBe("user-1")
     expect(contextFromFiberRef?.user.id).toBe("user-1")
     expect(contextFromParam).toEqual(contextFromFiberRef)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Middleware.withInput Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Middleware.withInput", () => {
+  it("middleware is pipeable", () => {
+    const m = Middleware.make("test", (ctx, _input, next) => next(ctx))
+
+    // Middleware should have a pipe method
+    expect(typeof m.pipe).toBe("function")
+  })
+
+  it("withInput adds inputSchema to middleware (data-last / pipeable)", () => {
+    const baseMiddleware = Middleware.make("org", (ctx, input, next) =>
+      Effect.gen(function* () {
+        // input is typed via withInput
+        const _slug = (input as { organizationSlug: string }).organizationSlug
+        return yield* next(ctx)
+      }),
+    )
+
+    const middlewareWithInput = baseMiddleware.pipe(
+      Middleware.withInput(Schema.Struct({ organizationSlug: Schema.String })),
+    )
+
+    expect(middlewareWithInput.name).toBe("org")
+    expect(middlewareWithInput.inputSchema).toBeDefined()
+  })
+
+  it("withInput adds inputSchema to middleware (data-first)", () => {
+    const baseMiddleware = Middleware.make("org", (ctx, _input, next) => next(ctx))
+
+    const middlewareWithInput = Middleware.withInput(
+      baseMiddleware,
+      Schema.Struct({ tenantId: Schema.String }),
+    )
+
+    expect(middlewareWithInput.name).toBe("org")
+    expect(middlewareWithInput.inputSchema).toBeDefined()
+  })
+
+  it("middleware receives typed input when used with procedure", async () => {
+    let receivedOrgSlug: string | undefined
+
+    // Create middleware that requires organizationSlug in input
+    const orgMiddleware = Middleware.make("org", (ctx, input, next) => {
+      receivedOrgSlug = (input as { organizationSlug: string }).organizationSlug
+      return next(ctx)
+    }).pipe(Middleware.withInput(Schema.Struct({ organizationSlug: Schema.String })))
+
+    const TestProcedures = procedures("test", {
+      getData: procedure
+        .use(orgMiddleware)
+        .input(Schema.Struct({ id: Schema.String }))
+        .output(Schema.String)
+        .query(),
+    })
+
+    const rpcHandlers = convertHandlers(TestProcedures, {
+      getData: (_ctx, input) => Effect.succeed(`id: ${input.id}`),
+    })
+
+    const handler = rpcHandlers["test.getData"]!
+    const result = await Effect.runPromise(
+      asRunnable(
+        handler(
+          { organizationSlug: "acme", id: "123" },
+          { clientId: 1, headers: new Headers() as any },
+        ),
+      ),
+    )
+
+    expect(receivedOrgSlug).toBe("acme")
+    expect(result).toBe("id: 123")
+  })
+
+  it("Middleware.withName renames middleware", () => {
+    const m = Middleware.make("original", (ctx, _input, next) => next(ctx))
+    const renamed = m.pipe(Middleware.withName("renamed"))
+
+    expect(renamed.name).toBe("renamed")
+  })
+
+  it("composed middleware merges inputSchemas", () => {
+    const m1 = Middleware.make("m1", (ctx, _input, next) => next(ctx)).pipe(
+      Middleware.withInput(Schema.Struct({ field1: Schema.String })),
+    )
+
+    const m2 = Middleware.make("m2", (ctx, _input, next) => next(ctx)).pipe(
+      Middleware.withInput(Schema.Struct({ field2: Schema.Number })),
+    )
+
+    const composed = composeMiddleware(m1, m2)
+
+    // Both input schemas should be merged
+    expect(composed.inputSchema).toBeDefined()
+    expect(composed.name).toBe("m1 -> m2")
+  })
+
+  it("input is passed through middleware chain", async () => {
+    const receivedInputs: unknown[] = []
+
+    const m1 = Middleware.make("m1", (ctx, input, next) => {
+      receivedInputs.push({ m1: input })
+      return next(ctx)
+    }).pipe(Middleware.withInput(Schema.Struct({ field1: Schema.String })))
+
+    const m2 = Middleware.make("m2", (ctx, input, next) => {
+      receivedInputs.push({ m2: input })
+      return next(ctx)
+    }).pipe(Middleware.withInput(Schema.Struct({ field2: Schema.String })))
+
+    const TestProcedures = procedures("test", {
+      action: procedure.use(m1).use(m2).output(Schema.String).query(),
+    })
+
+    const rpcHandlers = convertHandlers(TestProcedures, {
+      action: () => Effect.succeed("done"),
+    })
+
+    const handler = rpcHandlers["test.action"]!
+    await Effect.runPromise(
+      asRunnable(
+        handler(
+          { field1: "value1", field2: "value2" },
+          { clientId: 1, headers: new Headers() as any },
+        ),
+      ),
+    )
+
+    // Both middleware should receive the full input
+    expect(receivedInputs).toHaveLength(2)
+    expect(receivedInputs[0]).toEqual({ m1: { field1: "value1", field2: "value2" } })
+    expect(receivedInputs[1]).toEqual({ m2: { field1: "value1", field2: "value2" } })
   })
 })

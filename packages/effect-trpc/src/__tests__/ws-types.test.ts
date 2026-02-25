@@ -35,7 +35,7 @@ import {
   // Errors
   WebSocketConnectionError,
   WebSocketAuthError,
-  SubscriptionError,
+  WebSocketSubscriptionError,
   WebSocketProtocolError,
   ConnectionNotFoundError,
   SubscriptionNotFoundError,
@@ -279,14 +279,14 @@ describe("WebSocket errors", () => {
     expect(isWebSocketError(err)).toBe(true)
   })
 
-  it("SubscriptionError", () => {
-    const err = new SubscriptionError({
+  it("WebSocketSubscriptionError", () => {
+    const err = new WebSocketSubscriptionError({
       subscriptionId: "sub-1",
       path: "test.events",
       reason: "HandlerError",
       description: "Database unavailable",
     })
-    expect(err._tag).toBe("SubscriptionError")
+    expect(err._tag).toBe("WebSocketSubscriptionError")
     expect(err.message).toContain("test.events")
     expect(err.message).toContain("HandlerError")
     expect(err.message).toContain("Database unavailable")

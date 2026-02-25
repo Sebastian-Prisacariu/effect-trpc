@@ -104,6 +104,8 @@ export {
   WebSocketSendError,
   WebSocketCloseError,
   WebSocketAuthError,
+  WebSocketSubscriptionError,
+  /** @deprecated Use WebSocketSubscriptionError instead */
   SubscriptionError,
   WebSocketProtocolError,
   ConnectionNotFoundError,

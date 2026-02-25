@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream"
 import * as Context from "effect/Context"
 import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as HashMap from "effect/HashMap"
+import * as Ref from "effect/Ref"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
 
@@ -30,11 +31,16 @@ import {
   ConnectionRegistryLive,
   SubscriptionManager,
   SubscriptionManagerLive,
+  MessageRateLimiter,
+  MessageRateLimiterLive,
+  MessageRateLimiterDisabled,
   type WebSocketAuthHandler,
   type AuthResult,
   type Connection,
   type RegisteredHandler,
+  type RateLimitConfig,
   makeWebSocketAuth,
+  makeMessageRateLimiterLayer,
 } from "../server/index.js"
 import {
   AuthResultMessage,
@@ -68,20 +74,62 @@ export const initialConnectionState: ConnectionStateData = {
   clientId: undefined,
 }
 
+/**
+ * Cleanup guard state to prevent race conditions during connection cleanup.
+ * Uses atomic state to ensure message handlers don't access resources after cleanup starts.
+ */
+export interface CleanupGuard {
+  /** Ref tracking whether cleanup has started */
+  readonly isCleaningUp: Ref.Ref<boolean>
+}
+
+/**
+ * Create a cleanup guard for a connection.
+ */
+export const makeCleanupGuard: Effect.Effect<CleanupGuard> = Effect.gen(function* () {
+  const isCleaningUp = yield* Ref.make(false)
+  return { isCleaningUp }
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Layer Creation
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Create the full WebSocket service layer.
+ * Options for creating the WebSocket layer.
  */
-export const createWebSocketLayer = (auth?: WebSocketAuthHandler) => {
-  const authLayer = auth ? makeWebSocketAuth(auth) : WebSocketAuthTest
+export interface WebSocketLayerOptions {
+  /** Authentication handler */
+  readonly auth?: WebSocketAuthHandler | undefined
+  /** Rate limit configuration. Set to false to disable rate limiting. */
+  readonly rateLimit?: RateLimitConfig | false | undefined
+}
+
+/**
+ * Create the full WebSocket service layer.
+ * 
+ * @param options - Configuration options or just an auth handler for backward compatibility
+ */
+export const createWebSocketLayer = (options?: WebSocketAuthHandler | WebSocketLayerOptions) => {
+  // Handle backward compatibility: if options is a function, treat it as auth handler
+  const opts: WebSocketLayerOptions = typeof options === "function"
+    ? { auth: options as WebSocketAuthHandler }
+    : (options as WebSocketLayerOptions | undefined) ?? {}
+
+  const authLayer = opts.auth !== undefined ? makeWebSocketAuth(opts.auth) : WebSocketAuthTest
+  
+  // Rate limiter layer: use custom config, default, or disabled
+  const rateLimiterLayer = opts.rateLimit === false
+    ? MessageRateLimiterDisabled
+    : opts.rateLimit !== undefined
+      ? makeMessageRateLimiterLayer(opts.rateLimit)
+      : MessageRateLimiterLive
 
   const baseLayer = Layer.mergeAll(
     WebSocketCodecLive,
     authLayer,
     ConnectionRegistryLive,
+    rateLimiterLayer,
   )
 
   return Layer.mergeAll(
@@ -100,8 +148,9 @@ export const createWebSocketLayer = (auth?: WebSocketAuthHandler) => {
 export const createWebSocketLayerWithHandlers = (
   auth: WebSocketAuthHandler | undefined,
   handlers: Layer.Layer<any, never, never> | undefined,
+  rateLimit?: RateLimitConfig | false,
 ): Layer.Layer<any, never, never> => {
-  const wsLayer = createWebSocketLayer(auth)
+  const wsLayer = createWebSocketLayer({ auth, rateLimit })
 
   if (handlers) {
     // Merge the handlers layer so ProceduresService tags are available
@@ -114,8 +163,8 @@ export const createWebSocketLayerWithHandlers = (
 /**
  * Create a ManagedRuntime with the WebSocket layer.
  */
-export const createWebSocketRuntime = (auth?: WebSocketAuthHandler) =>
-  ManagedRuntime.make(createWebSocketLayer(auth))
+export const createWebSocketRuntime = (options?: WebSocketAuthHandler | WebSocketLayerOptions) =>
+  ManagedRuntime.make(createWebSocketLayer(options))
 
 /**
  * Create a ManagedRuntime with the WebSocket layer and handlers.
@@ -127,7 +176,8 @@ export const createWebSocketRuntime = (auth?: WebSocketAuthHandler) =>
 export const createWebSocketRuntimeWithHandlers = (
   auth: WebSocketAuthHandler | undefined,
   handlers: Layer.Layer<any, never, never> | undefined,
-) => ManagedRuntime.make(createWebSocketLayerWithHandlers(auth, handlers))
+  rateLimit?: RateLimitConfig | false,
+) => ManagedRuntime.make(createWebSocketLayerWithHandlers(auth, handlers, rateLimit))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Handler Extraction
@@ -227,15 +277,30 @@ export interface HandleMessageOptions {
   readonly send: (message: FromServerMessage) => Effect.Effect<void>
   /** Function to create a Connection object for registry */
   readonly createConnection: (auth: AuthResult, connectedAt: DateTimeType.Utc) => Connection
+  /** Optional cleanup guard to prevent processing during cleanup */
+  readonly cleanupGuard?: CleanupGuard
 }
 
 /**
  * Handle an incoming WebSocket message.
  * Returns the updated connection state if auth succeeded.
+ * 
+ * If a cleanup guard is provided, this will skip processing if cleanup
+ * has already started, preventing race conditions where messages are
+ * processed after connection resources have been cleaned up.
  */
 export const handleMessage = (options: HandleMessageOptions) =>
   Effect.gen(function* () {
-    const { data, state, updateState, send, createConnection } = options
+    const { data, state, updateState, send, createConnection, cleanupGuard } = options
+
+    // Check cleanup guard before processing - skip if cleanup has started
+    if (cleanupGuard) {
+      const isCleaningUp = yield* Ref.get(cleanupGuard.isCleaningUp)
+      if (isCleaningUp) {
+        yield* Effect.logDebug("Skipping message processing: connection cleanup in progress")
+        return
+      }
+    }
 
     const codec = yield* WebSocketCodec
     const authService = yield* WebSocketAuth
@@ -319,6 +384,36 @@ export const handleMessage = (options: HandleMessageOptions) =>
           error: "Not authenticated",
         }),
       )
+      return
+    }
+
+    // Check rate limit for authenticated messages
+    const rateLimiter = yield* MessageRateLimiter
+    const rateLimitResult = yield* rateLimiter.checkLimit(state.clientId).pipe(
+      Effect.catchTag("MessageRateLimitExceededError", (error) =>
+        Effect.gen(function* () {
+          yield* Effect.logWarning("Rate limit exceeded", {
+            clientId: state.clientId,
+            count: error.currentCount,
+            max: error.maxMessages,
+            retryAfterMs: error.retryAfterMs,
+          })
+          yield* send(
+            new ErrorMessage({
+              id: "rate-limit",
+              error: {
+                _tag: "RateLimitExceeded",
+                message: error.message,
+                cause: undefined,
+              },
+            }),
+          )
+          return "rate_limited" as const
+        }),
+      ),
+    )
+
+    if (rateLimitResult === "rate_limited") {
       return
     }
 
@@ -414,13 +509,44 @@ export const handleMessage = (options: HandleMessageOptions) =>
   })
 
 /**
- * Clean up a client connection.
+ * Options for cleaning up a connection.
  */
-export const cleanupConnection = (clientId: ClientId, reason: string) =>
+export interface CleanupConnectionOptions {
+  /** The client ID to clean up */
+  readonly clientId: ClientId
+  /** Reason for the cleanup */
+  readonly reason: string
+  /** Optional cleanup guard - if provided, will be set atomically to prevent race conditions */
+  readonly cleanupGuard?: CleanupGuard
+}
+
+/**
+ * Clean up a client connection.
+ * 
+ * If a cleanup guard is provided, this will atomically mark cleanup as started
+ * before proceeding. If cleanup was already started, this is a no-op to prevent
+ * double cleanup.
+ */
+export const cleanupConnection = (options: CleanupConnectionOptions) =>
   Effect.gen(function* () {
+    const { clientId, reason, cleanupGuard } = options
+
+    // Atomically check and set cleanup state if guard is provided
+    if (cleanupGuard) {
+      const wasCleaningUp = yield* Ref.getAndSet(cleanupGuard.isCleaningUp, true)
+      if (wasCleaningUp) {
+        // Already cleaning up - skip to prevent double cleanup
+        yield* Effect.logDebug("Skipping cleanup: already in progress", { clientId })
+        return
+      }
+    }
+
     const registry = yield* ConnectionRegistry
     const subscriptions = yield* SubscriptionManager
+    const rateLimiter = yield* MessageRateLimiter
+    
     yield* subscriptions.cleanupClient(clientId)
+    yield* rateLimiter.clearClient(clientId)
     yield* registry.unregister(clientId, reason)
   })
 
@@ -433,9 +559,14 @@ export {
   WebSocketAuth,
   ConnectionRegistry,
   SubscriptionManager,
+  MessageRateLimiter,
+  MessageRateLimiterLive,
+  MessageRateLimiterDisabled,
   makeWebSocketAuth,
+  makeMessageRateLimiterLayer,
   type AuthResult,
   type Connection,
   type RegisteredHandler,
   type WebSocketAuthHandler,
+  type RateLimitConfig,
 }

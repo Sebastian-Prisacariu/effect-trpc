@@ -5,7 +5,7 @@
  * Uses actual WebSocket connections to test end-to-end flow.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest"
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { WebSocketServer, WebSocket } from "ws"
@@ -82,15 +82,14 @@ beforeAll(async () => {
     // Use test auth - accepts any token as userId
   })
 
-  // Create WebSocket server
-  wss = new WebSocketServer({ port })
+  // Create WebSocket server and wait for it to be listening
+  await new Promise<void>((resolve) => {
+    wss = new WebSocketServer({ port }, () => resolve())
+  })
 
   wss.on("connection", (ws) => {
     Effect.runFork(wsHandler.handleConnection(ws))
   })
-
-  // Wait for server to start
-  await new Promise((resolve) => setTimeout(resolve, 100))
 })
 
 afterAll(async () => {
@@ -123,6 +122,35 @@ function waitForMessage(ws: WebSocket, timeout = 5000): Promise<any> {
       resolve(JSON.parse(data.toString()))
     })
   })
+}
+
+/**
+ * Wait for a condition to become true, polling at intervals.
+ * Much more reliable than fixed delays.
+ */
+async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  { timeout = 5000, interval = 10 } = {},
+): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (await condition()) return
+    await new Promise((r) => setTimeout(r, interval))
+  }
+  throw new Error(`Condition not met within ${timeout}ms`)
+}
+
+/**
+ * Wait for connection count to reach expected value.
+ */
+async function waitForConnectionCount(expected: number, timeout = 5000): Promise<void> {
+  await waitForCondition(
+    async () => {
+      const count = await Effect.runPromise(wsHandler.connectionCount)
+      return count === expected
+    },
+    { timeout },
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,10 +263,7 @@ describe("WebSocket Integration", () => {
         id: "sub-to-unsub",
       })
 
-      // Give time for cleanup
-      await new Promise((resolve) => setTimeout(resolve, 50))
-
-      // Connection should still work
+      // Connection should still work - ping/pong verifies server is responsive
       sendMessage(ws, { _tag: "Ping" })
       const pong = await waitForMessage(ws)
       expect(pong._tag).toBe("Pong")
@@ -269,8 +294,8 @@ describe("WebSocket Integration", () => {
         expect(result.success).toBe(true)
       }
 
-      // Wait a bit for connections to be registered
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // Wait for connection count to reach 3
+      await waitForConnectionCount(3)
 
       // Connection count should be 3
       const count = await Effect.runPromise(wsHandler.connectionCount)
@@ -281,8 +306,8 @@ describe("WebSocket Integration", () => {
         ws.close()
       }
 
-      // Wait for cleanup
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      // Wait for connection count to reach 0
+      await waitForConnectionCount(0)
 
       // Connection count should be 0
       const countAfter = await Effect.runPromise(wsHandler.connectionCount)
@@ -311,8 +336,6 @@ describe("WebSocket Integration", () => {
       expect(result.success).toBe(true)
 
       ws.close()
-      // Wait for server to clean up connection
-      await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
     it("handles unknown message types gracefully", async () => {
@@ -338,14 +361,12 @@ describe("WebSocket Integration", () => {
       expect(pong._tag).toBe("Pong")
 
       ws.close()
-      // Wait for server to clean up connection
-      await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
     it("handles connection close during subscription", async () => {
       // Wait for any previous test connections to clean up
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      
+      await waitForConnectionCount(0)
+
       const ws = await createClient()
 
       // Authenticate
@@ -365,8 +386,8 @@ describe("WebSocket Integration", () => {
       // Close abruptly
       ws.terminate()
 
-      // Give time for cleanup - increased to ensure proper cleanup
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      // Wait for server to clean up the connection
+      await waitForConnectionCount(0)
 
       // Should not throw - server should handle cleanup
       const count = await Effect.runPromise(wsHandler.connectionCount)

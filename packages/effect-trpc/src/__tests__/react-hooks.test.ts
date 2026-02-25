@@ -9,8 +9,58 @@
 
 import { describe, it, expect } from "vitest"
 
-import { generateQueryKey } from "../react/atoms.js"
+import { generateQueryKey, stableStringify } from "../react/atoms.js"
 import { Result, toQueryResult, toMutationResult } from "../react/result.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stable Stringify Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("stableStringify", () => {
+  it("handles primitives", () => {
+    expect(stableStringify(null)).toBe("null")
+    expect(stableStringify(undefined)).toBe("undefined")
+    expect(stableStringify(42)).toBe("42")
+    expect(stableStringify("hello")).toBe('"hello"')
+    expect(stableStringify(true)).toBe("true")
+  })
+
+  it("handles BigInt", () => {
+    expect(stableStringify(BigInt(12345))).toBe('"BigInt(12345)"')
+  })
+
+  it("handles arrays", () => {
+    expect(stableStringify([1, 2, 3])).toBe("[1,2,3]")
+    expect(stableStringify([])).toBe("[]")
+    expect(stableStringify([{ b: 2, a: 1 }])).toBe('[{"a":1,"b":2}]')
+  })
+
+  it("sorts object keys deterministically", () => {
+    const obj1 = { a: 1, b: 2, c: 3 }
+    const obj2 = { c: 3, a: 1, b: 2 }
+    const obj3 = { b: 2, c: 3, a: 1 }
+
+    expect(stableStringify(obj1)).toBe('{"a":1,"b":2,"c":3}')
+    expect(stableStringify(obj2)).toBe('{"a":1,"b":2,"c":3}')
+    expect(stableStringify(obj3)).toBe('{"a":1,"b":2,"c":3}')
+  })
+
+  it("handles nested objects with sorted keys", () => {
+    const obj = {
+      z: { b: 2, a: 1 },
+      a: { d: 4, c: 3 },
+    }
+    expect(stableStringify(obj)).toBe('{"a":{"c":3,"d":4},"z":{"a":1,"b":2}}')
+  })
+
+  it("handles mixed nested structures", () => {
+    const obj = {
+      arr: [{ z: 1, a: 2 }],
+      nested: { inner: { b: 1, a: 2 } },
+    }
+    expect(stableStringify(obj)).toBe('{"arr":[{"a":2,"z":1}],"nested":{"inner":{"a":2,"b":1}}}')
+  })
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query Key Generation Tests
@@ -19,32 +69,32 @@ import { Result, toQueryResult, toMutationResult } from "../react/result.js"
 describe("generateQueryKey", () => {
   it("generates key with undefined input", () => {
     const key = generateQueryKey("user.get", undefined)
-    expect(key).toBe("user.get:")
+    expect(key).toBe("user.get||")
   })
 
   it("generates key with string input", () => {
     const key = generateQueryKey("user.get", "123")
-    expect(key).toBe('user.get:"123"')
+    expect(key).toBe('user.get||"123"')
   })
 
   it("generates key with number input", () => {
     const key = generateQueryKey("user.get", 42)
-    expect(key).toBe("user.get:42")
+    expect(key).toBe("user.get||42")
   })
 
   it("generates key with object input", () => {
     const key = generateQueryKey("user.get", { id: "123", name: "Alice" })
-    expect(key).toBe('user.get:{"id":"123","name":"Alice"}')
+    expect(key).toBe('user.get||{"id":"123","name":"Alice"}')
   })
 
   it("generates key with array input", () => {
     const key = generateQueryKey("user.list", [1, 2, 3])
-    expect(key).toBe("user.list:[1,2,3]")
+    expect(key).toBe("user.list||[1,2,3]")
   })
 
   it("generates key with BigInt input", () => {
     const key = generateQueryKey("user.get", BigInt(12345))
-    expect(key).toBe('user.get:"BigInt(12345)"')
+    expect(key).toBe('user.get||"BigInt(12345)"')
   })
 
   it("handles nested objects", () => {
@@ -53,8 +103,16 @@ describe("generateQueryKey", () => {
       pagination: { page: 1, limit: 10 },
     })
     expect(key).toBe(
-      'user.search:{"filters":{"status":"active"},"pagination":{"page":1,"limit":10}}',
+      'user.search||{"filters":{"status":"active"},"pagination":{"limit":10,"page":1}}',
     )
+  })
+
+  it("produces deterministic keys regardless of property order", () => {
+    // This is the key test for the deterministic stringify fix
+    const key1 = generateQueryKey("user.get", { a: 1, b: 2 })
+    const key2 = generateQueryKey("user.get", { b: 2, a: 1 })
+    expect(key1).toBe(key2)
+    expect(key1).toBe('user.get||{"a":1,"b":2}')
   })
 
   it("produces same key for same input", () => {

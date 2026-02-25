@@ -13,7 +13,7 @@ import type * as Schema from "effect/Schema"
 import * as Data from "effect/Data"
 import * as Array from "effect/Array"
 import type * as Brand from "effect/Brand"
-import type { RpcSchema } from "@effect/rpc";
+import type { RpcSchema } from "@effect/rpc"
 import { Rpc, RpcGroup } from "@effect/rpc"
 import type { Headers } from "@effect/platform/Headers"
 import type { ProcedureDefinition } from "./procedure.js"
@@ -77,7 +77,7 @@ export type AnyRpc = Rpc.Any
  * This uses `any` consistently to avoid variance issues with `never` types
  * when using `exactOptionalPropertyTypes`.
  */
- 
+
 type AnyProcedure = ProcedureDefinition<any, any, any, any, any, any, any>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,11 +86,11 @@ type AnyProcedure = ProcedureDefinition<any, any, any, any, any, any, any>
 
 /**
  * A verified Rpc that carries proof of its origin ProcedureDefinition.
- * 
+ *
  * Uses Effect's Brand pattern to ensure type safety when building RpcGroups.
  * The brand carries the procedure type information, enabling TypeScript to
  * verify that each Rpc correctly corresponds to its source procedure.
- * 
+ *
  * @example
  * ```ts
  * const rpc = VerifiedRpc.make("user.get", myProcedure)
@@ -98,37 +98,32 @@ type AnyProcedure = ProcedureDefinition<any, any, any, any, any, any, any>
  * // The brand carries proof that this Rpc was created from myProcedure
  * ```
  */
-export type VerifiedRpc<
-  Name extends string,
-  P extends AnyProcedure
-> = ProcedureToRpc<Name, P> & Brand.Brand<"VerifiedRpc"> & {
-  /** Phantom type carrying the procedure name */
-  readonly _name: Name
-  /** Phantom type carrying the source procedure */
-  readonly _procedure: P
-}
+export type VerifiedRpc<Name extends string, P extends AnyProcedure> = ProcedureToRpc<Name, P> &
+  Brand.Brand<"VerifiedRpc"> & {
+    /** Phantom type carrying the procedure name */
+    readonly _name: Name
+    /** Phantom type carrying the source procedure */
+    readonly _procedure: P
+  }
 
 /**
  * Namespace for VerifiedRpc operations.
- * 
+ *
  * Provides a clean factory pattern for creating verified Rpcs from procedures,
  * avoiding explicit type assertions in user code.
  */
 export const VerifiedRpc = {
   /**
    * Create a VerifiedRpc from a procedure definition.
-   * 
+   *
    * This wraps `Rpc.make` and adds the verification brand, providing
    * type-safe proof that the Rpc was created from the given procedure.
-   * 
+   *
    * @param name - The full procedure name (e.g., "user.create")
    * @param def - The procedure definition with schemas
    * @returns A VerifiedRpc with precise type information and origin proof
    */
-  make: <Name extends string, P extends AnyProcedure>(
-    name: Name,
-    def: P,
-  ): VerifiedRpc<Name, P> => {
+  make: <Name extends string, P extends AnyProcedure>(name: Name, def: P): VerifiedRpc<Name, P> => {
     const isStream = def.type === "stream" || def.type === "chat" || def.type === "subscription"
 
     // Build the Rpc with the correct options
@@ -284,7 +279,7 @@ export type InferRpcHandler<R extends Rpc.Any> = Rpc.ToHandlerFn<R, any>
  * @param name - The full procedure name (e.g., "user.create")
  * @param def - The procedure definition with schemas
  * @returns A VerifiedRpc with precise type information and origin proof
- * 
+ *
  * @see {@link VerifiedRpc.make} for the underlying implementation
  */
 export const procedureToRpc = <Name extends string, P extends AnyProcedure>(
@@ -351,9 +346,7 @@ export const proceduresGroupToRpcGroup = <
   // but the runtime builds the array dynamically from Object.entries().
   // The assertion is sound because our type-level computation matches
   // exactly what RpcGroup.make produces from the procedure definitions.
-  return RpcGroup.make(
-    ...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<Name, Procs, Prefix>>),
-  )
+  return RpcGroup.make(...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<Name, Procs, Prefix>>))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,35 +431,29 @@ const toWebHeaders = (platformHeaders: Headers): globalThis.Headers => {
  */
 /**
  * Generic handler function type for context-aware handlers.
- * 
+ *
  * @template Ctx - The context type after middleware transformation
  * @template I - The input/payload type
  * @template A - The output type (value for effects, item for streams)
  * @template E - The error type
  * @template R - The requirements (dependencies)
  */
-type GenericHandler<
-  Ctx extends BaseContext,
-  I,
-  A,
-  E,
-  R
-> = (ctx: Ctx, input: I) => Effect.Effect<A, E, R>
+type GenericHandler<Ctx extends BaseContext, I, A, E, R> = (
+  ctx: Ctx,
+  input: I,
+) => Effect.Effect<A, E, R>
 
 /**
  * Generic stream handler function type.
  */
-type GenericStreamHandler<
-  Ctx extends BaseContext,
-  I,
-  A,
-  E,
-  R
-> = (ctx: Ctx, input: I) => Stream.Stream<A, E, R>
+type GenericStreamHandler<Ctx extends BaseContext, I, A, E, R> = (
+  ctx: Ctx,
+  input: I,
+) => Stream.Stream<A, E, R>
 
 /**
  * Result type from applyMiddleware - either an Effect or a Stream depending on procedure type.
- * 
+ *
  * @template A - The output type
  * @template E - The error type
  * @template R - The requirements
@@ -479,40 +466,36 @@ type MiddlewareResult<A = unknown, E = unknown, R = unknown> =
  * Simple handler type for internal use in convertHandlers.
  * Uses `any` because we iterate over procedures dynamically.
  */
- 
+
 type Handler = (ctx: any, input: any) => Effect.Effect<any, any, any>
 
 /**
  * Apply middleware chain to a handler with full type tracking.
- * 
+ *
  * **Type Safety:**
- * 
+ *
  * This function is generic over all Effect channels:
  * - `I`: The payload type from the procedure's input schema
  * - `A`: The output type from the procedure's output schema
  * - `E`: Combined error types from middleware chain + handler
  * - `Ctx`: The context type after middleware transformation
  * - `R`: Combined requirements from middleware + handler
- * 
+ *
  * The middleware array uses `any` because the chain is dynamically composed,
  * but type safety is ensured at the procedure definition level where
  * middleware is attached via `.use()`.
- * 
+ *
  * @overload Stream procedures return Stream.Stream
  * @overload Effect procedures return Effect.Effect
  */
 /**
  * Type alias for any middleware (regular or service-providing).
  */
-type AnyMiddleware = Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+type AnyMiddleware =
+  | Middleware<any, any, any, any, any>
+  | ServiceMiddleware<any, any, any, any, any>
 
-function applyMiddleware<
-  I,
-  A,
-  E,
-  Ctx extends BaseContext,
-  R
->(
+function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericStreamHandler<Ctx, I, A, E, R>,
@@ -521,13 +504,7 @@ function applyMiddleware<
   isStream: true,
 ): Stream.Stream<A, E, R>
 
-function applyMiddleware<
-  I,
-  A,
-  E,
-  Ctx extends BaseContext,
-  R
->(
+function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R>,
@@ -536,13 +513,7 @@ function applyMiddleware<
   isStream: false,
 ): Effect.Effect<A, E, R>
 
-function applyMiddleware<
-  I,
-  A,
-  E,
-  Ctx extends BaseContext,
-  R
->(
+function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
@@ -551,14 +522,10 @@ function applyMiddleware<
   isStream: boolean,
 ): MiddlewareResult<A, E, R>
 
-function applyMiddleware<
-  I,
-  A,
-  E,
-  Ctx extends BaseContext,
-  R
->(
-  middlewares: ReadonlyArray<Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>>,
+function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
+  middlewares: ReadonlyArray<
+    Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+  >,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
   options: RpcHandlerOptions,
@@ -571,23 +538,23 @@ function applyMiddleware<
   // 1. Starts with BaseContext
   // 2. Each middleware transforms context → Ctx
   // 3. Handler receives Ctx and returns Effect<A, E, R>
-  
+
   // Separate service middleware from regular middleware
   // Service middleware needs special handling for streams
   const serviceMiddlewares: ServiceMiddleware<any, any, any, any, any>[] = []
   const regularMiddlewares: Middleware<any, any, any, any, any>[] = []
-  
+
   for (const m of middlewares) {
     if (isServiceMiddleware(m)) {
       serviceMiddlewares.push(m)
     } else {
-      regularMiddlewares.push(m as Middleware<any, any, any, any, any>)
+      regularMiddlewares.push(m)
     }
   }
-  
+
   type AnyHandler = (ctx: any, input: any) => any
   const anyHandler = handler as AnyHandler
-  
+
   const setupContext = Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({
       "trpc.procedure": procedureName,
@@ -609,16 +576,16 @@ function applyMiddleware<
 
   // Helper to create services and transform context
   // Returns Effect<{ ctx: transformedContext, services: Map<Tag, service> }>
-  const prepareServicesAndContext = (baseCtx: any) =>
+  const prepareServicesAndContext = (baseCtx: any, input: I) =>
     Effect.gen(function* () {
       let ctx = baseCtx
       const services: Array<{ tag: any; value: any }> = []
 
-      // Process service middleware in order
+      // Process service middleware in order (passes input to make)
       for (const sm of serviceMiddlewares) {
-        const service = yield* sm.make(ctx)
+        const service = yield* sm.make(ctx, input)
         services.push({ tag: sm.provides, value: service })
-        
+
         // Transform context if the middleware defines it
         if (sm.transformContext) {
           ctx = sm.transformContext(ctx, service)
@@ -636,10 +603,10 @@ function applyMiddleware<
     // 4. Apply services using Stream.provideService (NOT Effect.provideService)
     const stream = Stream.unwrap(
       Effect.flatMap(setupContext, ({ baseContext, abortController }) =>
-        Effect.map(prepareServicesAndContext(baseContext), ({ ctx, services }) => {
+        Effect.map(prepareServicesAndContext(baseContext, payload), ({ ctx, services }) => {
           // Build the regular middleware chain
           type ChainFn = (ctx: any) => any
-          
+
           const finalStep: ChainFn = (finalCtx) =>
             FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
               Effect.map(() => anyHandler(finalCtx, payload)),
@@ -655,17 +622,23 @@ function applyMiddleware<
               ),
             )
           } else {
-            // Build chain with regular middleware
+            // Build chain with regular middleware (passes input to each)
             const chain = Array.reduceRight(
               regularMiddlewares,
               finalStep,
-              (nextFn, middleware): ChainFn => (c) => middleware.fn(c, nextFn),
+              (nextFn, middleware): ChainFn =>
+                (c) =>
+                  middleware.fn(c, payload, nextFn),
             )
 
             const chainEffect = Effect.onInterrupt(chain(ctx), () =>
               Effect.sync(() => abortController.abort()),
-            ) as unknown as Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown, unknown>
-            
+            ) as unknown as Effect.Effect<
+              Stream.Stream<unknown, unknown, unknown>,
+              unknown,
+              unknown
+            >
+
             resultStream = Stream.unwrap(chainEffect)
           }
 
@@ -679,14 +652,14 @@ function applyMiddleware<
         }),
       ),
     ).pipe(Stream.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
-    
+
     return stream as Stream.Stream<A, E, R>
   }
 
   // Effect (Mutation/Query) logic
   const effect = Effect.gen(function* () {
     const { baseContext, abortController } = yield* setupContext
-    const { ctx, services } = yield* prepareServicesAndContext(baseContext)
+    const { ctx, services } = yield* prepareServicesAndContext(baseContext, payload)
 
     let result: Effect.Effect<unknown, unknown, unknown>
 
@@ -699,15 +672,14 @@ function applyMiddleware<
           Effect.flatMap(() => anyHandler(finalCtx, payload)),
         )
 
+      // Build chain with regular middleware (passes input to each)
       const chain = Array.reduceRight(
         regularMiddlewares,
         finalStep,
-        (nextFn, middleware) => (c: any) => middleware.fn(c, nextFn),
+        (nextFn, middleware) => (c: any) => middleware.fn(c, payload, nextFn),
       )
 
-      result = Effect.onInterrupt(chain(ctx), () =>
-        Effect.sync(() => abortController.abort()),
-      )
+      result = Effect.onInterrupt(chain(ctx), () => Effect.sync(() => abortController.abort()))
     }
 
     // Apply services using Effect.provideService
@@ -716,10 +688,8 @@ function applyMiddleware<
     }
 
     return yield* result
-  }).pipe(
-    Effect.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }),
-  )
-  
+  }).pipe(Effect.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
+
   return effect as Effect.Effect<A, E, R>
 }
 
@@ -787,7 +757,7 @@ export const convertHandlers = <Name extends string, Procs extends ProcedureReco
             const keepAliveStream = Stream.repeatEffect(
               Effect.succeed({ _tag: "KeepAlive" } as const),
             ).pipe(Stream.schedule(Schedule.spaced("15 seconds")))
-             
+
             return Stream.merge(dataStream, keepAliveStream, { haltStrategy: "left" }) as any
           }
         : userHandler
@@ -883,9 +853,7 @@ export const createRpcComponents = <Name extends string, Procs extends Procedure
   ) => Layer.Layer<
     RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
     never,
-    | REffect
-    | EffectiveHandlerRequirements<Handlers, Procs>
-    | ProceduresMiddlewareR<Procs>
+    REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
   >
 } => {
   const rpcGroup = proceduresGroupToRpcGroup(group)
@@ -912,9 +880,7 @@ export const createRpcComponents = <Name extends string, Procs extends Procedure
       return rpcGroup.toLayer(adaptedHandlers) as Layer.Layer<
         RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
         never,
-        | REffect
-        | EffectiveHandlerRequirements<Handlers, Procs>
-        | ProceduresMiddlewareR<Procs>
+        REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
       >
     },
   }

@@ -12,6 +12,7 @@ export default defineConfig({
     bun: "src/bun/index.ts",
     "bun-http": "src/bun/http.ts",
     "bun-ws": "src/bun/ws.ts",
+    ws: "src/ws/index.ts",
   },
   format: ["esm", "cjs"],
   dts: true,
@@ -20,15 +21,27 @@ export default defineConfig({
   treeshake: true,
   splitting: true,
   external: [
+    // Effect ecosystem
     "effect",
     "@effect/rpc",
     "@effect/rpc-http",
-    "@effect/schema",
     "@effect/platform",
     "@effect/platform-node",
     "@effect/platform-bun",
+
+    // State management
+    "@effect-atom/atom",
+    "@effect-atom/atom-react",
+
+    // React
     "react",
+    "react-dom",
+
+    // Next.js
     "next",
+
+    // Node.js / runtime
+    "ws",
     "bun",
   ],
   esbuildOptions(options) {

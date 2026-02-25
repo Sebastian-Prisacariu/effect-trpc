@@ -155,7 +155,9 @@ describe("layer composition", () => {
             logger.log(`Toggling todo: ${id}`).pipe(
               Effect.flatMap(() => {
                 const todo = todos.find((t) => t.id === id)
-                if (!todo) return Effect.die("Not found")
+                // Note: In real code, use Effect.fail for expected "not found" errors.
+                // Here we use die since the test controls the data and this shouldn't happen.
+                if (!todo) return Effect.die(new Error(`Todo ${id} not found - test data issue`))
                 todo.completed = !todo.completed
                 return Effect.succeed(todo)
               }),
@@ -302,6 +304,8 @@ describe("layer replacement for testing", () => {
   })
 
   it("allows configurable mock behavior", async () => {
+    // Note: Effect.die is used here to simulate an unrecoverable defect (DB crash).
+    // For expected errors (e.g., validation, not found), use Effect.fail instead.
     const createMockTodoHandlers = (options: {
       initialTodos?: Todo[]
       failOnCreate?: boolean
@@ -310,7 +314,7 @@ describe("layer replacement for testing", () => {
         list: (_ctx) => Effect.succeed(options.initialTodos ?? []),
         create: (_ctx, { title }) =>
           options.failOnCreate
-            ? Effect.die("Database connection failed")
+            ? Effect.die(new Error("Database connection failed - simulated defect"))
             : Effect.succeed({ id: "mock", title, completed: false }),
         toggle: (_ctx, { id }) =>
           Effect.succeed({ id, title: "toggled", completed: true }),

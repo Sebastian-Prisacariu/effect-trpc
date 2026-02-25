@@ -50,11 +50,16 @@ import {
   useRegistry,
   queryAtomFamily,
   callerAtomFamily,
+  mutationAtomFamily,
+  writableMutationAtomFamily,
   streamAtomFamily,
   chatAtomFamily,
   generateQueryKey,
   generateCallerKey,
+  generateMutationKey,
   registerQueryKey,
+  registerCallerAtom,
+  unregisterCallerAtom,
   invalidateQueryByKey,
   invalidateQueriesByPrefix,
   invalidateAllQueries,
@@ -64,10 +69,12 @@ import {
   type AtomCacheUtils,
   type QueryAtomState,
   type MutationCallerState,
+  type MutationMainState,
   type StreamAtomState as _StreamAtomState,
   type ChatAtomState as _ChatAtomState,
   initialQueryState as _initialQueryState,
   initialCallerState,
+  initialMutationMainState,
   initialStreamState as _initialStreamState,
   initialChatState,
 } from "./atoms.js"
@@ -197,35 +204,12 @@ export interface GlobalQueryOptions<A> extends UseQueryOptions<A> {
 }
 
 /**
- * Return type for useQuery hook.
- *
- * @since 0.1.0
- * @category hooks
- */
-export interface UseQueryReturn<A, E> extends QueryResult<A, E> {
-  /**
-   * True for ANY fetch in progress (initial OR background refetch).
-   * Superset of isLoading + isRefetching.
-   */
-  readonly isFetching: boolean
-
-  /**
-   * True when showing placeholder data or keepPreviousData.
-   */
-  readonly isPlaceholderData: boolean
-
-  /** Manually trigger a refetch */
-  readonly refetch: () => void
-}
-
-/**
- * Options for useSuspenseQuery hook.
  * Same as UseQueryOptions but without `enabled` (suspense always fetches).
  *
  * @since 0.1.0
  * @category hooks
  */
-export interface UseSuspenseQueryOptions<A> extends Omit<UseQueryOptions<A>, "enabled"> {}
+export type UseSuspenseQueryOptions<A> = Omit<UseQueryOptions<A>, "enabled">
 
 /**
  * Return type for useSuspenseQuery hook.
@@ -404,11 +388,24 @@ export interface UseMutationReturn<A, E, I> extends MutationResult<A, E> {
  * @since 0.1.0
  * @category hooks
  */
+/**
+ * Error context passed to onError callback for useStream.
+ *
+ * @since 0.1.0
+ * @category hooks
+ */
+export interface UseStreamErrorContext {
+  /** The last value received before the error (null if no values received) */
+  readonly latestValue: unknown | null
+  /** All parts received before the error */
+  readonly parts: ReadonlyArray<unknown>
+}
+
 export interface UseStreamOptions {
   readonly enabled?: boolean
   readonly onPart?: (part: unknown) => void
   readonly onComplete?: (parts: ReadonlyArray<unknown>) => void
-  readonly onError?: (error: unknown) => void
+  readonly onError?: (error: unknown, context: UseStreamErrorContext) => void
 }
 
 /**
@@ -428,6 +425,32 @@ export interface UseStreamReturn<A, E> {
 }
 
 /**
+ * Result passed to onFinish callback for useChat.
+ *
+ * @since 0.1.0
+ * @category hooks
+ */
+export interface UseChatFinishResult {
+  /** The complete accumulated text from all text parts */
+  readonly fullText: string
+  /** All stream parts received during the chat */
+  readonly parts: ReadonlyArray<unknown>
+}
+
+/**
+ * Error context passed to onError callback for useChat.
+ *
+ * @since 0.1.0
+ * @category hooks
+ */
+export interface UseChatErrorContext {
+  /** The accumulated text before the error occurred */
+  readonly text: string
+  /** All parts received before the error */
+  readonly parts: ReadonlyArray<unknown>
+}
+
+/**
  * Options for useChat hook.
  *
  * @since 0.1.0
@@ -435,8 +458,8 @@ export interface UseStreamReturn<A, E> {
  */
 export interface UseChatOptions {
   readonly onPart?: (part: unknown) => void
-  readonly onFinish?: (parts: ReadonlyArray<unknown>) => void
-  readonly onError?: (error: unknown) => void
+  readonly onFinish?: (result: UseChatFinishResult) => void
+  readonly onError?: (error: unknown, context: UseChatErrorContext) => void
 }
 
 /**
@@ -461,7 +484,7 @@ export interface UseChatReturn<I, A, E> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface QueryProcedure<I, A, E> {
-  useQuery: (input: I, options?: UseQueryOptions<A>) => UseQueryReturn<A, E>
+  useQuery: (input: I, options?: UseQueryOptions<A>) => QueryResult<A, E>
   useSuspenseQuery: (input: I, options?: UseSuspenseQueryOptions<A>) => UseSuspenseQueryReturn<A, E>
 }
 
@@ -482,15 +505,15 @@ interface SubscriptionProcedure<I, A, E> {
 }
 
 type ProcedureHook<P> =
-  P extends ProcedureDefinition<infer I, infer O, infer E, any, "query">
+  P extends ProcedureDefinition<infer I, infer O, infer E, any, "query", any, any>
     ? QueryProcedure<unknown extends I ? void : I, O, E>
-    : P extends ProcedureDefinition<infer I, infer O, infer E, any, "mutation">
+    : P extends ProcedureDefinition<infer I, infer O, infer E, any, "mutation", any, any>
       ? MutationProcedure<unknown extends I ? void : I, O, E>
-      : P extends ProcedureDefinition<infer I, infer O, infer E, any, "stream">
+      : P extends ProcedureDefinition<infer I, infer O, infer E, any, "stream", any, any>
         ? StreamProcedure<unknown extends I ? void : I, O, E>
-        : P extends ProcedureDefinition<infer I, infer O, infer E, any, "chat">
+        : P extends ProcedureDefinition<infer I, infer O, infer E, any, "chat", any, any>
           ? ChatProcedure<unknown extends I ? void : I, O, E>
-          : P extends ProcedureDefinition<infer I, infer O, infer E, any, "subscription">
+          : P extends ProcedureDefinition<infer I, infer O, infer E, any, "subscription", any, any>
             ? SubscriptionProcedure<unknown extends I ? void : I, O, E>
             : never
 
@@ -907,7 +930,7 @@ export function createTRPCReact<TRouter extends Router>(
       // useQuery (effect-atom based - DECISION-007)
       // ─────────────────────────────────────────────────────────────────
 
-      useQuery: (input: unknown, queryOptions?: UseQueryOptions<any>) => {
+      useQuery: (input: unknown, queryOptions?: UseQueryOptions<unknown>) => {
         // Merge with defaultQueryOptions, then apply defaults (TanStack Query compatible)
         const mergedOptions = { ...defaultQueryOptions, ...queryOptions }
         const {
@@ -938,15 +961,27 @@ export function createTRPCReact<TRouter extends Router>(
           registerQueryKey(registry, key)
         }, [registry, key])
 
-        // Get the current state from the atom
+        /**
+         * Type assertion required: `any` used here for two reasons:
+         * 1. The atom family stores `unknown` types, but we need flexible assignment
+         *    in setAtomState calls throughout this hook (partial state updates)
+         * 2. Type safety is enforced at the proxy layer via `RouterClient<R>` which
+         *    maps procedure paths to correct input/output types from router definition
+         *
+         * Consumers of this API get full type safety; this is an internal implementation detail.
+         */
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const atomState = useAtomValue(atom) as QueryAtomState<any, any>
         const setAtomState = useAtomSet(atom)
 
         // Track previous successful data for keepPreviousData
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const previousDataRef = React.useRef<any>(undefined)
-        if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
-          previousDataRef.current = atomState.result.value
-        }
+        React.useEffect(() => {
+          if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
+            previousDataRef.current = atomState.result.value
+          }
+        }, [atomState.result])
 
         // Version ref to handle race conditions
         const versionRef = React.useRef(0)
@@ -957,14 +992,29 @@ export function createTRPCReact<TRouter extends Router>(
           [atomState.lastFetchedAt, staleTime],
         )
 
+        // Refs for stable refetch callback - avoids recreating on every state change
+        const atomStateRef = React.useRef(atomState)
+        atomStateRef.current = atomState
+        const inputRef = React.useRef(input)
+        inputRef.current = input
+
         // Refetch function using effect-atom with deduplication
+        // Uses refs for atomState and input to avoid recreating callback on state changes
         const refetch = React.useCallback(() => {
           const version = ++versionRef.current
+          const currentAtomState = atomStateRef.current
+          const currentInput = inputRef.current
 
           // Set to loading state, preserving previous value
-          const previousValue = AtomResult.isSuccess(atomState.result)
-            ? atomState.result.value
+          const previousValue = AtomResult.isSuccess(currentAtomState.result)
+            ? currentAtomState.result.value
             : undefined
+
+          // Preserve current error as previousError during retry
+          // This allows UI to show both "retrying" and the previous error
+          const currentError = AtomResult.isFailure(currentAtomState.result)
+            ? Option.getOrNull(AtomResult.error(currentAtomState.result))
+            : currentAtomState.previousError
 
           setAtomState({
             result: AtomResult.waiting(
@@ -972,29 +1022,36 @@ export function createTRPCReact<TRouter extends Router>(
                 ? AtomResult.success(previousValue)
                 : AtomResult.initial(),
             ),
-            lastFetchedAt: atomState.lastFetchedAt,
+            lastFetchedAt: currentAtomState.lastFetchedAt,
+            previousError: currentError,
           })
 
-          const effect = createRpcEffect(url, path, input, tracing)
+          const effect = createRpcEffect(url, path, currentInput, tracing)
 
           // Use deduplication to prevent duplicate network requests
           // If another component is already fetching this query, we'll share the promise
-          void executeWithDeduplication(key, effect).then((exit) => {
+          // Note: key depends on input, so we regenerate it from current input
+          const currentKey = generateQueryKey(path, currentInput)
+          void executeWithDeduplication(currentKey, effect).then((exit) => {
             if (version !== versionRef.current) return
 
             if (Exit.isSuccess(exit)) {
+              // Clear previousError on success
               setAtomState({
                 result: AtomResult.success(exit.value),
                 lastFetchedAt: Date.now(),
+                previousError: null,
               })
             } else {
+              // Keep previousError for error history, current error is in result
               setAtomState({
                 result: AtomResult.fail(Cause.squash(exit.cause)),
                 lastFetchedAt: Date.now(),
+                previousError: currentError,
               })
             }
           })
-        }, [atomState, setAtomState, input, key])
+        }, [setAtomState])
 
         // Initialize with initialData if provided
         React.useEffect(() => {
@@ -1002,11 +1059,16 @@ export function createTRPCReact<TRouter extends Router>(
             setAtomState({
               result: AtomResult.success(initialData),
               lastFetchedAt: null,
+              previousError: null,
             })
           }
         }, [initialData, atomState.result, setAtomState])
 
-        // Fetch on mount based on refetchOnMount option
+        // Mount-only effect for initial data fetching
+        // Intentionally empty deps - this effect should only run once on mount to:
+        // 1. Make the initial fetch decision based on refetchOnMount option
+        // 2. Avoid unwanted refetches when deps change (e.g., atomState updates)
+        // Subsequent refetches are handled by: refetchInterval, manual refetch(), or cache invalidation
         React.useEffect(() => {
           if (!enabled) return
 
@@ -1032,7 +1094,7 @@ export function createTRPCReact<TRouter extends Router>(
             refetch()
           }
           // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, []) // Only run on mount
+        }, [])
 
         // Window focus refetch
         React.useEffect(() => {
@@ -1076,7 +1138,7 @@ export function createTRPCReact<TRouter extends Router>(
         // Compute display data (with placeholder/keepPreviousData support)
         // ═══════════════════════════════════════════════════════════════════════════
 
-        const computeDisplayData = (): { data: any; isPlaceholderData: boolean } => {
+        const { data, isPlaceholderData } = React.useMemo(() => {
           // If we have successful data (not waiting), use it
           if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
             return { data: atomState.result.value, isPlaceholderData: false }
@@ -1094,9 +1156,13 @@ export function createTRPCReact<TRouter extends Router>(
 
           // placeholderData: compute placeholder
           if (placeholderData !== undefined) {
+            // Type assertion required: placeholderData can be a function that receives
+            // the previous data. Since this internal implementation uses unknown types,
+            // we cast to any for the function call. Type safety is at the proxy layer.
             const placeholder =
               typeof placeholderData === "function"
-                ? (placeholderData as (prev: any) => any)(previousDataRef.current)
+                ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  (placeholderData as (prev: any) => any)(previousDataRef.current)
                 : placeholderData
             if (placeholder !== undefined) {
               return { data: placeholder, isPlaceholderData: true }
@@ -1109,9 +1175,7 @@ export function createTRPCReact<TRouter extends Router>(
           }
 
           return { data: undefined, isPlaceholderData: false }
-        }
-
-        const { data, isPlaceholderData } = computeDisplayData()
+        }, [atomState.result, keepPreviousData, placeholderData, initialData])
 
         const error = AtomResult.isFailure(atomState.result)
           ? Option.getOrUndefined(AtomResult.error(atomState.result))
@@ -1124,6 +1188,12 @@ export function createTRPCReact<TRouter extends Router>(
         return {
           data,
           error,
+          /**
+           * The previous error that occurred before the current retry attempt.
+           * Useful for showing error state while retrying (e.g., "Retrying... Previous error: X")
+           * Cleared only on successful fetch.
+           */
+          previousError: atomState.previousError,
           // isLoading: no data + fetching (first load)
           isLoading: !hasData && isWaiting,
           // isFetching: any loading state
@@ -1142,17 +1212,17 @@ export function createTRPCReact<TRouter extends Router>(
       // useSuspenseQuery (effect-atom based - DECISION-007)
       // ─────────────────────────────────────────────────────────────────
 
-      useSuspenseQuery: (input: unknown, queryOptions?: UseSuspenseQueryOptions<any>) => {
+      useSuspenseQuery: (input: unknown, queryOptions?: UseSuspenseQueryOptions<unknown>) => {
         // Merge with defaultQueryOptions, then apply defaults (TanStack Query compatible)
         const mergedOptions = { ...defaultQueryOptions, ...queryOptions }
         const {
           initialData,
-          placeholderData,
+          placeholderData: _placeholderData, // TODO: Implement placeholder data support
           keepPreviousData = false,
           staleTime = 0,
           refetchOnWindowFocus = true,
           refetchOnReconnect = true,
-          refetchOnMount = true,
+          refetchOnMount: _refetchOnMount = true, // TODO: Implement refetchOnMount support
           refetchInterval = 0,
           refetchIntervalInBackground = false,
         } = mergedOptions
@@ -1172,15 +1242,27 @@ export function createTRPCReact<TRouter extends Router>(
           registerQueryKey(registry, key)
         }, [registry, key])
 
-        // Get the current state from the atom
+        /**
+         * Type assertion required: `any` used here for two reasons:
+         * 1. The atom family stores `unknown` types, but we need flexible assignment
+         *    in setAtomState calls throughout this hook (partial state updates)
+         * 2. Type safety is enforced at the proxy layer via `RouterClient<R>` which
+         *    maps procedure paths to correct input/output types from router definition
+         *
+         * Consumers of this API get full type safety; this is an internal implementation detail.
+         */
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const atomState = useAtomValue(atom) as QueryAtomState<any, any>
         const setAtomState = useAtomSet(atom)
 
         // Track previous successful data for keepPreviousData
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const previousDataRef = React.useRef<any>(undefined)
-        if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
-          previousDataRef.current = atomState.result.value
-        }
+        React.useEffect(() => {
+          if (AtomResult.isSuccess(atomState.result) && !atomState.result.waiting) {
+            previousDataRef.current = atomState.result.value
+          }
+        }, [atomState.result])
 
         // Version ref to handle race conditions
         const versionRef = React.useRef(0)
@@ -1195,6 +1277,11 @@ export function createTRPCReact<TRouter extends Router>(
             ? atomState.result.value
             : undefined
 
+          // Preserve current error as previousError during retry
+          const currentError = AtomResult.isFailure(atomState.result)
+            ? Option.getOrNull(AtomResult.error(atomState.result))
+            : atomState.previousError
+
           setAtomState({
             result: AtomResult.waiting(
               previousValue !== undefined
@@ -1202,6 +1289,7 @@ export function createTRPCReact<TRouter extends Router>(
                 : AtomResult.initial(),
             ),
             lastFetchedAt: atomState.lastFetchedAt,
+            previousError: currentError,
           })
 
           const effect = createRpcEffect(url, path, input, tracing)
@@ -1211,14 +1299,18 @@ export function createTRPCReact<TRouter extends Router>(
             if (version !== versionRef.current) return
 
             if (Exit.isSuccess(exit)) {
+              // Clear previousError on success
               setAtomState({
                 result: AtomResult.success(exit.value),
                 lastFetchedAt: Date.now(),
+                previousError: null,
               })
             } else {
+              // Keep previousError for error history
               setAtomState({
                 result: AtomResult.fail(Cause.squash(exit.cause)),
                 lastFetchedAt: Date.now(),
+                previousError: currentError,
               })
             }
             promiseRef.current = null
@@ -1233,6 +1325,7 @@ export function createTRPCReact<TRouter extends Router>(
             setAtomState({
               result: AtomResult.success(initialData),
               lastFetchedAt: null,
+              previousError: null,
             })
           }
         }, [initialData, atomState.result, setAtomState])
@@ -1307,9 +1400,20 @@ export function createTRPCReact<TRouter extends Router>(
         const isPlaceholderData =
           keepPreviousData && previousDataRef.current !== undefined && isWaiting
 
+        /**
+         * Return type assertion required because this internal implementation
+         * doesn't know the concrete A (output) and E (error) types. Type safety
+         * is enforced at the proxy layer via `RouterClient<R>`.
+         */
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return {
           data,
           error: undefined,
+          /**
+           * The previous error that occurred before the current retry attempt.
+           * For suspense queries, this is available while refetching after a previous error.
+           */
+          previousError: atomState.previousError,
           isLoading: false, // Suspense always has data at this point
           isFetching: isWaiting,
           isError: false,
@@ -1323,16 +1427,57 @@ export function createTRPCReact<TRouter extends Router>(
 
       // ─────────────────────────────────────────────────────────────────
       // useMutation (effect-atom based with 3-tier hierarchy - DECISION-007)
+      //
+      // Architecture (per DECISION-007):
+      // 1. Main Atom (mutationAtomFamily): Global state per procedure route.
+      //    Holds last successful result and last input. Shared across all callers.
+      //    Survives component unmounts.
+      //
+      // 2. Writable Atom (writableMutationAtomFamily): For optimistic updates.
+      //    Reads from main atom, allows temporary overrides visible to all callers.
+      //
+      // 3. Caller Atom (callerAtomFamily): Per useMutation() hook instance.
+      //    Holds isPending, error state. Isolated per hook instance so two delete
+      //    buttons have independent loading states.
       // ─────────────────────────────────────────────────────────────────
 
-      useMutation: (mutationOptions?: UseMutationOptions<any, any, any>) => {
+      useMutation: (mutationOptions?: UseMutationOptions<unknown, unknown, unknown>) => {
         const { onMutate, onSuccess, onError, onSettled, invalidates, optimistic } =
           mutationOptions ?? {}
 
         // Get registry for atom-based operations
         const registry = useRegistry()
 
-        // Generate a unique caller ID for this hook instance (3-tier: caller atom)
+        // ─────────────────────────────────────────────────────────────────
+        // Tier 1: Main Atom (global state per procedure route)
+        // ─────────────────────────────────────────────────────────────────
+        const mutationKey = generateMutationKey(path)
+        const mainAtom = mutationAtomFamily(mutationKey)
+
+        // Mount the main atom (keeps it alive while any mutation hook exists)
+        useAtomMount(mainAtom)
+
+        /**
+         * Type assertion: `any` used because atom family stores `unknown` types.
+         * Type safety is enforced at the proxy layer via `RouterClient<R>`.
+         */
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mainState = useAtomValue(mainAtom) as MutationMainState<any, any>
+        const setMainState = useAtomSet(mainAtom)
+
+        // ─────────────────────────────────────────────────────────────────
+        // Tier 2: Writable Atom (for optimistic updates - not yet fully used)
+        // The writable atom allows temporary overrides visible to all callers.
+        // Currently, optimistic updates go through cacheUtils which updates
+        // query atoms. Future: support optimistic mutation results here.
+        // ─────────────────────────────────────────────────────────────────
+        const _writableAtom = writableMutationAtomFamily(mutationKey)
+        // Note: writableAtom is available for future optimistic mutation state.
+        // Currently optimistic updates modify query caches via cacheUtils.
+
+        // ─────────────────────────────────────────────────────────────────
+        // Tier 3: Caller Atom (per hook instance, isolated state)
+        // ─────────────────────────────────────────────────────────────────
         const callerId = React.useId()
         const callerKey = generateCallerKey(path, callerId)
         const callerAtom = callerAtomFamily(callerKey)
@@ -1340,12 +1485,23 @@ export function createTRPCReact<TRouter extends Router>(
         // Mount the caller atom
         useAtomMount(callerAtom)
 
-        // Get caller state (isolated per hook instance)
+        // Register caller atom for cleanup tracking and clean up on unmount
+        // This prevents memory leaks from accumulating caller atoms over time
+        React.useEffect(() => {
+          registerCallerAtom(registry, callerKey)
+          return () => {
+            unregisterCallerAtom(registry, callerKey)
+          }
+        }, [registry, callerKey])
+
+        /**
+         * Type assertion required: `any` used because the caller atom family
+         * stores `unknown` types, but we need flexible error handling throughout
+         * this hook. Type safety is enforced at the proxy layer via `RouterClient<R>`.
+         */
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const callerState = useAtomValue(callerAtom) as MutationCallerState<any>
         const setCallerState = useAtomSet(callerAtom)
-
-        // Track last successful result for the return value
-        const lastResultRef = React.useRef<any>(undefined)
 
         // Version ref to handle rapid mutations - only the latest mutation updates state
         const versionRef = React.useRef(0)
@@ -1363,7 +1519,8 @@ export function createTRPCReact<TRouter extends Router>(
          * @returns Promise resolving to Exit.Success with the result, or Exit.Failure with the error
          */
         const mutateAsync = React.useCallback(
-          async (input: any): Promise<any> => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          async (input: unknown): Promise<any> => {
             // Increment version to track this mutation - used to ignore stale results
             const version = ++versionRef.current
 
@@ -1398,13 +1555,19 @@ export function createTRPCReact<TRouter extends Router>(
             if (Exit.isSuccess(exit)) {
               // Only update state if this is still the latest mutation
               if (!isStale) {
-                // Update caller state
+                // Update caller state (tier 3)
                 setCallerState({
                   isPending: false,
                   error: null,
                   lastInput: input,
                 })
-                lastResultRef.current = exit.value
+
+                // Update main atom (tier 1) - this persists the last result
+                // across all callers and survives component unmounts
+                setMainState({
+                  lastResult: AtomResult.success(exit.value),
+                  lastInput: input,
+                })
 
                 // Step 3a: Call optimistic onSuccess (with cache utils and context)
                 if (optimistic?.onSuccess) {
@@ -1489,13 +1652,21 @@ export function createTRPCReact<TRouter extends Router>(
             optimistic,
             cacheUtils,
             setCallerState,
+            setMainState,
           ],
         )
 
+        /**
+         * Effect-based mutation wrapper. The `any` types are required because:
+         * 1. This internal implementation doesn't know concrete procedure types
+         * 2. Type safety is enforced at the proxy layer via `RouterClient<R>`
+         */
         const mutate = React.useCallback(
-          (input: any): Effect.Effect<any, any> =>
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (input: unknown): Effect.Effect<any, any> =>
             // mutateAsync returns Exit, so we convert Promise<Exit> to Effect
             pipe(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               Effect.promise(() => mutateAsync(input) as Promise<Exit.Exit<any, any>>),
               Effect.flatMap((exit) =>
                 Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
@@ -1505,29 +1676,39 @@ export function createTRPCReact<TRouter extends Router>(
         )
 
         const reset = React.useCallback(() => {
+          // Reset caller state (tier 3) - clears this hook's pending/error state
           setCallerState(initialCallerState())
-          lastResultRef.current = undefined
-        }, [setCallerState])
+          // Reset main state (tier 1) - clears the shared last result
+          // This is a full reset; if you only want to clear caller state,
+          // don't reset the main atom
+          setMainState(initialMutationMainState())
+        }, [setCallerState, setMainState])
+
+        // Extract data from main atom's lastResult
+        // The main atom holds the last successful result from ANY caller
+        const lastResultData =
+          mainState.lastResult !== null && AtomResult.isSuccess(mainState.lastResult)
+            ? mainState.lastResult.value
+            : undefined
 
         return {
-          data: lastResultRef.current,
+          // Data comes from the main atom (tier 1) - shared across all callers
+          data: lastResultData,
+          // Error comes from caller state (tier 3) - isolated per hook instance
           error: callerState.error ?? undefined,
+          // isPending comes from caller state (tier 3) - isolated per hook instance
           isPending: callerState.isPending,
           isError: callerState.error !== null,
           isSuccess:
-            lastResultRef.current !== undefined &&
-            !callerState.isPending &&
-            callerState.error === null,
+            lastResultData !== undefined && !callerState.isPending && callerState.error === null,
           isIdle:
-            !callerState.isPending &&
-            callerState.error === null &&
-            lastResultRef.current === undefined,
+            !callerState.isPending && callerState.error === null && lastResultData === undefined,
           result: callerState.isPending
             ? Result.initial(true) // initial with waiting=true for loading state
             : callerState.error !== null
               ? Result.fail(callerState.error)
-              : lastResultRef.current !== undefined
-                ? Result.success(lastResultRef.current)
+              : lastResultData !== undefined
+                ? Result.success(lastResultData)
                 : Result.initial(),
           mutateAsync,
           mutate,
@@ -1562,8 +1743,8 @@ export function createTRPCReact<TRouter extends Router>(
         const onCompleteEvent = useEvent((parts: ReadonlyArray<unknown>) => {
           onComplete?.(parts)
         })
-        const onErrorEvent = useEvent((err: unknown) => {
-          onError?.(err)
+        const onErrorEvent = useEvent((err: unknown, context: UseStreamErrorContext) => {
+          onError?.(err, context)
         })
 
         const stop = React.useCallback(() => {
@@ -1573,11 +1754,12 @@ export function createTRPCReact<TRouter extends Router>(
             runFork(Fiber.interruptFork(fiberRef.current))
             fiberRef.current = null
           }
-          setAtomState({
-            ...atomState,
+          // Use functional update to avoid depending on atomState
+          setAtomState((prev) => ({
+            ...prev,
             isStreaming: false,
-          })
-        }, [atomState, setAtomState])
+          }))
+        }, [setAtomState])
 
         const restart = React.useCallback(() => {
           stop()
@@ -1622,19 +1804,23 @@ export function createTRPCReact<TRouter extends Router>(
               Effect.sync(() => {
                 fiberRef.current = null // Clear ref on error/defect
                 const err = Cause.squash(cause)
-                setAtomState({
+                // Capture latest value from local parts array (always current)
+                const latestValue = parts[parts.length - 1] ?? null
+                // Use functional update to preserve latestValue without depending on atomState
+                setAtomState((prev) => ({
                   result: AtomResult.fail(err),
                   isStreaming: false,
-                  latestValue: atomState.latestValue,
-                })
+                  latestValue: prev.latestValue,
+                }))
                 // useEffectEvent ensures we call the latest callback
-                onErrorEvent(err)
+                // Pass error context with current parts and latestValue
+                onErrorEvent(err, { latestValue, parts: [...parts] })
               }),
             ),
           )
 
           fiberRef.current = runFork(streamEffect)
-        }, [input, stop, setAtomState, atomState.latestValue]) // onPartEvent, etc. use useEffectEvent - not needed in deps
+        }, [input, stop, setAtomState]) // onPartEvent, etc. use useEffectEvent - not needed in deps
 
         React.useEffect(() => {
           if (enabled) restart()
@@ -1682,11 +1868,11 @@ export function createTRPCReact<TRouter extends Router>(
         const onPartEvent = useEvent((part: unknown) => {
           onPart?.(part)
         })
-        const onFinishEvent = useEvent((parts: ReadonlyArray<unknown>) => {
-          onFinish?.(parts)
+        const onFinishEvent = useEvent((result: UseChatFinishResult) => {
+          onFinish?.(result)
         })
-        const onErrorEvent = useEvent((err: unknown) => {
-          onError?.(err)
+        const onErrorEvent = useEvent((err: unknown, context: UseChatErrorContext) => {
+          onError?.(err, context)
         })
 
         const stop = React.useCallback(() => {
@@ -1695,11 +1881,12 @@ export function createTRPCReact<TRouter extends Router>(
             runFork(Fiber.interruptFork(fiberRef.current))
             fiberRef.current = null
           }
-          setAtomState({
-            ...atomState,
+          // Use functional update to avoid depending on atomState
+          setAtomState((prev) => ({
+            ...prev,
             isStreaming: false,
-          })
-        }, [atomState, setAtomState])
+          }))
+        }, [setAtomState])
 
         const reset = React.useCallback(() => {
           stop()
@@ -1756,7 +1943,7 @@ export function createTRPCReact<TRouter extends Router>(
                     isStreaming: false,
                   })
                   // useEffectEvent ensures we call the latest callback
-                  onFinishEvent(allParts)
+                  onFinishEvent({ fullText: accumulatedText, parts: allParts })
                 }),
               ),
               // Use catchAllCause to handle both errors AND defects
@@ -1772,7 +1959,8 @@ export function createTRPCReact<TRouter extends Router>(
                     isStreaming: false,
                   })
                   // useEffectEvent ensures we call the latest callback
-                  onErrorEvent(err)
+                  // Pass error context with current parts and text (from local vars, always current)
+                  onErrorEvent(err, { text: accumulatedText, parts: [...allParts] })
                 }),
               ),
             )
@@ -1804,7 +1992,7 @@ export function createTRPCReact<TRouter extends Router>(
       // ─────────────────────────────────────────────────────────────────
       // useSubscription
       // ─────────────────────────────────────────────────────────────────
-      useSubscription: (input: unknown, subscriptionOptions?: UseSubscriptionOptions<any>) => {
+      useSubscription: (input: unknown, subscriptionOptions?: UseSubscriptionOptions<unknown>) => {
         // Delegate to the useSubscription hook from subscription.ts
         // The hook needs WebSocketProvider context, so users must wrap with that provider
         return useSubscription(path, input, subscriptionOptions)

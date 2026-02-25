@@ -18,6 +18,7 @@ import * as Duration from "effect/Duration"
 import * as Schedule from "effect/Schedule"
 import * as Deferred from "effect/Deferred"
 import * as Ref from "effect/Ref"
+import * as Fiber from "effect/Fiber"
 import * as Predicate from "effect/Predicate"
 import * as HttpClient from "@effect/platform/HttpClient"
 import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
@@ -95,6 +96,32 @@ export interface BatchConfig {
 }
 
 /**
+ * Configuration for logging RPC calls.
+ *
+ * @since 0.1.0
+ * @category Config
+ */
+export interface LoggerConfig {
+  /**
+   * Enable/disable logging.
+   * @default false
+   */
+  readonly enabled?: boolean
+
+  /**
+   * Include input in logs.
+   * @default true
+   */
+  readonly logInput?: boolean
+
+  /**
+   * Include result in logs.
+   * @default true
+   */
+  readonly logResult?: boolean
+}
+
+/**
  * Options for creating a tRPC client.
  *
  * @since 0.1.0
@@ -144,6 +171,21 @@ export interface CreateClientOptions {
    * Note: Stream/chat procedures are NOT batched - they use their own connections.
    */
   readonly batch?: BatchConfig
+
+  /**
+   * Configuration for logging RPC calls.
+   * Uses Effect.log for output, so logs will be captured by whatever Logger
+   * implementation is provided in the runtime.
+   *
+   * @example
+   * ```ts
+   * const client = Client.make<AppRouter>({
+   *   url: '/api/rpc',
+   *   logger: { enabled: true },
+   * })
+   * ```
+   */
+  readonly logger?: LoggerConfig
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,6 +450,20 @@ type RouterClient<R extends RouterRecord> = {
  */
 export interface TRPCClient<TRouter extends Router> {
   readonly procedures: RouterClient<TRouter["routes"]>
+  /**
+   * Dispose the client and clean up resources.
+   *
+   * This interrupts any pending batch flush operations and fails
+   * queued requests with a cancellation error. Call this when
+   * shutting down to ensure clean cleanup.
+   *
+   * @remarks
+   * Only needed if batching is enabled. If batching is disabled,
+   * this is a no-op.
+   *
+   * @since 0.1.0
+   */
+  readonly dispose: Effect.Effect<void, never, never>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,17 +544,36 @@ const RpcStreamErrorSchema = Schema.Struct({
 })
 
 /**
+ * Schema for keep-alive messages.
+ *
+ * Keep-alive messages are sent by the server every 15 seconds during stream/chat/subscription
+ * procedures to prevent proxies and load balancers from closing idle connections.
+ *
+ * These messages use a fixed format (not user data) and are filtered out on the client side -
+ * they never reach user code. The schema exists for explicit validation rather than relying
+ * on the "unknown message" fallback path.
+ *
+ * @internal
+ */
+const RpcKeepAliveSchema = Schema.Struct({
+  _tag: Schema.Literal("KeepAlive"),
+})
+
+/**
  * Union of all RPC response message types.
  */
 const RpcResponseMessageSchema = Schema.Union(RpcExitMessageSchema, RpcDefectMessageSchema)
 
 /**
  * Union of all stream message types.
+ *
+ * Includes keep-alive messages which are filtered out before reaching user code.
  */
 const RpcStreamMessageSchema = Schema.Union(
   RpcStreamPartSchema,
   RpcStreamEndSchema,
   RpcStreamErrorSchema,
+  RpcKeepAliveSchema,
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -554,6 +629,8 @@ interface BatchedRequest {
 interface BatcherState {
   readonly queue: ReadonlyArray<BatchedRequest>
   readonly scheduled: boolean
+  /** Active flush fibers for lifecycle management */
+  readonly activeFibers: ReadonlyArray<Fiber.RuntimeFiber<void, never>>
 }
 
 /**
@@ -625,7 +702,17 @@ const parseBatchResponseItem = (
     // Failure case
     const cause = item.exit.cause
     if (cause?._tag === "Fail") {
-      return Effect.fail(new RpcClientError({ message: "Request failed", cause: cause.error }))
+      // Preserve typed errors so Effect.catchTag works
+      const error = cause.error
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "_tag" in error &&
+        typeof (error as { _tag: unknown })._tag === "string"
+      ) {
+        return Effect.fail(error as RpcClientError)
+      }
+      return Effect.fail(new RpcClientError({ message: "Request failed", cause: error }))
     }
     if (cause?._tag === "Die") {
       const defectMsg = typeof cause.defect === "string" ? cause.defect : "Unexpected error"
@@ -664,12 +751,19 @@ const parseBatchResponseItem = (
  * **Error Handling:**
  * - If the batch request fails, all pending Deferreds fail with the same error
  * - Individual request failures within the batch are distributed to their Deferreds
+ *
+ * **Lifecycle Management:**
+ * - Active flush fibers are tracked in state
+ * - dispose() interrupts all pending fibers and fails queued requests
+ * - Errors in flush daemon are logged (not silently ignored)
  */
 interface RequestBatcher {
   readonly enqueue: (
     rpcName: string,
     input: unknown,
   ) => Effect.Effect<unknown, RpcError, HttpClient.HttpClient>
+  /** Dispose the batcher - interrupts active fibers and fails pending requests */
+  readonly dispose: Effect.Effect<void, never, never>
 }
 
 const createRequestBatcher = (
@@ -678,7 +772,7 @@ const createRequestBatcher = (
   config: Required<Pick<BatchConfig, "maxSize" | "windowMs">>,
 ): Effect.Effect<RequestBatcher, never, never> =>
   Effect.gen(function* () {
-    const stateRef = yield* Ref.make<BatcherState>({ queue: [], scheduled: false })
+    const stateRef = yield* Ref.make<BatcherState>({ queue: [], scheduled: false, activeFibers: [] })
 
     /**
      * Flush the batch - send queued requests and distribute responses.
@@ -688,6 +782,7 @@ const createRequestBatcher = (
       const batch = yield* Ref.getAndUpdate(stateRef, (state) => ({
         queue: state.queue.slice(config.maxSize),
         scheduled: state.queue.length > config.maxSize, // Reschedule if more requests remain
+        activeFibers: state.activeFibers,
       })).pipe(Effect.map((state) => state.queue.slice(0, config.maxSize)))
 
       if (batch.length === 0) {
@@ -790,20 +885,58 @@ const createRequestBatcher = (
     })
 
     /**
+     * Helper to remove a fiber from state when it completes.
+     */
+    const removeFiber = (fiber: Fiber.RuntimeFiber<void, never>): Effect.Effect<void> =>
+      Ref.update(stateRef, (s) => ({
+        ...s,
+        activeFibers: s.activeFibers.filter((f) => f !== fiber),
+      }))
+
+    /**
+     * Fork and track a flush operation with proper error handling.
+     * The fiber is tracked in state and removed when complete.
+     *
+     * Uses forkDaemon to ensure the flush runs to completion even if the
+     * parent fiber (from scheduleFlush or immediate flush) ends.
+     */
+    const forkTrackedFlush: Effect.Effect<void, never, HttpClient.HttpClient> = Effect.gen(
+      function* () {
+        const flushWithErrorHandling = flush.pipe(
+          // Log errors but don't propagate - individual request errors are handled via Deferred.fail
+          Effect.catchAllCause((cause) =>
+            Effect.logError("Batch flush daemon error").pipe(
+              Effect.annotateLogs({ cause: String(cause) }),
+              Effect.asVoid,
+            ),
+          ),
+        )
+
+        // Fork the flush operation as daemon to ensure it runs to completion
+        const fiber = yield* Effect.forkDaemon(flushWithErrorHandling)
+
+        // Track the fiber in state
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          activeFibers: [...s.activeFibers, fiber],
+        }))
+
+        // When fiber completes, remove it from tracking (fire-and-forget cleanup)
+        yield* Fiber.await(fiber).pipe(
+          Effect.flatMap(() => removeFiber(fiber)),
+          Effect.fork,
+          Effect.asVoid,
+        )
+      },
+    )
+
+    /**
      * Schedule a flush after the batch window expires.
+     * Uses daemon fork to ensure the flush runs even if the parent fiber ends.
      */
     const scheduleFlush: Effect.Effect<void, never, HttpClient.HttpClient> = Effect.sleep(
       Duration.millis(config.windowMs),
-    ).pipe(
-      Effect.flatMap(() => flush),
-      // Log flush errors but don't propagate to the scheduler
-      // Individual request errors are already handled via Deferred.fail
-      Effect.catchAll((error) =>
-        Effect.logWarning("Batch flush error (ignored)", { error }).pipe(Effect.asVoid),
-      ),
-      Effect.forkDaemon, // Run in background
-      Effect.asVoid,
-    )
+    ).pipe(Effect.flatMap(() => forkTrackedFlush))
 
     const enqueue = (
       rpcName: string,
@@ -831,23 +964,60 @@ const createRequestBatcher = (
             {
               queue: newQueue,
               scheduled: state.scheduled || shouldSchedule,
+              activeFibers: state.activeFibers,
             },
           ]
         })
 
         if (shouldFlush) {
-          // Max batch size reached - flush immediately
-          yield* flush.pipe(Effect.forkDaemon, Effect.asVoid)
+          // Max batch size reached - flush immediately with tracking
+          yield* forkTrackedFlush
         } else if (shouldSchedule) {
           // Schedule flush after window
-          yield* scheduleFlush
+          // Use forkDaemon so the scheduled flush survives even if the parent fiber ends
+          yield* Effect.forkDaemon(scheduleFlush)
         }
 
         // Wait for the response
         return yield* Deferred.await(deferred)
       })
 
-    return { enqueue }
+    /**
+     * Dispose the batcher - interrupt all active fibers and fail pending requests.
+     * Call this when shutting down the client to ensure clean cleanup.
+     */
+    const dispose: Effect.Effect<void, never, never> = Effect.gen(function* () {
+      // Atomically take all state
+      const finalState = yield* Ref.getAndSet(stateRef, {
+        queue: [],
+        scheduled: false,
+        activeFibers: [],
+      })
+
+      // Interrupt all active flush fibers
+      yield* Effect.forEach(
+        finalState.activeFibers,
+        (fiber) => Fiber.interrupt(fiber),
+        { discard: true, concurrency: "unbounded" },
+      )
+
+      // Fail all pending requests with a cancellation error
+      const cancelError = new RpcClientError({ message: "Batcher disposed - request cancelled" })
+      yield* Effect.forEach(
+        finalState.queue,
+        (req) => Deferred.fail(req.deferred, cancelError),
+        { discard: true },
+      )
+
+      yield* Effect.logDebug("Request batcher disposed").pipe(
+        Effect.annotateLogs({
+          interruptedFibers: finalState.activeFibers.length,
+          cancelledRequests: finalState.queue.length,
+        }),
+      )
+    })
+
+    return { enqueue, dispose }
   })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -923,9 +1093,18 @@ const parseRpcLine = <A>(line: string): Effect.Effect<Option.Option<A>, RpcClien
       // Failure case
       const cause = msg.exit.cause
       if (cause?._tag === "Fail") {
-        return yield* Effect.fail(
-          new RpcClientError({ message: "Request failed", cause: cause.error }),
-        )
+        // Preserve typed errors so Effect.catchTag works
+        // If the error has a _tag property, return it directly
+        const error = cause.error
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "_tag" in error &&
+          typeof (error as { _tag: unknown })._tag === "string"
+        ) {
+          return yield* Effect.fail(error as RpcClientError)
+        }
+        return yield* Effect.fail(new RpcClientError({ message: "Request failed", cause: error }))
       }
       if (cause?._tag === "Die") {
         const defectMsg = typeof cause.defect === "string" ? cause.defect : "Unexpected error"
@@ -965,12 +1144,62 @@ const parseRpcResponse = <A>(text: string): Effect.Effect<A, RpcClientError> =>
   })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RPC Logging
+// ─────────────────────────────────────────────────────────────────────────────
+
+let requestCounter = 0
+const nextRequestId = (): number => ++requestCounter
+
+/**
+ * Wrap an RPC effect with logging.
+ * Uses Effect.log so output is captured by whatever Logger is in the runtime.
+ */
+const withRpcLogging = <A, E, R>(
+  rpcName: string,
+  input: unknown,
+  effect: Effect.Effect<A, E, R>,
+  config: LoggerConfig,
+): Effect.Effect<A, E, R> => {
+  if (!config.enabled) {
+    return effect
+  }
+
+  const id = nextRequestId()
+
+  return Effect.gen(function* () {
+    const startTime = Date.now()
+
+    // Log start
+    if (config.logInput) {
+      yield* Effect.log(`>> rpc #${id} ${rpcName}`, { input })
+    } else {
+      yield* Effect.log(`>> rpc #${id} ${rpcName}`)
+    }
+
+    return yield* effect.pipe(
+      Effect.tap((result) => {
+        const elapsedMs = Date.now() - startTime
+        if (config.logResult) {
+          return Effect.log(`<< rpc #${id} ${rpcName}`, { elapsedMs, result })
+        }
+        return Effect.log(`<< rpc #${id} ${rpcName}`, { elapsedMs })
+      }),
+      Effect.tapError((error) => {
+        const elapsedMs = Date.now() - startTime
+        return Effect.log(`!! rpc #${id} ${rpcName}`, { elapsedMs, error })
+      }),
+    )
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RPC Effect Creation
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface RpcEffectOptions {
   readonly timeout?: number | undefined
   readonly retry?: RetryConfig | undefined
+  readonly logger?: LoggerConfig | undefined
 }
 
 /**
@@ -1042,7 +1271,12 @@ const createRpcEffect = <A>(
         )
       : withTimeout
 
-  return withRetry
+  // Apply logging if configured
+  const withLogging = options.logger?.enabled
+    ? withRpcLogging(rpcName, input, withRetry, options.logger)
+    : withRetry
+
+  return withLogging
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1051,13 +1285,192 @@ const createRpcEffect = <A>(
 
 type StreamError = RpcError
 
-// Internal stream message types for parsing NDJSON responses
+/**
+ * Internal tagged types for stream message parsing.
+ * These wrap the raw protocol messages to provide type-safe filtering.
+ */
 class StreamPart<A> extends Data.TaggedClass("StreamPart")<{ readonly value: A }> {}
 class StreamEnd extends Data.TaggedClass("StreamEnd")<NonNullable<unknown>> {}
 class StreamSkip extends Data.TaggedClass("StreamSkip")<NonNullable<unknown>> {}
 
-type _StreamMessage<A> = StreamPart<A> | StreamEnd | StreamSkip
+type StreamMessage<A> = StreamPart<A> | StreamEnd | StreamSkip
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Parsing Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse a raw JSON string into an object.
+ * Returns a descriptive error on parse failure.
+ */
+const parseStreamLineJson = (line: string): Effect.Effect<unknown, RpcClientError> =>
+  Effect.try({
+    try: () => JSON.parse(line),
+    catch: (cause) =>
+      new RpcClientError({
+        message: `Failed to parse stream line as JSON: ${line.slice(0, 100)}${line.length > 100 ? "..." : ""}`,
+        cause,
+      }),
+  })
+
+/**
+ * Decode raw JSON into a stream message schema.
+ * Unknown message types return Option.none (for forward compatibility).
+ */
+const decodeStreamMessage = (
+  rawJson: unknown,
+): Effect.Effect<Option.Option<typeof RpcStreamMessageSchema.Type>, never> =>
+  Schema.decodeUnknown(RpcStreamMessageSchema)(rawJson).pipe(Effect.option)
+
+/**
+ * Check if an error object has a _tag property (for typed error preservation).
+ */
+const isTaggedError = (error: unknown): error is { _tag: string } =>
+  typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
+
+/**
+ * Convert a decoded stream message to our internal StreamMessage type.
+ * Handles the various protocol message formats:
+ * - StreamPart/Part: Data chunks
+ * - StreamEnd/Complete: Stream completion
+ * - Error/Failure: Stream errors (preserves typed errors)
+ * - KeepAlive: Connection maintenance (skipped)
+ */
+const convertToStreamMessage = <A>(
+  msg: typeof RpcStreamMessageSchema.Type,
+): Effect.Effect<StreamMessage<A>, RpcClientError> => {
+  // Keep-alive messages are filtered out - they're only for connection maintenance
+  if (msg._tag === "KeepAlive") {
+    return Effect.succeed(new StreamSkip())
+  }
+
+  // Handle data parts
+  if (msg._tag === "StreamPart" || msg._tag === "Part") {
+    return Effect.succeed(new StreamPart({ value: msg.value as A }))
+  }
+
+  // Handle stream completion
+  if (msg._tag === "StreamEnd" || msg._tag === "Complete") {
+    return Effect.succeed(new StreamEnd())
+  }
+
+  // Handle errors - preserve typed errors for Effect.catchTag compatibility
+  if (msg._tag === "Error" || msg._tag === "Failure") {
+    const error = msg.error
+    if (isTaggedError(error)) {
+      // Preserve the original tagged error type
+      return Effect.fail(error as RpcClientError)
+    }
+    return Effect.fail(new RpcClientError({ message: "Stream error", cause: error }))
+  }
+
+  // Unknown message type (shouldn't happen due to schema validation)
+  return Effect.succeed(new StreamSkip())
+}
+
+/**
+ * Parse and validate a single NDJSON line from the stream.
+ *
+ * Uses a two-step approach:
+ * 1. Parse JSON (fails on syntax errors)
+ * 2. Validate against schema (unknown messages are skipped for forward compatibility)
+ */
+const parseStreamLine = <A>(line: string): Effect.Effect<StreamMessage<A>, RpcClientError> =>
+  Effect.gen(function* () {
+    const rawJson = yield* parseStreamLineJson(line)
+    const decoded = yield* decodeStreamMessage(rawJson)
+
+    if (Option.isNone(decoded)) {
+      // Unknown message type - skip for forward compatibility
+      return new StreamSkip()
+    }
+
+    return yield* convertToStreamMessage<A>(decoded.value)
+  })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Filtering Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Type guard: message is not StreamEnd (for takeWhile) */
+const isNotStreamEnd = <A>(msg: StreamMessage<A>): msg is StreamPart<A> | StreamSkip =>
+  msg._tag !== "StreamEnd"
+
+/** Type guard: message is StreamPart (for filter) */
+const isStreamPart = <A>(msg: StreamPart<A> | StreamSkip): msg is StreamPart<A> =>
+  msg._tag === "StreamPart"
+
+/** Check if a line is non-empty (after trimming whitespace) */
+const isNonEmptyLine = (line: string): boolean => line.trim().length > 0
+
+/** Extract the value from a StreamPart */
+const extractPartValue = <A>(part: StreamPart<A>): A => part.value
+
+/** Normalize stream errors to StreamError type */
+const normalizeStreamError = (error: unknown): StreamError => error as StreamError
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Effect Creation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create an HTTP request for a streaming RPC call.
+ */
+const createStreamRequest = (
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+): HttpClientRequest.HttpClientRequest =>
+  HttpClientRequest.post(url).pipe(
+    HttpClientRequest.setHeader("Content-Type", "application/x-ndjson"),
+    HttpClientRequest.setHeaders(headers),
+    HttpClientRequest.bodyText(body),
+  )
+
+/**
+ * Create an error stream for HTTP error responses.
+ */
+const createHttpErrorStream = <A>(status: number): Stream.Stream<A, StreamError, never> =>
+  Stream.fail(
+    new RpcResponseError({
+      message: `HTTP error: ${status}`,
+      status,
+    }),
+  )
+
+/**
+ * Transform a raw HTTP response stream into typed stream messages.
+ *
+ * Pipeline:
+ * 1. Decode bytes to text
+ * 2. Split into lines
+ * 3. Filter empty lines
+ * 4. Parse each line to StreamMessage
+ * 5. Take until StreamEnd
+ * 6. Filter to only StreamPart messages
+ * 7. Extract values
+ */
+const transformResponseStream = <A>(
+  responseStream: Stream.Stream<Uint8Array, HttpClientError.HttpClientError, never>,
+): Stream.Stream<A, StreamError, never> =>
+  responseStream.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.filter(isNonEmptyLine),
+    Stream.mapEffect(parseStreamLine<A>),
+    Stream.takeWhile(isNotStreamEnd),
+    Stream.filter(isStreamPart),
+    Stream.map(extractPartValue),
+    Stream.mapError(normalizeStreamError),
+  )
+
+/**
+ * Create a streaming RPC effect.
+ *
+ * This establishes an HTTP connection and returns a Stream that emits
+ * values as they arrive from the server. The stream completes when
+ * the server sends a StreamEnd message.
+ */
 const _createStreamEffect = <A>(
   url: string,
   rpcName: string,
@@ -1067,77 +1480,17 @@ const _createStreamEffect = <A>(
   Stream.unwrap(
     Effect.gen(function* () {
       const body = yield* createRpcRequestBody(rpcName, input)
-
-      const request = HttpClientRequest.post(url).pipe(
-        HttpClientRequest.setHeader("Content-Type", "application/x-ndjson"),
-        HttpClientRequest.setHeaders(headers),
-        HttpClientRequest.bodyText(body),
-      )
+      const request = createStreamRequest(url, body, headers)
 
       const client = yield* HttpClient.HttpClient
       const response = yield* client.execute(request)
 
+      // Handle HTTP-level errors before processing the stream
       if (response.status >= 400) {
-        return Stream.fail<StreamError>(
-          new RpcResponseError({
-            message: `HTTP error: ${response.status}`,
-            status: response.status,
-          }),
-        )
+        return createHttpErrorStream<A>(response.status)
       }
 
-      const stream: Stream.Stream<A, StreamError, never> = response.stream.pipe(
-        Stream.decodeText(),
-        Stream.splitLines,
-        Stream.filter((line) => line.trim().length > 0),
-        // Parse each line using two-step approach (see parseRpcLine for rationale)
-        Stream.mapEffect((line) =>
-          Effect.gen(function* () {
-            // Step 1: Parse JSON (may fail on syntax errors)
-             
-            const rawJson = yield* Effect.try({
-               
-              try: () => JSON.parse(line),
-              catch: (e) =>
-                new RpcClientError({ message: `Failed to parse stream line: ${line}`, cause: e }),
-            })
-
-            // Step 2: Validate against schema (unknown messages become Option.none)
-            const decodeResult = yield* Schema.decodeUnknown(RpcStreamMessageSchema)(rawJson).pipe(
-              Effect.option,
-            )
-
-            if (Option.isNone(decodeResult)) {
-              // Unknown message type - skip it
-              return new StreamSkip()
-            }
-
-            const msg = decodeResult.value
-
-            if (msg._tag === "StreamPart" || msg._tag === "Part") {
-              return new StreamPart({ value: msg.value as A })
-            }
-            if (msg._tag === "StreamEnd" || msg._tag === "Complete") {
-              return new StreamEnd()
-            }
-            if (msg._tag === "Error" || msg._tag === "Failure") {
-              return yield* Effect.fail(
-                new RpcClientError({ message: "Stream error", cause: msg.error }),
-              )
-            }
-
-            return new StreamSkip()
-          }),
-        ),
-        Stream.takeWhile((msg): msg is StreamPart<A> | StreamSkip => msg._tag !== "StreamEnd"),
-        Stream.filter((msg): msg is StreamPart<A> => msg._tag === "StreamPart"),
-        Stream.map((msg) => msg.value),
-        // Type annotation for error - helps TypeScript infer the StreamError union
-        // Without this, the error type would be inferred as a complex union
-        Stream.mapError((e): StreamError => e),
-      )
-
-      return stream
+      return transformResponseStream<A>(response.stream)
     }),
   )
 
@@ -1151,7 +1504,7 @@ const _createStreamEffect = <A>(
 const makeClientImpl = <TRouter extends Router>(
   options: CreateClientOptions,
 ): TRPCClient<TRouter> => {
-  const { url, headers: headerOption, timeout, retry, batch } = options
+  const { url, headers: headerOption, timeout, retry, batch, logger } = options
 
   const getHeaders = (): Record<string, string> => {
     if (!headerOption) return {}
@@ -1162,6 +1515,7 @@ const makeClientImpl = <TRouter extends Router>(
   const rpcOptions: RpcEffectOptions = {
     timeout,
     retry,
+    logger,
   }
 
   // Batching configuration with defaults
@@ -1171,44 +1525,54 @@ const makeClientImpl = <TRouter extends Router>(
     windowMs: batch?.windowMs ?? 10,
   }
 
-  // Lazy batcher initialization using memoization
-  // The batcher is created once on first use and cached for subsequent calls
+  // Lazy batcher initialization using semaphore for thread-safe memoization
   //
-  // NOTE: We use a mutable reference here because:
-  // 1. Client.make() is a synchronous factory function (returns TRPCClient, not Effect<TRPCClient>)
-  // 2. Effect.cached returns Effect<Effect<A>>, requiring the outer effect to be run first
-  // 3. We can't run effects in a synchronous context without Effect.runSync (which has its own issues)
+  // We use a semaphore (mutex) to ensure only one fiber creates the batcher.
+  // This prevents race conditions where multiple concurrent requests could
+  // create separate batcher instances.
   //
-  // This is a pragmatic compromise - the batcher itself uses proper Effect patterns internally.
+  // The pattern is "double-checked locking":
+  // 1. Fast path: check if batcher exists (outside lock)
+  // 2. If not, acquire lock
+  // 3. Re-check after acquiring lock (another fiber might have created it)
+  // 4. Create batcher if still needed
+  //
+  // NOTE: We use a mutable reference here because Client.make() is synchronous.
   // A future API could make Client.make() return Effect<TRPCClient> for full Effect-idiomatic usage.
   let batcherInstance: RequestBatcher | null = null
-  let batcherCreating: Effect.Effect<RequestBatcher, never, never> | null = null
+  const initMutex = Effect.unsafeMakeSemaphore(1)
 
   /**
    * Get the request batcher (created lazily on first use).
    *
    * @remarks
-   * Uses memoization to ensure the batcher is created once and reused.
-   * The first call creates the batcher, subsequent calls return the cached instance.
+   * Uses semaphore-based memoization to ensure the batcher is created exactly once,
+   * even when multiple requests arrive concurrently.
    */
   const getBatcher: Effect.Effect<RequestBatcher, never, never> = Effect.suspend(() => {
-    // Fast path: already created
+    // Fast path: already created (no lock needed)
     if (batcherInstance !== null) {
       return Effect.succeed(batcherInstance)
     }
 
-    // Slow path: create or wait for creation
-    if (batcherCreating === null) {
-      batcherCreating = createRequestBatcher(url, getHeaders, batchConfig).pipe(
-        Effect.tap((batcher) =>
-          Effect.sync(() => {
-            batcherInstance = batcher
-          }),
-        ),
-      )
-    }
+    // Slow path: acquire lock and check/create atomically
+    return initMutex.withPermits(1)(
+      Effect.suspend(() => {
+        // Re-check after acquiring lock (double-checked locking)
+        if (batcherInstance !== null) {
+          return Effect.succeed(batcherInstance)
+        }
 
-    return batcherCreating
+        // Create the batcher and cache it
+        return createRequestBatcher(url, getHeaders, batchConfig).pipe(
+          Effect.tap((batcher) =>
+            Effect.sync(() => {
+              batcherInstance = batcher
+            }),
+          ),
+        )
+      }),
+    )
   })
 
   /**
@@ -1226,7 +1590,6 @@ const makeClientImpl = <TRouter extends Router>(
    * when we reach a procedure invocation (function call).
    */
   const createRecursiveProxy = (pathSegments: string[] = []): any => {
-     
     return new Proxy(() => {}, {
       // Handle property access - either navigate deeper or return a procedure caller
       get(_target, prop: string) {
@@ -1271,6 +1634,11 @@ const makeClientImpl = <TRouter extends Router>(
               }),
             )
           }
+
+          // Apply logging if configured
+          if (rpcOptions.logger?.enabled) {
+            effect = withRpcLogging(rpcName, input, effect, rpcOptions.logger)
+          }
         } else {
           // Use direct request (existing behavior)
           effect = createRpcEffect(url, rpcName, input, getHeaders(), rpcOptions)
@@ -1285,8 +1653,20 @@ const makeClientImpl = <TRouter extends Router>(
     return createRecursiveProxy() as RouterClient<TRouter["routes"]>
   }
 
+  /**
+   * Dispose the client - cleanup batcher resources if batching is enabled.
+   */
+  const dispose: Effect.Effect<void, never, never> = Effect.gen(function* () {
+    if (batcherInstance !== null) {
+      yield* batcherInstance.dispose
+    }
+    // Reset the cached instance so a new batcher can be created if needed
+    batcherInstance = null
+  })
+
   return {
     procedures: createProceduresProxy(),
+    dispose,
   }
 }
 

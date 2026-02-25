@@ -53,6 +53,7 @@ import {
   handleMessage,
   cleanupConnection,
   initialConnectionState,
+  makeCleanupGuard,
   WebSocketCodec,
   ConnectionRegistry,
   type ConnectionStateData,
@@ -173,6 +174,10 @@ export interface WebSocketLike {
   on(event: "close", listener: (code: number, reason: Buffer) => void): void
   on(event: "error", listener: (error: Error) => void): void
   on(event: "pong", listener: () => void): void
+  off(event: "message", listener: (data: Buffer | ArrayBuffer | string) => void): void
+  off(event: "close", listener: (code: number, reason: Buffer) => void): void
+  off(event: "error", listener: (error: Error) => void): void
+  off(event: "pong", listener: () => void): void
   ping(data?: Buffer | string): void
 }
 
@@ -304,6 +309,9 @@ export function createWebSocketHandler<TRouter extends Router>(
       // Connection state using Ref for immutability
       const stateRef = yield* Ref.make<ConnectionStateData>(initialConnectionState)
 
+      // Cleanup guard to prevent race conditions between message handling and cleanup
+      const cleanupGuard = yield* makeCleanupGuard
+
       // Create send function (Node.js specific - uses callback-based ws.send)
       const send = (message: FromServerMessage): Effect.Effect<void> =>
         Effect.gen(function* () {
@@ -363,6 +371,7 @@ export function createWebSocketHandler<TRouter extends Router>(
             updateState: (newState) => Ref.set(stateRef, newState),
             send,
             createConnection,
+            cleanupGuard,
           })
         })
 
@@ -422,9 +431,10 @@ export function createWebSocketHandler<TRouter extends Router>(
         }).pipe(Effect.ignore),
       )
 
-      // Set up WebSocket event handlers
+      // Set up WebSocket event handlers with proper cleanup
+      // Track handlers for explicit removal to prevent memory leaks
       yield* Effect.async<void>((resume) => {
-        ws.on("message", (data) => {
+        const handleMessage = (data: unknown) => {
           // Update last activity
           managedRuntime.runFork(updateLastActivity)
           
@@ -440,13 +450,13 @@ export function createWebSocketHandler<TRouter extends Router>(
             dataStr = Buffer.concat(data as Buffer[]).toString("utf8")
           }
           managedRuntime.runFork(onMessage(dataStr))
-        })
+        }
 
-        ws.on("pong", () => {
+        const handlePong = () => {
           managedRuntime.runFork(updateLastActivity)
-        })
+        }
 
-        ws.on("close", () => {
+        const handleClose = () => {
           // Interrupt all connection fibers
           managedRuntime.runFork(
             Effect.gen(function* () {
@@ -455,14 +465,18 @@ export function createWebSocketHandler<TRouter extends Router>(
               yield* Fiber.interrupt(authTimeoutFiber)
               const state = yield* Ref.get(stateRef)
               if (state.clientId) {
-                yield* cleanupConnection(state.clientId, "Connection closed")
+                yield* cleanupConnection({
+                  clientId: state.clientId,
+                  reason: "Connection closed",
+                  cleanupGuard,
+                })
               }
             }),
           )
           resume(Effect.void)
-        })
+        }
 
-        ws.on("error", () => {
+        const handleError = () => {
           managedRuntime.runFork(
             Effect.gen(function* () {
               yield* Fiber.interrupt(heartbeatFiber)
@@ -470,11 +484,30 @@ export function createWebSocketHandler<TRouter extends Router>(
               yield* Fiber.interrupt(authTimeoutFiber)
               const state = yield* Ref.get(stateRef)
               if (state.clientId) {
-                yield* cleanupConnection(state.clientId, "Connection error")
+                yield* cleanupConnection({
+                  clientId: state.clientId,
+                  reason: "Connection error",
+                  cleanupGuard,
+                })
               }
             }),
           )
           resume(Effect.void)
+        }
+
+        // Register all handlers
+        ws.on("message", handleMessage)
+        ws.on("pong", handlePong)
+        ws.on("close", handleClose)
+        ws.on("error", handleError)
+
+        // Return cleanup function to remove handlers on cancellation
+        // This prevents memory leaks if the Effect is interrupted
+        return Effect.sync(() => {
+          ws.off("message", handleMessage)
+          ws.off("pong", handlePong)
+          ws.off("close", handleClose)
+          ws.off("error", handleError)
         })
       })
     })

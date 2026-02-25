@@ -16,6 +16,7 @@ import * as Schema from "effect/Schema"
 import type * as HttpClient from "@effect/platform/HttpClient"
 import { NodeHttpClient } from "@effect/platform-node"
 import { createServer, type Server } from "node:http"
+import type { AddressInfo } from "node:net"
 
 import { procedure, procedures, Router } from "../index.js"
 import { Client } from "../core/client.js"
@@ -107,10 +108,6 @@ describe("Integration Tests", () => {
     userStore = []
     nextId = 1
 
-    // Find an available port
-    const port = 3456 + Math.floor(Math.random() * 1000)
-    serverUrl = `http://localhost:${port}/rpc`
-
     // Create handlers layer using the public API
     const UserHandlersLive = createMockUserHandlers()
 
@@ -139,9 +136,12 @@ describe("Integration Tests", () => {
       })()
     })
 
-    // Start server
+    // Start server with OS-assigned port (port 0)
     await new Promise<void>((resolve) => {
-      httpServer.listen(port, () => {
+      httpServer.listen(0, () => {
+        const address = httpServer.address() as AddressInfo
+        const port = address.port
+        serverUrl = `http://localhost:${port}/rpc`
         console.log(`Test server running on port ${port}`)
         resolve()
       })

@@ -21,7 +21,11 @@
 
 import type * as Layer from "effect/Layer"
 import type { Router } from "../core/router.js"
-import { createRpcWebHandler } from "../shared/index.js"
+import {
+  type CorsOptions,
+  buildCorsHeaders,
+  createRpcWebHandler,
+} from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -61,7 +65,22 @@ export interface CreateRouteHandlerOptions<TRouter extends Router, R> {
    * @default '@effect-trpc'
    */
   readonly spanPrefix?: string
+
+  /**
+   * Enable CORS headers.
+   * Pass `true` for defaults or a `CorsOptions` object to customize.
+   *
+   * When enabled:
+   * - OPTIONS preflight requests return 204 with CORS headers
+   * - All responses include CORS headers
+   *
+   * @default false
+   */
+  readonly cors?: boolean | CorsOptions
 }
+
+// Re-export CorsOptions for convenience
+export type { CorsOptions }
 
 export interface RouteHandler {
   (request: Request): Promise<Response>
@@ -115,14 +134,43 @@ export interface RouteHandlers {
 export function createRouteHandler<TRouter extends Router, R>(
   options: CreateRouteHandlerOptions<TRouter, R>,
 ): RouteHandlers {
-  const { router, handlers, disableTracing, spanPrefix } = options
+  const { router, handlers, disableTracing, spanPrefix, cors } = options
 
   // Create the web handler using shared utility
   const webHandler = createRpcWebHandler({ router, handlers, disableTracing, spanPrefix })
 
+  // Build CORS headers if enabled
+  const corsHeaders = cors ? buildCorsHeaders(cors === true ? {} : cors) : null
+
+  // Create handler with CORS support
+  const handleRequest = async (request: Request): Promise<Response> => {
+    // Handle preflight for CORS
+    if (corsHeaders && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders })
+    }
+
+    // Handle RPC request
+    const response = await webHandler.handler(request)
+
+    // Add CORS headers if enabled
+    if (corsHeaders) {
+      const headers = new Headers(response.headers)
+      for (const [key, value] of Object.entries(corsHeaders)) {
+        headers.set(key, value)
+      }
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      })
+    }
+
+    return response
+  }
+
   return {
-    GET: webHandler.handler,
-    POST: webHandler.handler,
+    GET: handleRequest,
+    POST: handleRequest,
     dispose: webHandler.dispose,
   }
 }
