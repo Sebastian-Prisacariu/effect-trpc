@@ -83,6 +83,7 @@ export { AtomResult as Result }
 export const toQueryResult = <A, E>(
   result: AtomResult.Result<A, E>,
   previousError: E | null = null,
+  refetch: () => void = () => {},
 ): QueryResult<A, E> => {
   const dataOption = AtomResult.value(result)
   const errorOption = AtomResult.error(result)
@@ -98,6 +99,7 @@ export const toQueryResult = <A, E>(
     isSuccess: AtomResult.isSuccess(result) && !result.waiting,
     isRefetching: hasData && result.waiting,
     result,
+    refetch,
   }
 }
 
@@ -196,6 +198,8 @@ export interface QueryResult<A, E = unknown> {
   readonly isRefetching: boolean
   /** The raw effect-atom Result for builder pattern */
   readonly result: AtomResult.Result<A, E>
+  /** Manually trigger a refetch */
+  readonly refetch: () => void
 }
 
 /**
