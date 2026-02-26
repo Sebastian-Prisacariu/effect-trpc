@@ -199,6 +199,81 @@ export function UserList() {
 }
 ```
 
+## Runtime-Injected API (V1)
+
+For complex apps that need a shared runtime across React hooks and vanilla Effect code, use the runtime-injected pattern:
+
+### 1. Create App Runtime
+
+```typescript
+// src/lib/runtime.ts
+import { ManagedRuntime, Layer } from "effect"
+import { Client } from "effect-trpc/react"
+
+// Add TRPC client + your domain services
+const AppLive = Layer.mergeAll(
+  Client.HttpLive("/api/trpc"),
+  // UserServiceLive,
+  // AuthServiceLive,
+)
+
+export const appRuntime = ManagedRuntime.make(AppLive)
+```
+
+### 2. Create Typed Hooks
+
+```typescript
+// src/lib/trpc.ts
+import { createTRPCHooks } from "effect-trpc/react"
+import { appRouter } from "~/server/trpc/router"
+
+export const trpc = createTRPCHooks({ router: appRouter })
+```
+
+### 3. Setup Providers
+
+```tsx
+// src/app/providers.tsx
+'use client'
+
+import { EffectTRPCProvider } from "effect-trpc/react"
+import { appRuntime } from "~/lib/runtime"
+import { trpc } from "~/lib/trpc"
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <EffectTRPCProvider runtime={appRuntime}>
+      <trpc.Provider>
+        {children}
+      </trpc.Provider>
+    </EffectTRPCProvider>
+  )
+}
+```
+
+### 4. Use in Components
+
+```tsx
+// src/components/UserList.tsx
+'use client'
+
+import { trpc } from "~/lib/trpc"
+
+export function UserList() {
+  const { data, isLoading } = trpc.procedures.user.list.useQuery()
+  
+  if (isLoading) return <div>Loading...</div>
+  return <ul>{data?.map(u => <li key={u.id}>{u.name}</li>)}</ul>
+}
+```
+
+### Benefits
+
+- **Shared runtime** - Same `appRuntime` for React and vanilla Effect code
+- **Better testability** - Swap the runtime in tests
+- **Domain services** - Add your own services to the app layer
+- **SSR unified** - Use `createInMemoryClientLive` for SSR with the same pattern
+
 ## Procedure Types
 
 ### Query
