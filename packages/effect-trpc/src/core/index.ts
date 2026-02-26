@@ -108,38 +108,49 @@ export type {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export {
+  // Builder function
   Middleware,
-  middlewareWithProvides,
-  composeMiddleware,
-  loggingMiddleware,
-  timingMiddleware,
-  timeoutMiddleware,
-  rateLimitMiddleware,
-  authMiddleware,
-  requirePermission,
+  // Type guards
+  isMiddlewareDefinition,
+  MiddlewareDefinitionTypeId,
+  // Built-in middleware definitions
+  LoggingMiddleware,
+  TimingMiddleware,
+  AuthMiddleware,
+  RequirePermissionMiddleware,
+  RateLimitMiddleware,
+  // Built-in middleware layers
+  LoggingMiddlewareLive,
+  TimingMiddlewareLive,
+  createAuthMiddlewareLive,
+  createRequirePermissionMiddlewareLive,
+  createRateLimitMiddlewareLive,
+  // Errors
   MiddlewareTimeoutError,
   MiddlewareRateLimitError,
   MiddlewareAuthError,
   MiddlewarePermissionError,
+  // Context utilities
   MiddlewareContextRef,
   getMiddlewareContext,
   requireMiddlewareContext,
-  // Service-providing middleware (v0.2.0)
-  ServiceMiddlewareTypeId,
-  isServiceMiddleware,
-  serviceMiddleware,
 } from "./middleware.js"
 
 export type {
+  // Context types
   BaseContext,
   AuthenticatedContext,
-  MiddlewareFn,
-  Middleware as MiddlewareType,
-  MiddlewareProvides,
+  // Middleware types
+  MiddlewareDefinition,
+  MiddlewareBuilder,
+  MiddlewareService,
+  // Type extraction
+  MiddlewareInput,
+  MiddlewareError,
+  MiddlewareContextOut,
+  MiddlewareContextIn,
+  // Options
   RateLimitOptions,
-  // Service-providing middleware types (v0.2.0)
-  ServiceMiddleware,
-  ServiceMiddlewareService,
 } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────

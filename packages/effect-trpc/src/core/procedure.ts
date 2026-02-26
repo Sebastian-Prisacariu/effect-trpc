@@ -6,7 +6,7 @@
  */
 
 import type * as Schema from "effect/Schema"
-import type { Middleware, BaseContext } from "./middleware.js"
+import type { MiddlewareDefinition, BaseContext } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -102,7 +102,7 @@ export interface ProcedureDefinition<
   readonly invalidates: ReadonlyArray<string>
   readonly invalidatesTags: ReadonlyArray<string>
   /** Middleware chain - context type is tracked via Ctx, input type is accumulated via InputExt */
-  readonly middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
+  readonly middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
   /**
    * Phantom type to carry context type information.
    * Never actually set at runtime - only exists for type inference.
@@ -347,9 +347,9 @@ export interface ProcedureBuilder<
    * // Layer requires: TokenService (Database is provided by middleware)
    * ```
    */
-  use<CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
-    middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
-  ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>
+  use<CtxOut extends BaseContext, InputExt, E2>(
+    middleware: MiddlewareDefinition<Ctx, CtxOut, InputExt, E2>,
+  ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R, Provides>
 
   /**
    * Define the input schema for this procedure.
@@ -479,7 +479,7 @@ interface BuilderState {
   tags: ReadonlyArray<string>
   invalidates: ReadonlyArray<string>
   invalidatesTags: ReadonlyArray<string>
-  middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
+  middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 }
 
 /**
@@ -544,10 +544,10 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
     responseDescription: (text: string) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, responseDescription: text }),
     deprecated: () => createBuilder<I, A, E, Ctx, R, Provides>({ ...state, deprecated: true }),
-    use: <CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
-      middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
+    use: <CtxOut extends BaseContext, InputExt, E2>(
+      middleware: MiddlewareDefinition<Ctx, CtxOut, InputExt, E2>,
     ) =>
-      createBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>({
+      createBuilder<I & InputExt, A, E | E2, CtxOut, R, Provides>({
         ...state,
         middlewares: [...state.middlewares, middleware],
       }),

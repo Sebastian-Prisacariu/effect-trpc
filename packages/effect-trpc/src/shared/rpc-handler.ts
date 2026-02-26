@@ -12,12 +12,12 @@ import type { Router, RouterRecord } from "../core/router.js"
 import { isRouter, isProceduresGroup } from "../core/router.js"
 import type { ProceduresGroup, ProcedureRecord, ProceduresService } from "../core/procedures.js"
 import { convertHandlers } from "../core/rpc-bridge.js"
-import type { Middleware, ServiceMiddleware } from "../core/middleware.js"
+import type { MiddlewareDefinition } from "../core/middleware.js"
 
 /**
- * Union type for any middleware (regular or service-providing).
+ * Union type for any middleware definition.
  */
-type AnyMiddleware = Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
+type AnyMiddleware = MiddlewareDefinition<any, any, any, any>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types

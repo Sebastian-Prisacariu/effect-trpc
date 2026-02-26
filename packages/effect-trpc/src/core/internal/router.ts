@@ -14,7 +14,7 @@ import { RpcServer, RpcSerialization } from "@effect/rpc"
 import type { ProceduresGroup, ProcedureRecord } from "../procedures.js"
 import type { ProcedureDefinition } from "../procedure.js"
 import { proceduresGroupToRpcGroup, type AnyRpc, type ProceduresToRpcs } from "../rpc-bridge.js"
-import type { Middleware, ServiceMiddleware } from "../middleware.js"
+import type { MiddlewareDefinition } from "../middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type ID
@@ -214,22 +214,14 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
 
   /**
    * Router-level middlewares applied to all procedures in this router.
-   * Includes both regular middleware and service-providing middleware.
    */
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 
   /**
    * Apply middleware to all procedures in this router.
    * Returns a new Router with the middleware attached.
-   *
-   * Supports both regular middleware and service-providing middleware.
-   * Service middleware properly provides services to both Effect and Stream handlers.
    */
-  use(
-    middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-  ): Router<Routes>
+  use(middleware: MiddlewareDefinition<any, any, any, any>): Router<Routes>
 
   /**
    * Create a Layer that serves this router over HTTP.
@@ -561,9 +553,7 @@ function flattenRoutes<Routes extends RouterRecord>(
  * @internal
  */
 export interface MakeOptions {
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 }
 
 /**
@@ -607,9 +597,7 @@ export const make = <Routes extends RouterRecord>(
     rpcGroup: combinedGroup,
     ...(options?.middlewares ? { middlewares: options.middlewares } : {}),
 
-    use: (
-      middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-    ) => {
+    use: (middleware: MiddlewareDefinition<any, any, any, any>) => {
       const existingMiddlewares = options?.middlewares ?? []
       return make(routes, { middlewares: [...existingMiddlewares, middleware] })
     },

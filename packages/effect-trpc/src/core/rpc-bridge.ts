@@ -24,8 +24,8 @@ import type {
   EffectiveHandlerRequirements,
   ProceduresMiddlewareR,
 } from "./procedures.js"
-import type { BaseContext, Middleware, ServiceMiddleware } from "./middleware.js"
-import { MiddlewareContextRef, isServiceMiddleware } from "./middleware.js"
+import type { BaseContext, MiddlewareDefinition } from "./middleware.js"
+import { MiddlewareContextRef } from "./middleware.js"
 import * as FiberRef from "effect/FiberRef"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -489,12 +489,22 @@ type Handler = (ctx: any, input: any) => Effect.Effect<any, any, any>
  * @overload Effect procedures return Effect.Effect
  */
 /**
- * Type alias for any middleware (regular or service-providing).
+ * Type alias for any middleware definition.
+ *
+ * NOTE: The new middleware system uses MiddlewareDefinition as a contract.
+ * Middleware execution is handled by providing MiddlewareService layers
+ * and accessing them at runtime. This is a work-in-progress.
  */
-type AnyMiddleware =
-  | Middleware<any, any, any, any, any>
-  | ServiceMiddleware<any, any, any, any, any>
+type AnyMiddleware = MiddlewareDefinition<any, any, any, any>
 
+/**
+ * Apply middleware chain to a handler.
+ *
+ * TODO: Middleware execution needs to be redesigned for the new MiddlewareDefinition pattern.
+ * The new pattern separates definition (contract) from implementation (Layer).
+ * For now, middleware definitions are tracked at the type level but not executed at runtime.
+ * Middleware implementation will be addressed in a follow-up PR.
+ */
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
@@ -523,34 +533,18 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
 ): MiddlewareResult<A, E, R>
 
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
-  middlewares: ReadonlyArray<
-    Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >,
+  _middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
   options: RpcHandlerOptions,
   payload: I,
   isStream: boolean,
 ): MiddlewareResult<A, E, R> {
-  // Internal implementation uses `any` for the dynamic middleware chain,
-  // but the generic signature ensures type safety at call sites.
-  // The runtime correctly:
-  // 1. Starts with BaseContext
-  // 2. Each middleware transforms context → Ctx
-  // 3. Handler receives Ctx and returns Effect<A, E, R>
-
-  // Separate service middleware from regular middleware
-  // Service middleware needs special handling for streams
-  const serviceMiddlewares: ServiceMiddleware<any, any, any, any, any>[] = []
-  const regularMiddlewares: Middleware<any, any, any, any, any>[] = []
-
-  for (const m of middlewares) {
-    if (isServiceMiddleware(m)) {
-      serviceMiddlewares.push(m)
-    } else {
-      regularMiddlewares.push(m)
-    }
-  }
+  // TODO: Middleware execution needs to be redesigned for the new MiddlewareDefinition pattern.
+  // The old pattern used middleware.fn(ctx, input, next) callbacks.
+  // The new pattern separates definition from implementation via Layers.
+  // For now, we skip middleware execution and call the handler directly with BaseContext.
+  // Middleware will be addressed in a follow-up PR.
 
   type AnyHandler = (ctx: any, input: any) => any
   const anyHandler = handler as AnyHandler
@@ -559,7 +553,7 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
     yield* Effect.annotateCurrentSpan({
       "trpc.procedure": procedureName,
       "trpc.clientId": options.clientId,
-      "trpc.hasMiddleware": middlewares.length > 0,
+      "trpc.hasMiddleware": _middlewares.length > 0,
     })
 
     const abortController = new AbortController()
@@ -574,120 +568,24 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
     return { baseContext, abortController }
   })
 
-  // Helper to create services and transform context
-  // Returns Effect<{ ctx: transformedContext, services: Map<Tag, service> }>
-  const prepareServicesAndContext = (baseCtx: any, input: I) =>
-    Effect.gen(function* () {
-      let ctx = baseCtx
-      const services: Array<{ tag: any; value: any }> = []
-
-      // Process service middleware in order (passes input to make)
-      for (const sm of serviceMiddlewares) {
-        const service = yield* sm.make(ctx, input)
-        services.push({ tag: sm.provides, value: service })
-
-        // Transform context if the middleware defines it
-        if (sm.transformContext) {
-          ctx = sm.transformContext(ctx, service)
-        }
-      }
-
-      return { ctx, services }
-    })
-
   if (isStream) {
-    // For streams, we need to:
-    // 1. Prepare services (evaluate make functions)
-    // 2. Transform context
-    // 3. Run regular middleware chain
-    // 4. Apply services using Stream.provideService (NOT Effect.provideService)
+    // Stream handler - create base context and call handler directly
     const stream = Stream.unwrap(
-      Effect.flatMap(setupContext, ({ baseContext, abortController }) =>
-        Effect.map(prepareServicesAndContext(baseContext, payload), ({ ctx, services }) => {
-          // Build the regular middleware chain
-          type ChainFn = (ctx: any) => any
-
-          const finalStep: ChainFn = (finalCtx) =>
-            FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-              Effect.map(() => anyHandler(finalCtx, payload)),
-            )
-
-          let resultStream: Stream.Stream<unknown, unknown, unknown>
-
-          if (regularMiddlewares.length === 0) {
-            // No regular middleware - just run the handler
-            resultStream = Stream.unwrap(
-              FiberRef.set(MiddlewareContextRef, ctx).pipe(
-                Effect.map(() => anyHandler(ctx, payload)),
-              ),
-            )
-          } else {
-            // Build chain with regular middleware (passes input to each)
-            const chain = Array.reduceRight(
-              regularMiddlewares,
-              finalStep,
-              (nextFn, middleware): ChainFn =>
-                (c) =>
-                  middleware.fn(c, payload, nextFn),
-            )
-
-            const chainEffect = Effect.onInterrupt(chain(ctx), () =>
-              Effect.sync(() => abortController.abort()),
-            ) as unknown as Effect.Effect<
-              Stream.Stream<unknown, unknown, unknown>,
-              unknown,
-              unknown
-            >
-
-            resultStream = Stream.unwrap(chainEffect)
-          }
-
-          // Apply services using Stream.provideService
-          // This ensures services are available to stream's internal effects
-          for (const { tag, value } of services) {
-            resultStream = Stream.provideService(resultStream, tag, value)
-          }
-
-          return resultStream
-        }),
+      Effect.flatMap(setupContext, ({ baseContext }) =>
+        FiberRef.set(MiddlewareContextRef, baseContext).pipe(
+          Effect.map(() => anyHandler(baseContext, payload)),
+        ),
       ),
     ).pipe(Stream.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
     return stream as Stream.Stream<A, E, R>
   }
 
-  // Effect (Mutation/Query) logic
+  // Effect (Mutation/Query) logic - create base context and call handler directly
   const effect = Effect.gen(function* () {
-    const { baseContext, abortController } = yield* setupContext
-    const { ctx, services } = yield* prepareServicesAndContext(baseContext, payload)
-
-    let result: Effect.Effect<unknown, unknown, unknown>
-
-    if (regularMiddlewares.length === 0) {
-      yield* FiberRef.set(MiddlewareContextRef, ctx)
-      result = anyHandler(ctx, payload)
-    } else {
-      const finalStep = (finalCtx: any) =>
-        FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-          Effect.flatMap(() => anyHandler(finalCtx, payload)),
-        )
-
-      // Build chain with regular middleware (passes input to each)
-      const chain = Array.reduceRight(
-        regularMiddlewares,
-        finalStep,
-        (nextFn, middleware) => (c: any) => middleware.fn(c, payload, nextFn),
-      )
-
-      result = Effect.onInterrupt(chain(ctx), () => Effect.sync(() => abortController.abort()))
-    }
-
-    // Apply services using Effect.provideService
-    for (const { tag, value } of services) {
-      result = Effect.provideService(result, tag, value)
-    }
-
-    return yield* result
+    const { baseContext } = yield* setupContext
+    yield* FiberRef.set(MiddlewareContextRef, baseContext)
+    return yield* anyHandler(baseContext, payload)
   }).pipe(Effect.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
   return effect as Effect.Effect<A, E, R>
