@@ -197,6 +197,43 @@ export {
 } from "./hooks/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Runtime Injection (V1 API)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  EffectTRPCProviderProps,
+} from "./provider.js"
+
+export {
+  EffectTRPCProvider,
+} from "./provider.js"
+
+export type {
+  TRPCRuntime,
+  TRPCRuntimeServices,
+} from "./runtime-context.js"
+
+export {
+  useRuntime,
+  useHasRuntime,
+} from "./runtime-context.js"
+
+// Re-export Client service for runtime composition
+export { Client } from "../core/client/index.js"
+export type { ClientShape } from "../core/client/index.js"
+export type { RouterClient } from "../core/client/proxy.js"
+
+// Hooks factory for runtime-injected pattern
+export type {
+  CreateTRPCHooksOptions,
+  TRPCHooksProviderProps,
+  TRPCHooks,
+  RouterHooks,
+} from "./hooks-factory.js"
+
+export { createTRPCHooks } from "./hooks-factory.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Server Client (SSR/RSC)
 // ─────────────────────────────────────────────────────────────────────────────
 //
