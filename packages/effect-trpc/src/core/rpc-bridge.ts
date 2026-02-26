@@ -24,8 +24,8 @@ import type {
   EffectiveHandlerRequirements,
   ProceduresMiddlewareR,
 } from "./procedures.js"
-import type { BaseContext, Middleware, ServiceMiddleware } from "./middleware.js"
-import { MiddlewareContextRef, isServiceMiddleware } from "./middleware.js"
+import type { BaseContext, MiddlewareDefinition } from "./middleware.js"
+import { MiddlewareContextRef } from "./middleware.js"
 import * as FiberRef from "effect/FiberRef"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,10 +55,17 @@ export class RpcBridgeValidationError extends Data.TaggedError("RpcBridgeValidat
   readonly module: string
   readonly method: string
   readonly reason: string
-  readonly groupName?: string
+  /** Internal namespace for service identification */
+  readonly groupNamespace?: string
+  /** Router key that determines user-visible tags */
+  readonly routerKey?: string
 }> {
   override get message(): string {
-    const context = this.groupName ? ` (group: ${this.groupName})` : ""
+    const context = this.routerKey
+      ? ` (routerKey: ${this.routerKey}, namespace: ${this.groupNamespace})`
+      : this.groupNamespace
+        ? ` (namespace: ${this.groupNamespace})`
+        : ""
     return `[${this.module}.${this.method}]${context} ${this.reason}`
   }
 }
@@ -299,24 +306,33 @@ export const procedureToRpc = <Name extends string, P extends AnyProcedure>(
  * The returned RpcGroup preserves full type information from the procedures.
  * This enables type-safe handler implementations and proper R/E/A channel tracking.
  *
+ * **Tag Naming:**
+ *
+ * User-visible tags come from the `routerKey` parameter (from Router.make keys),
+ * not from the procedures group's internal namespace.
+ *
  * @param group - The procedures group to convert
- * @param pathPrefix - Optional path prefix for nested routers (e.g., "user.posts.")
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Optional path prefix for nested routers (e.g., "admin.")
  *
  * @throws RpcBridgeValidationError - If the group has no procedures (programmer error)
  */
 export const proceduresGroupToRpcGroup = <
-  Name extends string,
+  Namespace extends string,
+  RouterKey extends string,
   Procs extends ProcedureRecord,
   Prefix extends string = "",
 >(
-  group: ProceduresGroup<Name, Procs>,
+  group: ProceduresGroup<Namespace, Procs>,
+  routerKey: RouterKey,
   pathPrefix: Prefix = "" as Prefix,
-): RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>> => {
+): RpcGroup.RpcGroup<ProceduresToRpcs<RouterKey, Procs, Prefix>> => {
   // Convert each procedure to an Rpc with full path using functional map
   const rpcs = Object.entries(group.procedures).map(([key, def]) => {
-    // Full path: prefix + group name + procedure name
-    // e.g., "user." + "posts" + "." + "list" = "user.posts.list"
-    const fullName = `${pathPrefix}${group.name}.${key}`
+    // Full path: prefix + router key + procedure name
+    // e.g., "admin." + "users" + "." + "list" = "admin.users.list"
+    // Tags come from Router.make keys, not from group namespace
+    const fullName = `${pathPrefix}${routerKey}.${key}`
     return procedureToRpc(fullName, def)
   })
 
@@ -334,7 +350,8 @@ export const proceduresGroupToRpcGroup = <
       module: "RpcBridge",
       method: "proceduresGroupToRpcGroup",
       reason: "ProceduresGroup has no procedures",
-      groupName: group.name,
+      groupNamespace: group.namespace,
+      routerKey,
     })
   }
 
@@ -346,7 +363,7 @@ export const proceduresGroupToRpcGroup = <
   // but the runtime builds the array dynamically from Object.entries().
   // The assertion is sound because our type-level computation matches
   // exactly what RpcGroup.make produces from the procedure definitions.
-  return RpcGroup.make(...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<Name, Procs, Prefix>>))
+  return RpcGroup.make(...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<RouterKey, Procs, Prefix>>))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,27 +417,11 @@ const toWebHeaders = (platformHeaders: Headers): globalThis.Headers => {
  * Each procedure call creates a span with metadata about the request.
  *
  * @remarks
- * **Context Type Safety Limitation:**
+ * **Middleware Execution:**
  *
- * Middleware context types are erased at runtime because TypeScript cannot
- * statically track how middleware transform context through a dynamically-built
- * array. The `middlewares` parameter uses `Middleware<any, any, any, any>`.
- *
- * This means:
- * - The compiler cannot verify that middleware A's output context matches
- *   middleware B's expected input context
- * - Context transformation errors will manifest as runtime errors, not
- *   compile-time errors
- *
- * **Best Practices:**
- * 1. Use `composeMiddleware` to create type-safe middleware compositions
- *    that are validated at compile time
- * 2. Test middleware chains thoroughly to catch context mismatches
- * 3. Use descriptive middleware names to aid debugging
- *
- * **Future Improvement:**
- * A v2 API could use a builder pattern with phantom types to track context
- * transformations, but this would require a significant API redesign.
+ * Middleware is executed in the order they are applied via `.use()` on the procedure.
+ * Each middleware's implementation is retrieved via its `serviceTag` and executed
+ * sequentially, with context flowing through the chain.
  *
  * **Context Construction:**
  * The middleware context is constructed from @effect/rpc's handler options:
@@ -489,12 +490,22 @@ type Handler = (ctx: any, input: any) => Effect.Effect<any, any, any>
  * @overload Effect procedures return Effect.Effect
  */
 /**
- * Type alias for any middleware (regular or service-providing).
+ * Type alias for any middleware definition.
+ *
+ * NOTE: The new middleware system uses MiddlewareDefinition as a contract.
+ * Middleware execution is handled by providing MiddlewareService layers
+ * and accessing them at runtime. This is a work-in-progress.
  */
-type AnyMiddleware =
-  | Middleware<any, any, any, any, any>
-  | ServiceMiddleware<any, any, any, any, any>
+type AnyMiddleware = MiddlewareDefinition<any, any, any, any>
 
+/**
+ * Apply middleware chain to a handler.
+ *
+ * TODO: Middleware execution needs to be redesigned for the new MiddlewareDefinition pattern.
+ * The new pattern separates definition (contract) from implementation (Layer).
+ * For now, middleware definitions are tracked at the type level but not executed at runtime.
+ * Middleware implementation will be addressed in a follow-up PR.
+ */
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
@@ -523,37 +534,37 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
 ): MiddlewareResult<A, E, R>
 
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
-  middlewares: ReadonlyArray<
-    Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >,
+  middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
   options: RpcHandlerOptions,
   payload: I,
   isStream: boolean,
 ): MiddlewareResult<A, E, R> {
-  // Internal implementation uses `any` for the dynamic middleware chain,
-  // but the generic signature ensures type safety at call sites.
-  // The runtime correctly:
-  // 1. Starts with BaseContext
-  // 2. Each middleware transforms context → Ctx
-  // 3. Handler receives Ctx and returns Effect<A, E, R>
-
-  // Separate service middleware from regular middleware
-  // Service middleware needs special handling for streams
-  const serviceMiddlewares: ServiceMiddleware<any, any, any, any, any>[] = []
-  const regularMiddlewares: Middleware<any, any, any, any, any>[] = []
-
-  for (const m of middlewares) {
-    if (isServiceMiddleware(m)) {
-      serviceMiddlewares.push(m)
-    } else {
-      regularMiddlewares.push(m)
-    }
-  }
-
   type AnyHandler = (ctx: any, input: any) => any
   const anyHandler = handler as AnyHandler
+
+  /**
+   * Execute the middleware chain by sequentially getting each middleware's
+   * service from the Effect context and running its handler.
+   *
+   * Each middleware handler receives the current context and input, and returns
+   * the transformed context. The final context is passed to the procedure handler.
+   */
+  const executeMiddlewareChain = (baseContext: BaseContext): Effect.Effect<any, any, any> =>
+    Effect.gen(function* () {
+      let ctx: any = baseContext
+
+      // Execute each middleware in sequence
+      for (const middleware of middlewares) {
+        // Get the middleware service from Effect context using its serviceTag
+        const service = yield* middleware.serviceTag
+        // Execute the middleware handler, passing current context and input
+        ctx = yield* service.handler(ctx, payload)
+      }
+
+      return ctx
+    })
 
   const setupContext = Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({
@@ -574,120 +585,32 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
     return { baseContext, abortController }
   })
 
-  // Helper to create services and transform context
-  // Returns Effect<{ ctx: transformedContext, services: Map<Tag, service> }>
-  const prepareServicesAndContext = (baseCtx: any, input: I) =>
-    Effect.gen(function* () {
-      let ctx = baseCtx
-      const services: Array<{ tag: any; value: any }> = []
-
-      // Process service middleware in order (passes input to make)
-      for (const sm of serviceMiddlewares) {
-        const service = yield* sm.make(ctx, input)
-        services.push({ tag: sm.provides, value: service })
-
-        // Transform context if the middleware defines it
-        if (sm.transformContext) {
-          ctx = sm.transformContext(ctx, service)
-        }
-      }
-
-      return { ctx, services }
-    })
-
   if (isStream) {
-    // For streams, we need to:
-    // 1. Prepare services (evaluate make functions)
-    // 2. Transform context
-    // 3. Run regular middleware chain
-    // 4. Apply services using Stream.provideService (NOT Effect.provideService)
+    // Stream handler - execute middleware chain then call handler
     const stream = Stream.unwrap(
-      Effect.flatMap(setupContext, ({ baseContext, abortController }) =>
-        Effect.map(prepareServicesAndContext(baseContext, payload), ({ ctx, services }) => {
-          // Build the regular middleware chain
-          type ChainFn = (ctx: any) => any
-
-          const finalStep: ChainFn = (finalCtx) =>
-            FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-              Effect.map(() => anyHandler(finalCtx, payload)),
-            )
-
-          let resultStream: Stream.Stream<unknown, unknown, unknown>
-
-          if (regularMiddlewares.length === 0) {
-            // No regular middleware - just run the handler
-            resultStream = Stream.unwrap(
-              FiberRef.set(MiddlewareContextRef, ctx).pipe(
-                Effect.map(() => anyHandler(ctx, payload)),
-              ),
-            )
-          } else {
-            // Build chain with regular middleware (passes input to each)
-            const chain = Array.reduceRight(
-              regularMiddlewares,
-              finalStep,
-              (nextFn, middleware): ChainFn =>
-                (c) =>
-                  middleware.fn(c, payload, nextFn),
-            )
-
-            const chainEffect = Effect.onInterrupt(chain(ctx), () =>
-              Effect.sync(() => abortController.abort()),
-            ) as unknown as Effect.Effect<
-              Stream.Stream<unknown, unknown, unknown>,
-              unknown,
-              unknown
-            >
-
-            resultStream = Stream.unwrap(chainEffect)
-          }
-
-          // Apply services using Stream.provideService
-          // This ensures services are available to stream's internal effects
-          for (const { tag, value } of services) {
-            resultStream = Stream.provideService(resultStream, tag, value)
-          }
-
-          return resultStream
-        }),
-      ),
+      Effect.gen(function* () {
+        const { baseContext } = yield* setupContext
+        // Execute middleware chain to get final context
+        const finalCtx = middlewares.length > 0
+          ? yield* executeMiddlewareChain(baseContext)
+          : baseContext
+        yield* FiberRef.set(MiddlewareContextRef, finalCtx)
+        return anyHandler(finalCtx, payload)
+      }),
     ).pipe(Stream.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
     return stream as Stream.Stream<A, E, R>
   }
 
-  // Effect (Mutation/Query) logic
+  // Effect (Mutation/Query) logic - execute middleware chain then call handler
   const effect = Effect.gen(function* () {
-    const { baseContext, abortController } = yield* setupContext
-    const { ctx, services } = yield* prepareServicesAndContext(baseContext, payload)
-
-    let result: Effect.Effect<unknown, unknown, unknown>
-
-    if (regularMiddlewares.length === 0) {
-      yield* FiberRef.set(MiddlewareContextRef, ctx)
-      result = anyHandler(ctx, payload)
-    } else {
-      const finalStep = (finalCtx: any) =>
-        FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-          Effect.flatMap(() => anyHandler(finalCtx, payload)),
-        )
-
-      // Build chain with regular middleware (passes input to each)
-      const chain = Array.reduceRight(
-        regularMiddlewares,
-        finalStep,
-        (nextFn, middleware) => (c: any) => middleware.fn(c, payload, nextFn),
-      )
-
-      result = Effect.onInterrupt(chain(ctx), () => Effect.sync(() => abortController.abort()))
-    }
-
-    // Apply services using Effect.provideService
-    for (const { tag, value } of services) {
-      result = Effect.provideService(result, tag, value)
-    }
-
-    return yield* result
+    const { baseContext } = yield* setupContext
+    // Execute middleware chain to get final context
+    const finalCtx = middlewares.length > 0
+      ? yield* executeMiddlewareChain(baseContext)
+      : baseContext
+    yield* FiberRef.set(MiddlewareContextRef, finalCtx)
+    return yield* anyHandler(finalCtx, payload)
   }).pipe(Effect.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
   return effect as Effect.Effect<A, E, R>
@@ -703,16 +626,21 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
  * The context is automatically passed to handlers based on the middleware chain.
  * This enables compile-time type safety for middleware context.
  *
+ * **Tag Naming:**
+ * User-visible tags come from `routerKey` (Router.make keys), not from the group's namespace.
+ *
  * @param group - The procedures group
  * @param handlers - The handler implementations (v2 signature: `(ctx, input) => Effect`)
- * @param pathPrefix - Optional path prefix for nested routers (e.g., "user.posts.")
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Optional path prefix for nested routers (e.g., "admin.")
  * @param routerMiddlewares - Optional router-level middlewares to prepend to each procedure's chain
  *
  * @throws RpcBridgeValidationError - If a procedure is missing its handler implementation
  */
-export const convertHandlers = <Name extends string, Procs extends ProcedureRecord>(
-  group: ProceduresGroup<Name, Procs>,
+export const convertHandlers = <Namespace extends string, Procs extends ProcedureRecord>(
+  group: ProceduresGroup<Namespace, Procs>,
   handlers: InferHandlers<Procs>,
+  routerKey: string,
   pathPrefix: string = "",
   routerMiddlewares: ReadonlyArray<AnyMiddleware> = [],
 ): Record<string, (payload: unknown, options: RpcHandlerOptions) => MiddlewareResult> => {
@@ -728,15 +656,17 @@ export const convertHandlers = <Name extends string, Procs extends ProcedureReco
       module: "RpcBridge",
       method: "convertHandlers",
       reason: `Missing handler implementation(s) for procedure(s): ${missingHandlers.join(", ")}`,
-      groupName: group.name,
+      groupNamespace: group.namespace,
+      routerKey,
     })
   }
 
   // Use reduce for functional pattern instead of imperative mutation
   return Object.keys(group.procedures).reduce(
     (rpcHandlers, key) => {
-      // Full path: prefix + group name + procedure name
-      const fullName = `${pathPrefix}${group.name}.${key}`
+      // Full path: prefix + router key + procedure name
+      // Tags come from Router.make keys, not from group namespace
+      const fullName = `${pathPrefix}${routerKey}.${key}`
       const procedureDef = group.procedures[key] as ProcedureDefinition
       // Get the user handler - signature: (ctx, input) => Effect
       // Cast through unknown because InferHandlers allows any R in handler return types
@@ -843,20 +773,32 @@ export type GroupHandlers<
  * - Handler requirements → Layer requirements
  * - Middleware requirements → Layer requirements
  * - Middleware provides → Excluded from Layer requirements
+ *
+ * **Tag Naming:**
+ *
+ * For the full Router flow, tags come from Router.make keys. This function
+ * is for advanced usage where you want to use RPC components directly.
+ * If `routerKey` is not provided, it defaults to the group's namespace.
+ *
+ * @param group - The procedures group
+ * @param routerKey - Optional key for tag naming (defaults to group namespace)
  */
-export const createRpcComponents = <Name extends string, Procs extends ProcedureRecord>(
-  group: ProceduresGroup<Name, Procs>,
+export const createRpcComponents = <Namespace extends string, RouterKey extends string, Procs extends ProcedureRecord>(
+  group: ProceduresGroup<Namespace, Procs>,
+  routerKey?: RouterKey,
 ): {
-  rpcGroup: RpcGroup.RpcGroup<GroupRpcs<Name, Procs>>
+  rpcGroup: RpcGroup.RpcGroup<GroupRpcs<RouterKey, Procs>>
   createHandlersLayer: <Handlers extends InferHandlers<Procs>, REffect = never>(
     handlersOrEffect: Handlers | Effect.Effect<Handlers, never, REffect>,
   ) => Layer.Layer<
-    RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
+    RpcGroup.Rpcs<GroupRpcs<RouterKey, Procs>>,
     never,
     REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
   >
 } => {
-  const rpcGroup = proceduresGroupToRpcGroup(group)
+  // Use routerKey if provided, otherwise fall back to group namespace
+  const effectiveRouterKey = (routerKey ?? group.namespace) as RouterKey
+  const rpcGroup = proceduresGroupToRpcGroup(group, effectiveRouterKey)
 
   return {
     rpcGroup,
@@ -873,12 +815,12 @@ export const createRpcComponents = <Name extends string, Procs extends Procedure
       // The runtime conversion is correct; we use unknown as an intermediate step
       // to bridge between our handler format and @effect/rpc's HandlersFrom format
       const adaptedHandlers = Effect.map(handlersEffect, (handlers) =>
-        convertHandlers(group, handlers),
-      ) as unknown as Effect.Effect<GroupHandlers<Name, Procs>, never, REffect>
+        convertHandlers(group, handlers, effectiveRouterKey),
+      ) as unknown as Effect.Effect<GroupHandlers<RouterKey, Procs>, never, REffect>
 
       // Create the layer - the type flows through from the RpcGroup
       return rpcGroup.toLayer(adaptedHandlers) as Layer.Layer<
-        RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
+        RpcGroup.Rpcs<GroupRpcs<RouterKey, Procs>>,
         never,
         REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
       >

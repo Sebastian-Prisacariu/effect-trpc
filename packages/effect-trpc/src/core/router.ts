@@ -94,8 +94,25 @@ export type Router<Routes extends RouterRecord = RouterRecord> = internal.Router
  *
  * @since 0.1.0
  * @category models
+ * @deprecated Use ToHttpHandlerOptions with Router.toHttpHandler() instead
  */
 export type ToHttpLayerOptions<R> = internal.ToHttpLayerOptions<R>
+
+/**
+ * Options for creating an HTTP handler from a router.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export type ToHttpHandlerOptions = internal.ToHttpHandlerOptions
+
+/**
+ * A Router with all dependencies provided, ready for HTTP handler creation.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export type ProvidedRouter<Routes extends RouterRecord = RouterRecord> = internal.ProvidedRouter<Routes>
 
 /**
  * Procedure metadata for client-side features.
@@ -240,6 +257,15 @@ export const isRouter: (entry: { readonly _tag: string }) => entry is AnyRouter 
 export const isProceduresGroup: (entry: { readonly _tag: string }) => entry is AnyProceduresGroup =
   internal.isProceduresGroup
 
+/**
+ * Check if a value is a ProvidedRouter (router with dependencies provided).
+ *
+ * @since 0.5.0
+ * @category guards
+ */
+export const isProvidedRouter: (value: unknown) => value is ProvidedRouter<any> =
+  internal.isProvidedRouter
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Router Namespace
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,22 +275,17 @@ export const isProceduresGroup: (entry: { readonly _tag: string }) => entry is A
  *
  * @example
  * ```ts
- * // Flat structure
+ * // Create router
  * const appRouter = Router.make({
  *   user: userProcedures,
  *   post: postProcedures,
  * })
  *
- * // Nested structure
- * const appRouter = Router.make({
- *   user: Router.make({
- *     posts: procedures("posts", { list: p.query(...) }),
- *     comments: Router.make({
- *       recent: procedures("recent", { list: p.query(...) }),
- *     }),
- *   }),
- *   health: procedures("health", { check: p.query(...) }),
- * })
+ * // Provide dependencies and create HTTP handler
+ * const httpLayer = appRouter.pipe(
+ *   Router.provide(AppLive),
+ *   Router.toHttpHandler({ path: '/rpc' })
+ * )
  * ```
  *
  * @since 0.1.0
@@ -279,24 +300,9 @@ export const Router = {
    *
    * @example
    * ```ts
-   * // Simple router
    * const appRouter = Router.make({
    *   user: userProcedures,
    *   post: postProcedures,
-   * })
-   *
-   * // Nested routers from different modules
-   * // src/server/routers/user.ts
-   * export const userRouter = Router.make({
-   *   posts: userPostsProcedures,
-   *   profile: userProfileProcedures,
-   * })
-   *
-   * // src/server/routers/index.ts
-   * import { userRouter } from './user'
-   * export const appRouter = Router.make({
-   *   user: userRouter,
-   *   health: healthProcedures,
    * })
    * ```
    *
@@ -304,6 +310,49 @@ export const Router = {
    * @category constructors
    */
   make: internal.make,
+
+  /**
+   * Provide dependencies to a router.
+   *
+   * Use this before `Router.toHttpHandler()` to supply all required layers.
+   * The provided layer must include all middleware services and procedure implementations.
+   *
+   * @example
+   * ```ts
+   * const AppLive = Layer.mergeAll(
+   *   OrgMiddlewareLive,
+   *   UpdateFileLive,
+   *   DeleteFileLive,
+   * )
+   *
+   * const httpLayer = appRouter.pipe(
+   *   Router.provide(AppLive),
+   *   Router.toHttpHandler()
+   * )
+   * ```
+   *
+   * @since 0.5.0
+   * @category constructors
+   */
+  provide: internal.provide,
+
+  /**
+   * Convert a provided router to an HTTP layer.
+   *
+   * Must be called after `Router.provide()` to ensure all dependencies are satisfied.
+   *
+   * @example
+   * ```ts
+   * const httpLayer = appRouter.pipe(
+   *   Router.provide(AppLive),
+   *   Router.toHttpHandler({ path: '/api/rpc' })
+   * )
+   * ```
+   *
+   * @since 0.5.0
+   * @category constructors
+   */
+  toHttpHandler: internal.toHttpHandler,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

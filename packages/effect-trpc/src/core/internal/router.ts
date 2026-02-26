@@ -14,7 +14,7 @@ import { RpcServer, RpcSerialization } from "@effect/rpc"
 import type { ProceduresGroup, ProcedureRecord } from "../procedures.js"
 import type { ProcedureDefinition } from "../procedure.js"
 import { proceduresGroupToRpcGroup, type AnyRpc, type ProceduresToRpcs } from "../rpc-bridge.js"
-import type { Middleware, ServiceMiddleware } from "../middleware.js"
+import type { MiddlewareDefinition } from "../middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type ID
@@ -129,27 +129,37 @@ export type RouterRecord = {
  * Recursively extract all procedure definitions from a router record.
  * Returns a flattened record with full path keys.
  *
+ * **Tag Naming:**
+ * Tags are derived from the router key (`K`), not from the procedures group's namespace.
+ * This ensures tags match the Router.make() structure.
+ *
  * @since 0.1.0
  * @category type-level
  */
 export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractProcedures<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? { [PK in keyof Procs as `${Prefix}${Name}.${PK & string}`]: Procs[PK] }
+    : Routes[K] extends ProceduresGroup<infer _Namespace, infer Procs>
+      // Use K (router key) for tag naming, not _Namespace (internal)
+      ? { [PK in keyof Procs as `${Prefix}${K & string}.${PK & string}`]: Procs[PK] }
       : never
 }[keyof Routes]
 
 /**
  * Recursively extract all RpcGroup types from a router record.
  * Returns a union of RpcGroup types.
+ *
+ * **Tag Naming:**
+ * Tags are derived from the router key (`K`), not from the procedures group's namespace.
+ *
  * @internal
  */
 export type ExtractRpcGroups<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractRpcGroups<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>>
+    : Routes[K] extends ProceduresGroup<infer _Namespace, infer Procs>
+      // Use K (router key) for RpcGroup type, not _Namespace (internal)
+      ? RpcGroup.RpcGroup<ProceduresToRpcs<K & string, Procs, Prefix>>
       : never
 }[keyof Routes]
 
@@ -214,28 +224,37 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
 
   /**
    * Router-level middlewares applied to all procedures in this router.
-   * Includes both regular middleware and service-providing middleware.
    */
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 
   /**
    * Apply middleware to all procedures in this router.
    * Returns a new Router with the middleware attached.
-   *
-   * Supports both regular middleware and service-providing middleware.
-   * Service middleware properly provides services to both Effect and Stream handlers.
    */
-  use(
-    middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-  ): Router<Routes>
+  use(middleware: MiddlewareDefinition<any, any, any, any>): Router<Routes>
 
   /**
+   * @deprecated Use `Router.provide()` then `Router.toHttpHandler()` instead.
    * Create a Layer that serves this router over HTTP.
-   * Uses NDJSON serialization for streaming support.
    */
   toHttpLayer<R>(options: ToHttpLayerOptions<R>): Layer.Layer<never, never, R>
+}
+
+/**
+ * A Router with all dependencies provided, ready to be converted to an HTTP handler.
+ *
+ * Created via `Router.provide(router, layer)`. Use `Router.toHttpHandler()` to
+ * create the final HTTP layer.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface ProvidedRouter<Routes extends RouterRecord = RouterRecord> {
+  readonly [TypeId]: TypeId
+  readonly _tag: "ProvidedRouter"
+  readonly router: Router<Routes>
+  readonly layer: Layer.Layer<any, never, any>
+  readonly path?: `/${string}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -459,13 +478,18 @@ function unsafeAssertProcedureDefinition(procValue: unknown): ProcedureDefinitio
  * This matches Effect's pattern in RpcGroup.toHandlersContext where handlers
  * are stored in Map<string, unknown> but retrieved with proper types.
  *
+ * @param group - The procedures group
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Prefix from nested routers (e.g., "admin." for admin.users.list)
+ *
  * @internal
  */
 function unsafeWidenRpcGroup(
   group: AnyProceduresGroup,
+  routerKey: string,
   pathPrefix: string,
 ): RpcGroup.RpcGroup<AnyRpc> {
-  return proceduresGroupToRpcGroup(group, pathPrefix) as unknown as RpcGroup.RpcGroup<AnyRpc>
+  return proceduresGroupToRpcGroup(group, routerKey, pathPrefix) as unknown as RpcGroup.RpcGroup<AnyRpc>
 }
 
 /**
@@ -535,6 +559,7 @@ function flattenRoutes<Routes extends RouterRecord>(
       } else if (isProceduresGroup(entry)) {
         // Procedure group - flatten procedures with full path
         // Use Record.reduce for inner iteration too
+        // Tags come from router keys (key), not from group namespace
         Record.reduce(
           entry.procedures as globalThis.Record<string, unknown>,
           undefined as void,
@@ -543,7 +568,8 @@ function flattenRoutes<Routes extends RouterRecord>(
             acc.procedures[fullPath] = unsafeAssertProcedureDefinition(procValue)
           },
         )
-        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, pathPrefix))
+        // Pass the router key for tag naming
+        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, key, pathPrefix))
       }
       return acc
     },
@@ -561,9 +587,7 @@ function flattenRoutes<Routes extends RouterRecord>(
  * @internal
  */
 export interface MakeOptions {
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 }
 
 /**
@@ -607,9 +631,7 @@ export const make = <Routes extends RouterRecord>(
     rpcGroup: combinedGroup,
     ...(options?.middlewares ? { middlewares: options.middlewares } : {}),
 
-    use: (
-      middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-    ) => {
+    use: (middleware: MiddlewareDefinition<any, any, any, any>) => {
       const existingMiddlewares = options?.middlewares ?? []
       return make(routes, { middlewares: [...existingMiddlewares, middleware] })
     },
@@ -752,7 +774,7 @@ export const extractMetadata = <Routes extends RouterRecord>(
  *
  * This extracts the `I` type parameter from `ProcedureDefinition`, which
  * includes both:
- * - Input from middleware `withInput` extensions
+ * - Input from middleware `.input()` extensions
  * - Input from the procedure's `.input()` schema
  *
  * @since 0.1.0
@@ -844,3 +866,86 @@ export type InferProvides<T> =
           : never
       }
     : never
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router.provide() and Router.toHttpHandler()
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Options for creating an HTTP handler from a router.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface ToHttpHandlerOptions {
+  /**
+   * Path prefix for the RPC endpoint.
+   * Must start with '/'.
+   * @default '/rpc'
+   */
+  readonly path?: `/${string}`
+}
+
+/**
+ * Provide dependencies to a router, preparing it for HTTP handler creation.
+ *
+ * Use this with `Router.toHttpHandler()` to create the final HTTP layer.
+ * The layer must provide all procedure implementations and middleware services.
+ *
+ * @example
+ * ```ts
+ * const handler = router.pipe(
+ *   Router.provide(AppLive),
+ *   Router.toHttpHandler()
+ * )
+ * ```
+ *
+ * @since 0.5.0
+ * @category constructors
+ */
+export const provide =
+  <RIn, ROut>(layer: Layer.Layer<ROut, never, RIn>) =>
+  <Routes extends RouterRecord>(router: Router<Routes>): ProvidedRouter<Routes> => ({
+    [TypeId]: TypeId,
+    _tag: "ProvidedRouter",
+    router,
+    layer: layer as Layer.Layer<any, never, any>,
+  })
+
+/**
+ * Convert a provided router to an HTTP layer.
+ *
+ * The router must have all dependencies provided via `Router.provide()`.
+ * Uses NDJSON serialization for streaming support.
+ *
+ * @example
+ * ```ts
+ * const httpLayer = router.pipe(
+ *   Router.provide(AppLive),
+ *   Router.toHttpHandler({ path: '/api/rpc' })
+ * )
+ * ```
+ *
+ * @since 0.5.0
+ * @category constructors
+ */
+export const toHttpHandler =
+  (options: ToHttpHandlerOptions = {}) =>
+  <Routes extends RouterRecord>(provided: ProvidedRouter<Routes>): Layer.Layer<never, never, any> => {
+    const path = options.path ?? "/rpc"
+
+    return RpcServer.layerHttpRouter({
+      group: provided.router.rpcGroup,
+      path,
+      protocol: "http",
+    }).pipe(Layer.provide(RpcSerialization.layerNdjson), Layer.provide(provided.layer))
+  }
+
+/**
+ * Check if a value is a ProvidedRouter.
+ *
+ * @since 0.5.0
+ * @category guards
+ */
+export const isProvidedRouter = (value: unknown): value is ProvidedRouter<any> =>
+  typeof value === "object" && value !== null && "_tag" in value && value._tag === "ProvidedRouter"

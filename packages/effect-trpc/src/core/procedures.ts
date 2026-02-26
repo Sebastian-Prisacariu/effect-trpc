@@ -481,31 +481,39 @@ export type EffectiveHandlerRequirements<
 > = Exclude<HandlersRequirements<Handlers>, ProceduresProvides<Procs>>
 
 /**
- * A group of related procedures under a namespace.
+ * A group of related procedures.
  *
- * Created by the `procedures` function. Provides `.toLayer()` to create
- * the implementation layer with type-safe handlers.
+ * Created by `Procedures.make()`. User-visible tags are inferred from Router.make() keys,
+ * not from the procedures group itself. The `namespace` parameter is only used for
+ * internal service identification in the Effect context.
  *
  * @example
  * ```ts
- * const UserProcedures = procedures('user', {
+ * // The namespace "user" is for internal service identification
+ * const UserProcedures = Procedures.make("user", {
  *   list: procedure.output(Schema.Array(UserSchema)).query(),
  *   byId: procedure.input(IdSchema).output(UserSchema).query(),
  * })
  *
- * // UserProcedures.name === 'user'
- * // UserProcedures.procedures contains the definitions
+ * // User-visible tags come from Router.make keys:
+ * const router = Router.make({
+ *   users: UserProcedures,  // Tags: "users.list", "users.byId"
+ * })
  * ```
  *
  * @since 0.1.0
  * @category models
  */
 export interface ProceduresGroup<
-  Name extends string = string,
+  Namespace extends string = string,
   Procs extends ProcedureRecord = ProcedureRecord,
 > {
   readonly _tag: "ProceduresGroup"
-  readonly name: Name
+  /**
+   * Internal namespace for service identification.
+   * User-visible tags are determined by Router.make() keys.
+   */
+  readonly namespace: Namespace
   readonly procedures: Procs
 
   /**
@@ -546,7 +554,7 @@ export interface ProceduresGroup<
   toLayer<Handlers extends InferHandlers<Procs>, REffect = never>(
     implementation: Handlers | Effect.Effect<Handlers, never, REffect>,
   ): Layer.Layer<
-    ProceduresService<Name, Procs>,
+    ProceduresService<Namespace, Procs>,
     never,
     | REffect
     | EffectiveHandlerRequirements<Handlers, Procs>
@@ -604,43 +612,53 @@ function unsafeAssertLayerRequirements<A, R>(
 }
 
 /**
- * Define a group of related procedures under a namespace.
+ * Define a group of related procedures.
  *
  * Groups related procedures together and provides a type-safe way to
  * create the implementation layer via `.toLayer()`.
  *
- * @param name - The namespace for these procedures (e.g., 'user', 'post')
+ * **Namespace vs Tags:**
+ * - The `namespace` parameter is for internal service identification in the Effect context
+ * - User-visible tags (like "users.list") are determined by Router.make() keys
+ *
+ * @param namespace - Internal namespace for service identification (e.g., 'user', 'post')
  * @param defs - Record of procedure definitions
  *
  * @example
  * ```ts
- * import { procedures, procedure } from 'effect-trpc'
+ * import { Procedures, procedure } from 'effect-trpc'
  *
- * export const UserProcedures = procedures('user', {
+ * // "user" is the internal namespace for service identification
+ * export const UserProcedures = Procedures.make('user', {
  *   list: procedure.output(Schema.Array(UserSchema)).query(),
  *   byId: procedure.input(IdSchema).output(UserSchema).query(),
- *   create: procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
+ *   create: procedure.input(CreateSchema).invalidates(['users.list']).mutation(),
+ * })
+ *
+ * // User-visible tags come from Router.make keys:
+ * const router = Router.make({
+ *   users: UserProcedures,  // Tags: "users.list", "users.byId", "users.create"
  * })
  * ```
  *
  * @since 0.1.0
  * @category constructors
  */
-export const procedures = <
-  Name extends string,
+const make = <
+  Namespace extends string,
   Procs extends ProcedureRecord,
 >(
-  name: Name,
+  namespace: Namespace,
   defs: Procs,
-): ProceduresGroup<Name, Procs> => {
+): ProceduresGroup<Namespace, Procs> => {
   // Create a unique tag for this procedures group
-  const ServiceTag = Context.GenericTag<ProceduresService<Name, Procs>>(
-    `@effect-trpc/${name}`,
+  const ServiceTag = Context.GenericTag<ProceduresService<Namespace, Procs>>(
+    `@effect-trpc/${namespace}`,
   )
 
   return {
     _tag: "ProceduresGroup",
-    name,
+    namespace,
     procedures: defs,
 
     toLayer: <Handlers extends InferHandlers<Procs>, REffect = never>(
@@ -653,7 +671,7 @@ export const procedures = <
       const layer = Layer.effect(
         ServiceTag,
         Effect.map(effect, (handlers) => ({
-          _tag: name,
+          _tag: namespace,
           handlers,
         })),
       )
@@ -661,9 +679,33 @@ export const procedures = <
       // Widen the layer type to include handler and middleware requirements.
       // See unsafeAssertLayerRequirements documentation for why this is intentional.
       return unsafeAssertLayerRequirements<
-        ProceduresService<Name, Procs>,
+        ProceduresService<Namespace, Procs>,
         REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
       >(layer)
     },
   }
 }
+
+/**
+ * Namespace for procedure group functions.
+ *
+ * @example
+ * ```ts
+ * import { Procedures, procedure } from 'effect-trpc'
+ *
+ * const UserProcedures = Procedures.make('user', {
+ *   list: procedure.output(Schema.Array(UserSchema)).query(),
+ * })
+ * ```
+ *
+ * @since 0.5.0
+ * @category namespaces
+ */
+export const Procedures = {
+  make,
+} as const
+
+/**
+ * @deprecated Use `Procedures.make()` instead. Will be removed in v1.0.
+ */
+export const procedures = make

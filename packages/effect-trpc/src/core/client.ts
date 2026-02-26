@@ -124,15 +124,62 @@ export interface LoggerConfig {
 /**
  * Options for creating a tRPC client.
  *
+ * **URL Configuration:**
+ *
+ * You can configure the endpoint URL in two ways:
+ *
+ * 1. **Automatic (recommended for same-origin):**
+ *    ```ts
+ *    { path: '/api/rpc' }  // Uses current origin automatically
+ *    ```
+ *
+ * 2. **Explicit baseUrl (for cross-origin/monorepo setups):**
+ *    ```ts
+ *    { baseUrl: 'https://api.example.com', path: '/rpc' }
+ *    // or
+ *    { baseUrl: 'http://localhost:3001' }  // path defaults to '/rpc'
+ *    ```
+ *
+ * 3. **Full URL (legacy, still supported):**
+ *    ```ts
+ *    { url: 'https://api.example.com/rpc' }
+ *    ```
+ *
  * @since 0.1.0
  * @category Config
  */
 export interface CreateClientOptions {
   /**
-   * Base URL for the RPC endpoint.
+   * Full URL for the RPC endpoint.
+   *
+   * @deprecated Use `baseUrl` + `path` instead for better clarity.
+   * If provided, takes precedence over `baseUrl` + `path`.
+   *
    * @example 'http://localhost:3000/api/trpc'
    */
-  readonly url: string
+  readonly url?: string
+
+  /**
+   * Base URL (origin) for the RPC endpoint.
+   *
+   * Use this when your API is on a different domain or port (common in monorepos).
+   * If not provided, automatically uses the current origin in browsers,
+   * or defaults to 'http://localhost:3000' in non-browser environments.
+   *
+   * @example 'https://api.example.com'
+   * @example 'http://localhost:3001'
+   */
+  readonly baseUrl?: string
+
+  /**
+   * Path for the RPC endpoint.
+   *
+   * Combined with `baseUrl` to form the full URL.
+   *
+   * @default '/rpc'
+   * @example '/api/trpc'
+   */
+  readonly path?: string
 
   /**
    * Additional headers to send with each request.
@@ -1499,12 +1546,45 @@ const _createStreamEffect = <A>(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Resolve the full RPC endpoint URL from options.
+ *
+ * Priority:
+ * 1. If `url` is provided, use it directly (legacy support)
+ * 2. Otherwise, combine `baseUrl` + `path`
+ *    - `baseUrl` defaults to current origin (browser) or 'http://localhost:3000'
+ *    - `path` defaults to '/rpc'
+ */
+const resolveEndpointUrl = (options: CreateClientOptions): string => {
+  // Legacy: if full url is provided, use it directly
+  if (options.url) {
+    return options.url
+  }
+
+  // Determine baseUrl
+  const baseUrl =
+    options.baseUrl ??
+    (typeof globalThis !== "undefined" && "location" in globalThis
+      ? (globalThis as { location?: { origin?: string } }).location?.origin ?? "http://localhost:3000"
+      : "http://localhost:3000")
+
+  // Determine path (ensure it starts with /)
+  const path = options.path ?? "/rpc"
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`
+
+  // Combine, avoiding double slashes
+  return baseUrl.endsWith("/")
+    ? `${baseUrl.slice(0, -1)}${normalizedPath}`
+    : `${baseUrl}${normalizedPath}`
+}
+
+/**
  * Internal implementation of the client factory.
  */
 const makeClientImpl = <TRouter extends Router>(
   options: CreateClientOptions,
 ): TRPCClient<TRouter> => {
-  const { url, headers: headerOption, timeout, retry, batch, logger } = options
+  const url = resolveEndpointUrl(options)
+  const { headers: headerOption, timeout, retry, batch, logger } = options
 
   const getHeaders = (): Record<string, string> => {
     if (!headerOption) return {}

@@ -5,8 +5,8 @@
  * Uses a fluent builder pattern: procedure.input(...).output(...).query()
  */
 
-import type * as Schema from "effect/Schema"
-import type { Middleware, BaseContext } from "./middleware.js"
+import * as Schema from "effect/Schema"
+import type { MiddlewareDefinition, BaseContext } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -53,12 +53,13 @@ export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscrip
  *
  * @example
  * ```ts
- * // Type-safe composition
- * const authAndRateLimit = composeMiddleware(authMiddleware, rateLimitMiddleware)
+ * // Middleware applied via .use()
+ * const AuthMiddleware = Middleware("auth")
+ *   .error(AuthError)
+ *   .provides<{ user: User }>()
  *
- * // Use composed middleware
  * const UserProcedures = procedures('user', {
- *   update: procedure.use(authAndRateLimit).input(UpdateSchema).mutation(),
+ *   update: procedure.use(AuthMiddleware).input(UpdateSchema).mutation(),
  * })
  * ```
  *
@@ -102,7 +103,7 @@ export interface ProcedureDefinition<
   readonly invalidates: ReadonlyArray<string>
   readonly invalidatesTags: ReadonlyArray<string>
   /** Middleware chain - context type is tracked via Ctx, input type is accumulated via InputExt */
-  readonly middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
+  readonly middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
   /**
    * Phantom type to carry context type information.
    * Never actually set at runtime - only exists for type inference.
@@ -347,15 +348,17 @@ export interface ProcedureBuilder<
    * // Layer requires: TokenService (Database is provided by middleware)
    * ```
    */
-  use<CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
-    middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
-  ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>
+  use<CtxIn extends BaseContext, CtxOut extends BaseContext, InputExt, E2>(
+    middleware: Ctx extends CtxIn
+      ? MiddlewareDefinition<CtxIn, CtxOut, InputExt, E2>
+      : never,
+  ): ProcedureBuilder<I & InputExt, A, E | E2, Ctx & CtxOut, R, Provides>
 
   /**
    * Define the input schema for this procedure.
    * Input is validated before the handler is called.
    *
-   * **Note:** If middleware with `withInput` has been applied, the final input
+   * **Note:** If middleware with `.input()` has been applied, the final input
    * type will be the intersection of the middleware's input requirements and
    * the schema defined here: `MiddlewareInput & I2`
    */
@@ -372,34 +375,36 @@ export interface ProcedureBuilder<
   ): ProcedureBuilder<I, A2, E, Ctx, R, Provides>
 
   /**
-   * Define the typed error schema for this procedure.
+   * Define the typed error schema(s) for this procedure.
+   *
+   * Accepts varargs - pass multiple error classes directly without wrapping in Schema.Union.
+   * Each error class must extend Schema.TaggedError.
    *
    * @remarks
    * **Middleware Error Types:**
    *
    * When using middleware that can fail (e.g., `authMiddleware`, `rateLimitMiddleware`),
-   * their error types are accumulated at the type level via `.use()`. However, for
-   * proper wire serialization, you should include middleware error schemas in the
-   * procedure's error schema using `Schema.Union`.
+   * their error types are accumulated at the type level via `.use()`. For proper
+   * wire serialization, include middleware error schemas in the procedure's error call.
    *
    * @example
    * ```ts
-   * // Include middleware errors in error schema for full type safety
+   * // Single error
+   * const getUser = procedure
+   *   .error(NotFoundError)
+   *   .query()
+   *
+   * // Multiple errors (varargs - no Schema.Union needed)
    * const updateUser = procedure
    *   .use(authMiddleware)  // Adds AuthError to type
-   *   .use(rateLimitMiddleware)  // Adds RateLimitError to type
    *   .input(UpdateUserSchema)
-   *   .error(Schema.Union(
-   *     MyCustomError,
-   *     AuthError,  // From middleware
-   *     RateLimitError,  // From middleware
-   *   ))
+   *   .error(NotFoundError, ValidationError, AuthError)
    *   .mutation()
    * ```
    */
-  error<E2, EFrom = E2>(
-    schema: Schema.Schema<E2, EFrom>,
-  ): ProcedureBuilder<I, A, E2, Ctx, R, Provides>
+  error<Errors extends ReadonlyArray<Schema.Schema<any, any>>>(
+    ...errors: Errors
+  ): ProcedureBuilder<I, A, E | Schema.Schema.Type<Errors[number]>, Ctx, R, Provides>
 
   /**
    * Add tags to this procedure for tag-based cache invalidation.
@@ -479,7 +484,7 @@ interface BuilderState {
   tags: ReadonlyArray<string>
   invalidates: ReadonlyArray<string>
   invalidatesTags: ReadonlyArray<string>
-  middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
+  middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>
 }
 
 /**
@@ -501,6 +506,49 @@ interface BuilderState {
  * TypeScript cannot verify the generic alignment without the cast because
  * BuilderState uses `unknown` for type-erased schema storage.
  */
+/**
+ * Merge middleware input schemas with the procedure's input schema.
+ * Returns the merged schema or undefined if no schemas exist.
+ *
+ * Uses Schema.extend which requires Struct schemas. At runtime, we cast
+ * but the type system ensures only compatible schemas are combined.
+ */
+const mergeInputSchemas = (
+  middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>,
+  procedureInputSchema: unknown,
+): unknown => {
+  // Collect all middleware input schemas
+  const middlewareSchemas = middlewares
+    .map((m) => m.inputSchema)
+    .filter((s): s is Schema.Schema<any, any> => s !== undefined)
+
+  // Build list of all schemas to merge
+  const allSchemas: Schema.Schema<any, any>[] = [...middlewareSchemas]
+  if (procedureInputSchema !== undefined) {
+    allSchemas.push(procedureInputSchema as Schema.Schema<any, any>)
+  }
+
+  // If no schemas, return undefined
+  if (allSchemas.length === 0) {
+    return undefined
+  }
+
+  // If single schema, return it directly
+  if (allSchemas.length === 1) {
+    return allSchemas[0]
+  }
+
+  // Merge all schemas using Schema.extend
+  // Cast through unknown since Schema.extend expects Struct types
+  // but middleware/procedure input schemas should always be Structs
+  return allSchemas.reduce((merged, schema) =>
+    Schema.extend(
+      merged as unknown as Schema.Struct<any>,
+      schema as unknown as Schema.Struct<any>,
+    ) as unknown as Schema.Schema<any, any>,
+  )
+}
+
 const createDefinition = <
   I,
   A,
@@ -512,8 +560,11 @@ const createDefinition = <
 >(
   state: BuilderState,
   type: Type,
-): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> =>
-  ({
+): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> => {
+  // Merge middleware input schemas with procedure input schema
+  const mergedInputSchema = mergeInputSchemas(state.middlewares, state.inputSchema)
+
+  return {
     _tag: "ProcedureDefinition",
     type,
     description: state.description,
@@ -521,7 +572,7 @@ const createDefinition = <
     externalDocs: state.externalDocs,
     responseDescription: state.responseDescription,
     deprecated: state.deprecated,
-    inputSchema: state.inputSchema,
+    inputSchema: mergedInputSchema,
     outputSchema: state.outputSchema,
     errorSchema: state.errorSchema,
     tags: state.tags,
@@ -529,7 +580,8 @@ const createDefinition = <
     invalidatesTags: state.invalidatesTags,
     middlewares: state.middlewares,
     // _contextType, _middlewareR, and _provides are intentionally not set - they're phantom types
-  }) as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+  } as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+}
 
 const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = never>(
   state: BuilderState,
@@ -544,19 +596,27 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
     responseDescription: (text: string) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, responseDescription: text }),
     deprecated: () => createBuilder<I, A, E, Ctx, R, Provides>({ ...state, deprecated: true }),
-    use: <CtxOut extends BaseContext, E2, R2, P = never, InputExt = unknown>(
-      middleware: Middleware<Ctx, CtxOut, E2, R2, P, InputExt>,
+    use: <CtxIn extends BaseContext, CtxOut extends BaseContext, InputExt, E2>(
+      middleware: Ctx extends CtxIn
+        ? MiddlewareDefinition<CtxIn, CtxOut, InputExt, E2>
+        : never,
     ) =>
-      createBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>({
+      createBuilder<I & InputExt, A, E | E2, Ctx & CtxOut, R, Provides>({
         ...state,
-        middlewares: [...state.middlewares, middleware],
+        middlewares: [...state.middlewares, middleware as MiddlewareDefinition<any, any, any, any>],
       }),
     input: <I2>(schema: unknown) =>
       createBuilder<I & I2, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),
     output: (schema: unknown) =>
       createBuilder<I, unknown, E, Ctx, R, Provides>({ ...state, outputSchema: schema }),
-    error: (schema: unknown) =>
-      createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema: schema }),
+    error: (...errors: unknown[]) => {
+      // Merge multiple error schemas into a union if needed
+      const errorSchema =
+        errors.length === 1
+          ? errors[0]
+          : Schema.Union(...(errors as [Schema.Schema<any, any>, ...Schema.Schema<any, any>[]]))
+      return createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema })
+    },
     tags: (tags: ReadonlyArray<string>) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, tags }),
     invalidates: (paths: ReadonlyArray<string>) =>
