@@ -147,9 +147,16 @@ export { handler as GET, handler as POST }
 import { createTRPCReact } from 'effect-trpc/react'
 import type { AppRouter } from '~/server/router'
 
+// Same-origin (Next.js, etc.) - just specify the path
 export const api = createTRPCReact<AppRouter>({
-  url: '/api/trpc',
+  path: '/api/trpc',
 })
+
+// Cross-origin (monorepo with separate Bun/Node backend)
+// export const api = createTRPCReact<AppRouter>({
+//   baseUrl: process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001',
+//   path: '/rpc',
+// })
 ```
 
 ### 5. Add Provider
