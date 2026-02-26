@@ -10,9 +10,9 @@ import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { WebSocketServer, WebSocket } from "ws"
 
-import { procedure } from "../core/procedure.js"
-import { procedures } from "../core/procedures.js"
-import { Router } from "../core/router.js"
+import { Procedure } from "../core/index.js"
+import { Procedures } from "../core/index.js"
+import { Router } from "../core/server/router.js"
 import { createWebSocketHandler } from "../node/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,18 +43,18 @@ const ChatMessage = Schema.Struct({
 })
 
 // Define procedures
-const testProcedures = procedures("test", {
-  counter: procedure
+const testProcedures = Procedures.make({
+  counter: Procedure
     .input(CounterInput)
     .output(CounterOutput)
     .subscription(),
 
-  chat: procedure
+  chat: Procedure
     .input(ChatInput)
     .output(ChatMessage)
     .subscription(),
 
-  echo: procedure
+  echo: Procedure
     .input(Schema.String)
     .output(Schema.String)
     .subscription(),

@@ -20,7 +20,7 @@
  */
 
 import type * as Layer from "effect/Layer"
-import type { Router } from "../core/router.js"
+import type { Router } from "../core/server/router.js"
 import {
   type CorsOptions,
   buildCorsHeaders,

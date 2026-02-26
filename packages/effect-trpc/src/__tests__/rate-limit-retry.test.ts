@@ -15,7 +15,7 @@ import {
   rateLimitMiddleware,
   MiddlewareRateLimitError,
   type BaseContext,
-} from "../core/middleware.js"
+} from "../core/server/middleware.js"
 import { createHttpRateLimiter } from "../shared/http-rate-limit.js"
 import { RateLimitError } from "../errors/index.js"
 import {
@@ -23,7 +23,7 @@ import {
   RpcResponseError,
   RpcClientError,
   RpcTimeoutError,
-} from "../core/client.js"
+} from "../core/client/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures

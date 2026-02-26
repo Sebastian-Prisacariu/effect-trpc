@@ -31,9 +31,9 @@ import type {
   RouterEntry,
   AnyRouter,
   AnyProceduresGroup,
-} from "../core/router.js"
-import type { ProceduresGroup, ProcedureRecord } from "../core/procedures.js"
-import type { ProcedureDefinition } from "../core/procedure.js"
+} from "../core/server/router.js"
+import type { ProceduresGroup, ProcedureRecord } from "../core/server/procedures.js"
+import type { ProcedureDefinition } from "../core/server/procedure.js"
 import {
   type UseSubscriptionOptions,
   type UseSubscriptionReturn,

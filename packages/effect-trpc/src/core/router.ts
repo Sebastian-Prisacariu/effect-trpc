@@ -9,10 +9,10 @@
  * // Nested router structure
  * const appRouter = Router.make({
  *   user: Router.make({
- *     posts: procedures("posts", { list: p.query(...) }),
- *     profile: procedures("profile", { get: p.query(...) }),
+ *     posts: Procedures.make({ list: p.query(...) }),
+ *     profile: Procedures.make({ get: p.query(...) }),
  *   }),
- *   health: procedures("health", { check: p.query(...) }),
+ *   health: Procedures.make({ check: p.query(...) }),
  * })
  *
  * // Client usage with infinite nesting
@@ -25,6 +25,8 @@
  */
 
 import * as internal from "./internal/router.js"
+import { dual } from "effect/Function"
+import type * as Layer from "effect/Layer"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Re-exports from internal module
@@ -71,7 +73,7 @@ export type RouterValidationError = internal.RouterValidationError
  * ```ts
  * const routes: RouterRecord = {
  *   user: Router.make({ ... }),     // Nested router
- *   health: procedures("health", {}), // Procedure group
+ *   health: Procedures.make({}), // Procedure group
  * }
  * ```
  *
@@ -96,6 +98,8 @@ export type Router<Routes extends RouterRecord = RouterRecord> = internal.Router
  * @category models
  */
 export type ToHttpLayerOptions<R> = internal.ToHttpLayerOptions<R>
+export type ToHttpHandlerOptions = internal.ToHttpHandlerOptions
+export type HttpHandler = internal.HttpHandler
 
 /**
  * Procedure metadata for client-side features.
@@ -124,8 +128,8 @@ export type MetadataRegistry = internal.MetadataRegistry
  * @example
  * ```ts
  * const routes = {
- *   user: procedures("user", { get: proc, list: proc }),
- *   admin: Router.make({ users: procedures("users", { ban: proc }) })
+ *   user: Procedures.make({ get: proc, list: proc }),
+ *   admin: Router.make({ users: Procedures.make({ ban: proc }) })
  * }
  * type Procs = ExtractProcedures<typeof routes>
  * // { "user.get": Proc, "user.list": Proc, "admin.users.ban": Proc }
@@ -152,7 +156,7 @@ export type ExtractRpcGroups<
 > = internal.ExtractRpcGroups<Routes, Prefix>
 
 /**
- * Infer the input type of a procedure.
+ * Infer the input type of a Procedure.
  *
  * @since 0.1.0
  * @category type-level
@@ -160,7 +164,7 @@ export type ExtractRpcGroups<
 export type InferInput<T> = internal.InferInput<T>
 
 /**
- * Infer the output type of a procedure.
+ * Infer the output type of a Procedure.
  *
  * @since 0.1.0
  * @category type-level
@@ -168,7 +172,7 @@ export type InferInput<T> = internal.InferInput<T>
 export type InferOutput<T> = internal.InferOutput<T>
 
 /**
- * Infer the error type of a procedure (includes middleware errors).
+ * Infer the error type of a Procedure (includes middleware errors).
  *
  * @since 0.4.0
  * @category type-level
@@ -176,7 +180,7 @@ export type InferOutput<T> = internal.InferOutput<T>
 export type InferError<T> = internal.InferError<T>
 
 /**
- * Infer the requirements (R channel) of a procedure (includes middleware requirements).
+ * Infer the requirements (R channel) of a Procedure (includes middleware requirements).
  *
  * @since 0.4.0
  * @category type-level
@@ -184,7 +188,7 @@ export type InferError<T> = internal.InferError<T>
 export type InferRequirements<T> = internal.InferRequirements<T>
 
 /**
- * Infer the services provided by middleware for a procedure.
+ * Infer the services provided by middleware for a Procedure.
  *
  * @since 0.4.0
  * @category type-level
@@ -258,12 +262,12 @@ export const isProceduresGroup: (entry: { readonly _tag: string }) => entry is A
  * // Nested structure
  * const appRouter = Router.make({
  *   user: Router.make({
- *     posts: procedures("posts", { list: p.query(...) }),
+ *     posts: Procedures.make({ list: p.query(...) }),
  *     comments: Router.make({
- *       recent: procedures("recent", { list: p.query(...) }),
+ *       recent: Procedures.make({ list: p.query(...) }),
  *     }),
  *   }),
- *   health: procedures("health", { check: p.query(...) }),
+ *   health: Procedures.make({ check: p.query(...) }),
  * })
  * ```
  *
@@ -304,6 +308,29 @@ export const Router = {
    * @category constructors
    */
   make: internal.make,
+  /**
+   * Provide implementation layers for procedures and middleware.
+   */
+  provide: dual<
+    <R>(
+      layer: Layer.Layer<unknown, never, R>,
+    ) => <Routes extends RouterRecord>(router: Router<Routes>) => Router<Routes>,
+    <Routes extends RouterRecord, R>(
+      router: Router<Routes>,
+      layer: Layer.Layer<unknown, never, R>,
+    ) => Router<Routes>
+  >(2, <Routes extends RouterRecord, R>(router: Router<Routes>, layer: Layer.Layer<unknown, never, R>) =>
+    router.provide(layer)),
+  /**
+   * Create a web handler from a provided router.
+   */
+  toHttpHandler: dual<
+    (
+      options?: ToHttpHandlerOptions,
+    ) => <Routes extends RouterRecord>(router: Router<Routes>) => HttpHandler,
+    <Routes extends RouterRecord>(router: Router<Routes>, options?: ToHttpHandlerOptions) => HttpHandler
+  >(2, <Routes extends RouterRecord>(router: Router<Routes>, options?: ToHttpHandlerOptions) =>
+    router.toHttpHandler(options)),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,7 +346,7 @@ export const Router = {
  * ```ts
  * const appRouter = Router.make({
  *   user: Router.make({
- *     posts: procedures("posts", {
+ *     posts: Procedures.make({
  *       create: p.mutation(...).invalidates(["user.posts.list"]),
  *     }),
  *   }),

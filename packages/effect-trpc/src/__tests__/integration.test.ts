@@ -18,8 +18,8 @@ import { NodeHttpClient } from "@effect/platform-node"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 
-import { procedure, procedures, Router } from "../index.js"
-import { Client } from "../core/client.js"
+import { Procedure, Procedures, Router } from "../index.js"
+import { Client } from "../core/client/index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
 
 // HttpClient layer for running client effects
@@ -46,15 +46,15 @@ const CreateUserSchema = Schema.Struct({
 // Test Fixtures - Procedures (same as users would define)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const UserProcedures = procedures("user", {
-  list: procedure.output(Schema.Array(UserSchema)).query(),
+const UserProcedures = Procedures.make({
+  list: Procedure.output(Schema.Array(UserSchema)).query(),
 
-  byId: procedure
+  byId: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(Schema.Union(UserSchema, Schema.Null))
     .query(),
 
-  create: procedure
+  create: Procedure
     .input(CreateUserSchema)
     .output(UserSchema)
     .invalidates(["user.list"])

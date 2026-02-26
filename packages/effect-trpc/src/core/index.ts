@@ -12,6 +12,9 @@ export type {
   ProcedureBuilder,
   ProcedureDefinition,
   ProcedureType,
+  TaggedErrorClass as ProcedureTaggedErrorClass,
+  ProcedureImplementation,
+  ProcedureImplementationTag,
   // Type inference helpers
   InferProcedureContext,
   InferProcedureInput,
@@ -19,9 +22,9 @@ export type {
   InferProcedureError,
   InferProcedureMiddlewareR,
   InferProcedureProvides,
-} from "./procedure.js"
+} from "./server/procedure.js"
 
-export { procedure } from "./procedure.js"
+export { Procedure } from "./server/procedure.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Procedures (Groups)
@@ -43,9 +46,9 @@ export type {
   SubscriptionHandler,
   SubscriptionContext,
   UnsubscribeReason,
-} from "./procedures.js"
+} from "./server/procedures.js"
 
-export { procedures, UnsubscribeReason as UnsubscribeReasonCtor } from "./procedures.js"
+export { Procedures, UnsubscribeReason as UnsubscribeReasonCtor } from "./server/procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Router
@@ -57,13 +60,15 @@ export {
   extractMetadata,
   isRouter,
   isProceduresGroup,
-} from "./router.js"
+} from "./server/router.js"
 
 export type {
   RouterValidationError as RouterValidationErrorType,
   RouterRecord,
   Router as RouterType,
   ToHttpLayerOptions,
+  ToHttpHandlerOptions,
+  HttpHandler,
   ProcedureMetadata,
   MetadataRegistry,
   ExtractProcedures,
@@ -76,7 +81,7 @@ export type {
   AnyProceduresGroup,
   AnyRouter,
   RouterEntry,
-} from "./router.js"
+} from "./server/router.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RPC Bridge (advanced usage)
@@ -89,7 +94,7 @@ export {
   proceduresGroupToRpcGroup,
   convertHandlers,
   createRpcComponents,
-} from "./rpc-bridge.js"
+} from "./rpc/index.js"
 
 export type {
   AnyRpc,
@@ -101,7 +106,7 @@ export type {
   CreateServerLayerOptions,
   GroupRpcs,
   GroupHandlers,
-} from "./rpc-bridge.js"
+} from "./rpc/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Middleware
@@ -109,38 +114,21 @@ export type {
 
 export {
   Middleware,
-  middlewareWithProvides,
-  composeMiddleware,
-  loggingMiddleware,
-  timingMiddleware,
-  timeoutMiddleware,
-  rateLimitMiddleware,
-  authMiddleware,
-  requirePermission,
   MiddlewareTimeoutError,
   MiddlewareRateLimitError,
   MiddlewareAuthError,
   MiddlewarePermissionError,
-  MiddlewareContextRef,
-  getMiddlewareContext,
-  requireMiddlewareContext,
-  // Service-providing middleware (v0.2.0)
-  ServiceMiddlewareTypeId,
-  isServiceMiddleware,
-  serviceMiddleware,
-} from "./middleware.js"
+} from "./server/middleware.js"
 
 export type {
   BaseContext,
   AuthenticatedContext,
-  MiddlewareFn,
+  MiddlewareBuilder,
+  TaggedErrorClass as MiddlewareTaggedErrorClass,
+  MiddlewareImplementation,
   Middleware as MiddlewareType,
   MiddlewareProvides,
-  RateLimitOptions,
-  // Service-providing middleware types (v0.2.0)
-  ServiceMiddleware,
-  ServiceMiddlewareService,
-} from "./middleware.js"
+} from "./server/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client
@@ -159,7 +147,7 @@ export {
   isRpcTimeoutError,
   isRpcError,
   isRetryableError,
-} from "./client.js"
+} from "./client/index.js"
 
 export type {
   RetryConfig,
@@ -171,7 +159,7 @@ export type {
   RpcTimeoutErrorTypeId as RpcTimeoutErrorTypeIdType,
   TRPCClient,
   RpcError,
-} from "./client.js"
+} from "./client/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types (Branded IDs)
@@ -219,3 +207,11 @@ export {
 } from "./network/index.js"
 
 export type { NetworkState, NetworkDetector, NetworkService } from "./network/index.js"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Architecture Namespaces
+// ─────────────────────────────────────────────────────────────────────────────
+
+export * as ServerCore from "./server/index.js"
+export * as ClientCore from "./client/index.js"
+export * as RpcCore from "./rpc/index.js"

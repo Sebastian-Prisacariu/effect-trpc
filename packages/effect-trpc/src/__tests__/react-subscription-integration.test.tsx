@@ -56,19 +56,19 @@ globalThis.WebSocket = MockWebSocket as any
 if (typeof window !== "undefined") window.WebSocket = MockWebSocket as any
 if (typeof global !== "undefined") global.WebSocket = MockWebSocket as any
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { createWebSocketHandler } from "../node/index.js"
 import { useSubscription, WebSocketProvider } from "../react/subscription.js"
 
 const EchoInput = Schema.Struct({ text: Schema.String })
 const EchoOutput = Schema.Struct({ text: Schema.String })
 
-const testProcedures = procedures("test", {
-  echo: procedure
+const testProcedures = Procedures.make({
+  echo: Procedure
     .input(EchoInput)
     .output(EchoOutput)
     .subscription(),
-  protected: procedure
+  protected: Procedure
     .input(Schema.String)
     .output(Schema.String)
     .subscription(),

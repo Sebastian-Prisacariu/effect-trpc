@@ -17,7 +17,7 @@ import * as Layer from "effect/Layer"
 import { Readable } from "node:stream"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { buildCorsHeaders } from "../shared/cors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,9 +29,9 @@ const UserSchema = Schema.Struct({
   name: Schema.String,
 })
 
-const UserProcedures = procedures("user", {
-  get: procedure.input(Schema.Struct({ id: Schema.String })).output(UserSchema).query(),
-  create: procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
+const UserProcedures = Procedures.make({
+  get: Procedure.input(Schema.Struct({ id: Schema.String })).output(UserSchema).query(),
+  create: Procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
 })
 
 const testRouter = Router.make({

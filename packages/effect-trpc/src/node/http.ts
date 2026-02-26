@@ -33,7 +33,7 @@ import * as NodeContext from "@effect/platform-node/NodeContext"
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform"
 import * as NodeStream from "@effect/platform-node/NodeStream"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import type { Router } from "../core/router.js"
+import type { Router } from "../core/server/router.js"
 import {
   type CorsOptions,
   type SecurityHeadersOptions,

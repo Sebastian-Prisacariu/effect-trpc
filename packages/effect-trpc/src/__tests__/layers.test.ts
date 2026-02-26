@@ -15,10 +15,10 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Context from "effect/Context"
 import * as Schema from "effect/Schema"
-import { procedure } from "../core/procedure.js"
-import { procedures, type ProceduresService } from "../core/procedures.js"
-import { Router } from "../core/router.js"
-import type { BaseContext } from "../core/middleware.js"
+import { Procedure } from "../core/index.js"
+import { Procedures, type ProceduresService } from "../core/index.js"
+import { Router } from "../core/server/router.js"
+import type { BaseContext } from "../core/server/middleware.js"
 
 // Mock context for testing handlers directly
 const mockCtx: BaseContext = {
@@ -68,19 +68,19 @@ const TodoSchema = Schema.Struct({
   completed: Schema.Boolean,
 })
 
-const TodoProcedures = procedures("todo", {
-  list: procedure.output(Schema.Array(TodoSchema)).query(),
-  create: procedure
+const TodoProcedures = Procedures.make({
+  list: Procedure.output(Schema.Array(TodoSchema)).query(),
+  create: Procedure
     .input(Schema.Struct({ title: Schema.String }))
     .output(TodoSchema)
     .mutation(),
-  toggle: procedure
+  toggle: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(TodoSchema)
     .mutation(),
 })
 
-const TodoService = Context.GenericTag<ProceduresService<"todo", typeof TodoProcedures.procedures>>(
+const TodoService = Context.GenericTag<ProceduresService<"", typeof TodoProcedures.procedures>>(
   "@effect-trpc/todo",
 )
 
@@ -354,11 +354,11 @@ describe("router with layers", () => {
 
   const UserSchema = Schema.Struct({ id: Schema.String, name: Schema.String })
 
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
   })
 
-  const UserService = Context.GenericTag<ProceduresService<"user", typeof UserProcedures.procedures>>(
+  const UserService = Context.GenericTag<ProceduresService<"", typeof UserProcedures.procedures>>(
     "@effect-trpc/user",
   )
 

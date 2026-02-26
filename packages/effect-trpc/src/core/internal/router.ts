@@ -6,15 +6,23 @@
  * This module contains implementation details that are not part of the public API.
  */
 
+import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Data from "effect/Data"
 import * as Record from "effect/Record"
+import type { Pipeable } from "effect/Pipeable"
+import { pipeArguments } from "effect/Pipeable"
 import type { RpcGroup } from "@effect/rpc"
 import { RpcServer, RpcSerialization } from "@effect/rpc"
-import type { ProceduresGroup, ProcedureRecord } from "../procedures.js"
-import type { ProcedureDefinition } from "../procedure.js"
-import { proceduresGroupToRpcGroup, type AnyRpc, type ProceduresToRpcs } from "../rpc-bridge.js"
-import type { Middleware, ServiceMiddleware } from "../middleware.js"
+import type { InferHandlers, ProceduresGroup, ProcedureRecord } from "../server/procedures.js"
+import type { ProcedureDefinition } from "../server/procedure.js"
+import {
+  convertHandlers,
+  proceduresGroupToRpcGroup,
+  type AnyRpc,
+  type ProceduresToRpcs,
+} from "../rpc-bridge.js"
+import type { BaseContext, Middleware } from "../server/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type ID
@@ -135,8 +143,8 @@ export type RouterRecord = {
 export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractProcedures<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? { [PK in keyof Procs as `${Prefix}${Name}.${PK & string}`]: Procs[PK] }
+    : Routes[K] extends ProceduresGroup<infer _Name, infer Procs>
+      ? { [PK in keyof Procs as `${Prefix}${K & string}.${PK & string}`]: Procs[PK] }
       : never
 }[keyof Routes]
 
@@ -148,8 +156,8 @@ export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string
 export type ExtractRpcGroups<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractRpcGroups<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>>
+    : Routes[K] extends ProceduresGroup<infer _Name, infer Procs>
+      ? RpcGroup.RpcGroup<ProceduresToRpcs<K & string, Procs, Prefix>>
       : never
 }[keyof Routes]
 
@@ -174,7 +182,7 @@ export interface ToHttpLayerOptions<R> {
   /**
    * Layer providing all procedure implementations.
    */
-  readonly handlers: Layer.Layer<any, never, R>
+  readonly handlers: Layer.Layer<unknown, never, R>
 
   /**
    * Protocol to use for RPC communication.
@@ -186,13 +194,37 @@ export interface ToHttpLayerOptions<R> {
 }
 
 /**
+ * Options for creating a web handler from a provided router.
+ */
+export interface ToHttpHandlerOptions {
+  /**
+   * Disable OpenTelemetry tracing.
+   * @default false
+   */
+  readonly disableTracing?: boolean
+  /**
+   * Prefix for span names.
+   * @default "@effect-trpc"
+   */
+  readonly spanPrefix?: string
+}
+
+/**
+ * Web handler returned by `toHttpHandler`.
+ */
+export interface HttpHandler {
+  readonly handler: (request: Request) => Promise<Response>
+  readonly dispose: () => Promise<void>
+}
+
+/**
  * A Router composes procedure groups with support for infinite nesting.
  * Routers can contain procedure groups (leaf nodes) or other routers (branches).
  *
  * @since 0.1.0
  * @category models
  */
-export interface Router<Routes extends RouterRecord = RouterRecord> {
+export interface Router<Routes extends RouterRecord = RouterRecord> extends Pipeable {
   readonly [TypeId]: TypeId
   readonly _tag: "Router"
 
@@ -214,28 +246,34 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
 
   /**
    * Router-level middlewares applied to all procedures in this router.
-   * Includes both regular middleware and service-providing middleware.
    */
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<Middleware<any, any, any, any>>
+  /**
+   * Layer provided via `Router.provide`.
+   */
+  readonly implementationLayer?: Layer.Layer<unknown, never, unknown>
 
   /**
    * Apply middleware to all procedures in this router.
    * Returns a new Router with the middleware attached.
-   *
-   * Supports both regular middleware and service-providing middleware.
-   * Service middleware properly provides services to both Effect and Stream handlers.
    */
-  use(
-    middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-  ): Router<Routes>
+  use(middleware: Middleware<any, any, any, any>): Router<Routes>
+
+  /**
+   * Provide procedure and middleware implementation layers.
+   */
+  provide<R>(layer: Layer.Layer<unknown, never, R>): Router<Routes>
 
   /**
    * Create a Layer that serves this router over HTTP.
    * Uses NDJSON serialization for streaming support.
    */
   toHttpLayer<R>(options: ToHttpLayerOptions<R>): Layer.Layer<never, never, R>
+
+  /**
+   * Create a web handler from a router with provided implementations.
+   */
+  toHttpHandler(options?: ToHttpHandlerOptions): HttpHandler
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -297,7 +335,7 @@ type ProceduresClient<Procs extends ProcedureRecord> = {
 }
 
 /**
- * Client type for a single procedure (hooks).
+ * Client type for a single Procedure (hooks).
  * @internal
  */
 type ProcedureClient<P> = P extends { type: "query" }
@@ -430,7 +468,7 @@ interface FlattenAccumulator {
  * heterogeneous procedure types. However, at runtime, all values are guaranteed
  * to be ProcedureDefinition objects because:
  *
- * 1. They can only be created via procedure.query/mutation/stream/chat/subscription
+ * 1. They can only be created via Procedure.query/mutation/stream/chat/subscription
  * 2. The procedure builder always returns ProcedureDefinition
  * 3. TypeScript enforces this at the call site via InferHandlers<P>
  *
@@ -464,8 +502,13 @@ function unsafeAssertProcedureDefinition(procValue: unknown): ProcedureDefinitio
 function unsafeWidenRpcGroup(
   group: AnyProceduresGroup,
   pathPrefix: string,
+  groupKey: string,
 ): RpcGroup.RpcGroup<AnyRpc> {
-  return proceduresGroupToRpcGroup(group, pathPrefix) as unknown as RpcGroup.RpcGroup<AnyRpc>
+  return proceduresGroupToRpcGroup(
+    group,
+    pathPrefix,
+    groupKey,
+  ) as unknown as RpcGroup.RpcGroup<AnyRpc>
 }
 
 /**
@@ -526,7 +569,7 @@ function flattenRoutes<Routes extends RouterRecord>(
   const accumulator = Record.reduce(
     entries,
     { procedures: {}, rpcGroups: [] } as FlattenAccumulator,
-    (acc, entry, key) => {
+    (acc: FlattenAccumulator, entry: RouterEntry, key: string) => {
       if (isRouter(entry)) {
         // Nested router - recurse and merge results
         const nested = flattenRoutes(entry.routes, `${pathPrefix}${key}.`)
@@ -538,12 +581,12 @@ function flattenRoutes<Routes extends RouterRecord>(
         Record.reduce(
           entry.procedures as globalThis.Record<string, unknown>,
           undefined as void,
-          (_, procValue, procName) => {
+          (_: void, procValue: unknown, procName: string) => {
             const fullPath = `${pathPrefix}${key}.${procName}`
             acc.procedures[fullPath] = unsafeAssertProcedureDefinition(procValue)
           },
         )
-        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, pathPrefix))
+        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, pathPrefix, String(key)))
       }
       return acc
     },
@@ -561,9 +604,17 @@ function flattenRoutes<Routes extends RouterRecord>(
  * @internal
  */
 export interface MakeOptions {
-  readonly middlewares?: ReadonlyArray<
-    Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >
+  readonly middlewares?: ReadonlyArray<Middleware<any, any, any, any>>
+  readonly implementationLayer?: Layer.Layer<unknown, never, unknown>
+}
+
+type AnyMiddleware = Middleware<BaseContext, BaseContext, unknown, unknown, unknown, unknown>
+
+const RouterProto = {
+  [TypeId]: TypeId,
+  pipe() {
+    return pipeArguments(this, arguments)
+  },
 }
 
 /**
@@ -599,20 +650,109 @@ export const make = <Routes extends RouterRecord>(
   // The non-null assertion is safe: we validated rpcGroups.length > 0 above
   const combinedGroup = rpcGroups.slice(1).reduce((acc, group) => acc.merge(group), rpcGroups[0]!)
 
-  return {
-    [TypeId]: TypeId,
-    _tag: "Router",
+  const processRouterEntries = (
+    entries: RouterRecord,
+    pathPrefix: string,
+    accumulatedMiddlewares: ReadonlyArray<AnyMiddleware>,
+  ): Effect.Effect<Array<Record<string, unknown>>, never, unknown> =>
+    Effect.gen(function* () {
+      const handlerEntries: Array<Record<string, unknown>> = []
+
+      for (const [key, entry] of Object.entries(entries)) {
+        if (isRouter(entry)) {
+          const nestedMiddlewares: ReadonlyArray<AnyMiddleware> = [
+            ...accumulatedMiddlewares,
+            ...(entry.middlewares ?? []),
+          ]
+          const nested = yield* processRouterEntries(
+            entry.routes,
+            `${pathPrefix}${key}.`,
+            nestedMiddlewares,
+          )
+          handlerEntries.push(...nested)
+          continue
+        }
+
+        if (isProceduresGroup(entry)) {
+          const implementations: Record<string, unknown> = {}
+          for (const [procedureName, procedureDef] of Object.entries(entry.procedures)) {
+            const definition = unsafeAssertProcedureDefinition(procedureDef)
+            const implementation = yield* definition.implementationTag
+            implementations[procedureName] = implementation
+          }
+
+          const converted = convertHandlers(
+            entry as ProceduresGroup<string, ProcedureRecord>,
+            implementations as unknown as InferHandlers<ProcedureRecord>,
+            pathPrefix,
+            accumulatedMiddlewares,
+            key,
+          )
+          handlerEntries.push(converted as Record<string, unknown>)
+        }
+      }
+
+      return handlerEntries
+    })
+
+  const toHttpHandler = (handlerOptions?: ToHttpHandlerOptions): HttpHandler => {
+    if (options?.implementationLayer === undefined) {
+      throw new RouterValidationError({
+        module: "Router",
+        method: "toHttpHandler",
+        reason:
+          "Missing implementation layer. Provide layers first with Router.provide(...) or router.provide(...)",
+      })
+    }
+
+    const rootMiddlewares: ReadonlyArray<AnyMiddleware> = options.middlewares ?? []
+
+    const extractHandlersEffect = Effect.map(
+      processRouterEntries(routes, "", rootMiddlewares),
+      (handlerEntries: Array<Record<string, unknown>>) => Object.assign({}, ...handlerEntries),
+    )
+
+    const rpcHandlersLayer = combinedGroup.toLayer(extractHandlersEffect as unknown)
+
+    const fullLayer = Layer.mergeAll(
+      rpcHandlersLayer,
+      RpcSerialization.layerNdjson,
+      options.implementationLayer,
+    )
+
+    return RpcServer.toWebHandler(combinedGroup, {
+      layer: fullLayer as unknown,
+      disableTracing: handlerOptions?.disableTracing,
+      spanPrefix: handlerOptions?.spanPrefix ?? "@effect-trpc",
+    })
+  }
+
+  const self = Object.create(RouterProto) as Router<Routes>
+
+  return Object.assign(self, {
+    _tag: "Router" as const,
     routes,
     procedures: flattenedProcedures,
     rpcGroup: combinedGroup,
-    ...(options?.middlewares ? { middlewares: options.middlewares } : {}),
+    middlewares: options?.middlewares,
+    implementationLayer: options?.implementationLayer,
 
-    use: (
-      middleware: Middleware<any, any, any, any> | ServiceMiddleware<any, any, any, any, any>,
-    ) => {
+    use: (middleware: Middleware<any, any, any, any>) => {
       const existingMiddlewares = options?.middlewares ?? []
-      return make(routes, { middlewares: [...existingMiddlewares, middleware] })
+      return make(routes, {
+        ...options,
+        middlewares: [...existingMiddlewares, middleware],
+      })
     },
+
+    provide: <R>(layer: Layer.Layer<unknown, never, R>) =>
+      make(routes, {
+        ...options,
+        implementationLayer:
+          options?.implementationLayer === undefined
+            ? layer
+            : Layer.mergeAll(options.implementationLayer, layer),
+      }),
 
     toHttpLayer: <R>(httpOptions: ToHttpLayerOptions<R>) => {
       const path = httpOptions.path ?? "/rpc"
@@ -624,7 +764,9 @@ export const make = <Routes extends RouterRecord>(
         protocol,
       }).pipe(Layer.provide(RpcSerialization.layerNdjson), Layer.provide(httpOptions.handlers))
     },
-  }
+
+    toHttpHandler,
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,7 +890,7 @@ export const extractMetadata = <Routes extends RouterRecord>(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Infer the input type of a procedure.
+ * Infer the input type of a Procedure.
  *
  * This extracts the `I` type parameter from `ProcedureDefinition`, which
  * includes both:
@@ -768,7 +910,7 @@ export type InferInput<T> =
     : never
 
 /**
- * Infer the output type of a procedure.
+ * Infer the output type of a Procedure.
  *
  * @since 0.1.0
  * @category type-level
@@ -783,7 +925,7 @@ export type InferOutput<T> =
     : never
 
 /**
- * Infer the error type of a procedure.
+ * Infer the error type of a Procedure.
  *
  * This extracts the `E` type parameter from `ProcedureDefinition`, which
  * includes both:
@@ -803,7 +945,7 @@ export type InferError<T> =
     : never
 
 /**
- * Infer the requirements (R channel) of a procedure.
+ * Infer the requirements (R channel) of a Procedure.
  *
  * This extracts the `R` type parameter from `ProcedureDefinition`, which
  * includes requirements from middleware (accumulated via `.use()`).
@@ -821,7 +963,7 @@ export type InferRequirements<T> =
     : never
 
 /**
- * Infer the services provided by middleware for a procedure.
+ * Infer the services provided by middleware for a Procedure.
  *
  * This extracts the `Provides` type parameter from `ProcedureDefinition`.
  *

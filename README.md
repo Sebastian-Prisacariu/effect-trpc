@@ -27,6 +27,16 @@ tRPC-style ergonomics for Effect-based applications.
 - **Middleware system** for authentication, rate limiting, and more
 - **Rich error types** with `isRetryable` and `httpStatus`
 
+## Core Architecture
+
+Core internals are organized by domain:
+
+- `core/server/*` for middleware, procedure, procedures, and router logic
+- `core/client/*` for client-side transport and proxy surfaces
+- `core/rpc/*` for shared wire schemas, RPC errors, and bridge utilities
+
+For application code, keep importing from `effect-trpc`. These paths are primarily for contributors and internal organization.
+
 ## Why effect-trpc?
 
 - **Full Effect integration** - Your handlers return `Effect`, errors are typed, services are composable
@@ -47,7 +57,7 @@ pnpm add effect-trpc effect @effect/rpc @effect/platform @effect/schema
 
 ```typescript
 // src/server/procedures/user.ts
-import { procedures, procedure } from 'effect-trpc'
+import { Procedures, Procedure } from 'effect-trpc'
 import * as Schema from 'effect/Schema'
 import * as Effect from 'effect/Effect'
 
@@ -64,17 +74,17 @@ const CreateUserSchema = Schema.Struct({
 })
 
 // Define procedures
-export const UserProcedures = procedures('user', {
-  list: procedure
+export const UserProcedures = Procedures.make({
+  list: Procedure
     .output(Schema.Array(UserSchema))
     .query(),
     
-  byId: procedure
+  byId: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(UserSchema)
     .query(),
     
-  create: procedure
+  create: Procedure
     .input(CreateUserSchema)
     .output(UserSchema)
     .invalidates(['user.list'])  // Automatic cache invalidation
@@ -82,29 +92,28 @@ export const UserProcedures = procedures('user', {
 })
 
 // Implement handlers
-export const UserProceduresLive = UserProcedures.toLayer({
-  list: () => 
-    Effect.succeed([
-      { id: '1', name: 'Alice', email: 'alice@example.com' }
-    ]),
-    
-  byId: ({ id }) => 
-    Effect.succeed({ id, name: 'Test User', email: 'test@example.com' }),
-    
-  create: ({ name, email }) =>
+export const UserProceduresLive = Layer.mergeAll(
+  UserProcedures.procedures.list.toLayer((_ctx, _input) =>
+    Effect.succeed([{ id: "1", name: "Alice", email: "alice@example.com" }]),
+  ),
+  UserProcedures.procedures.byId.toLayer((_ctx, { id }) =>
+    Effect.succeed({ id, name: "Test User", email: "test@example.com" }),
+  ),
+  UserProcedures.procedures.create.toLayer((_ctx, { name, email }) =>
     Effect.succeed({ id: crypto.randomUUID(), name, email }),
-})
+  ),
+)
 ```
 
 ### 2. Create Router
 
 ```typescript
 // src/server/router.ts
-import { createRouter } from 'effect-trpc'
+import { Router } from 'effect-trpc'
 import { UserProcedures, UserProceduresLive } from './procedures/user'
 import { PostProcedures, PostProceduresLive } from './procedures/post'
 
-export const appRouter = createRouter({
+export const appRouter = Router.make({
   user: UserProcedures,
   post: PostProcedures,
 })
@@ -117,21 +126,24 @@ export type AppRouter = typeof appRouter
 
 ```typescript
 // src/app/api/trpc/[...trpc]/route.ts
-import { createRouteHandler } from 'effect-trpc/next'
 import * as Layer from 'effect/Layer'
+import { Router } from 'effect-trpc'
 import { appRouter } from '~/server/router'
 import { UserProceduresLive } from '~/server/procedures/user'
 import { PostProceduresLive } from '~/server/procedures/post'
 
-const handler = createRouteHandler({
-  router: appRouter,
-  handlers: Layer.mergeAll(
+const rpc = appRouter.pipe(
+  Router.provide(
+    Layer.mergeAll(
     UserProceduresLive,
     PostProceduresLive,
   ),
-})
+  ),
+  Router.toHttpHandler(),
+)
 
-export { handler as GET, handler as POST }
+export const GET = rpc.handler
+export const POST = rpc.handler
 ```
 
 ### 4. Create React Client
@@ -206,12 +218,12 @@ export function UserList() {
 For data fetching. Cached by default.
 
 ```typescript
-const UserProcedures = procedures('user', {
-  list: procedure
+const UserProcedures = Procedures.make({
+  list: Procedure
     .output(Schema.Array(UserSchema))
     .query(),
     
-  byId: procedure
+  byId: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(UserSchema)
     .query(),
@@ -227,14 +239,14 @@ const user = api.user.byId.useQuery({ id: '123' })
 For data modifications. Not cached.
 
 ```typescript
-const UserProcedures = procedures('user', {
-  create: procedure
+const UserProcedures = Procedures.make({
+  create: Procedure
     .input(CreateUserSchema)
     .output(UserSchema)
     .invalidates(['user.list'])
     .mutation(),
     
-  delete: procedure
+  delete: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .mutation(),
 })
@@ -309,8 +321,8 @@ The `OptimisticUpdateContext` provides:
 For server-sent events and real-time data over HTTP.
 
 ```typescript
-const NotificationProcedures = procedures('notifications', {
-  watch: procedure
+const NotificationProcedures = Procedures.make({
+  watch: Procedure
     .input(Schema.Struct({ userId: Schema.String }))
     .output(NotificationSchema)  // Schema for each streamed item
     .stream(),
@@ -341,8 +353,8 @@ For real-time bidirectional communication over WebSocket. Unlike streams (HTTP S
 
 ```typescript
 // Define subscription procedure
-const ChatProcedures = procedures('chat', {
-  room: procedure
+const ChatProcedures = Procedures.make({
+  room: Procedure
     .input(Schema.Struct({ roomId: Schema.String }))
     .output(ChatMessageSchema)  // Schema for each message
     .subscription(),
@@ -545,8 +557,8 @@ subscription.unsubscribe()  // Stop subscription
 For AI completions with `@effect/ai` compatibility.
 
 ```typescript
-const AIProcedures = procedures('ai', {
-  complete: procedure
+const AIProcedures = Procedures.make({
+  complete: Procedure
     .input(Schema.Struct({ 
       messages: Schema.Array(MessageSchema) 
     }))
@@ -602,22 +614,22 @@ const authMiddleware = middleware<BaseContext, AuthenticatedContext<User>, AuthE
 ### Applying to Procedures
 
 ```typescript
-const UserProcedures = procedures('user', {
+const UserProcedures = Procedures.make({
   // Public endpoint
-  byId: procedure
+  byId: Procedure
     .input(IdSchema)
     .output(UserSchema)
     .query(),
 
   // Protected endpoint
-  update: procedure
+  update: Procedure
     .use(authMiddleware)
     .input(UpdateUserSchema)
     .output(UserSchema)
     .mutation(),
 
   // Multiple middleware (executed in order)
-  delete: procedure
+  delete: Procedure
     .use(authMiddleware)
     .use(requirePermission('user:delete'))
     .input(IdSchema)
@@ -743,8 +755,8 @@ Define invalidation rules on your procedures:
 
 ```typescript
 // Server: src/server/procedures/user.ts
-const UserProcedures = procedures('user', {
-  create: procedure
+const UserProcedures = Procedures.make({
+  create: Procedure
     .input(CreateUserSchema)
     .invalidates(['user.list'])        // Invalidate specific queries
     .invalidatesTags(['users'])        // Or by tag
@@ -756,9 +768,9 @@ To use declarative invalidation on the client, extract metadata from your router
 
 ```typescript
 // Server: src/server/router.ts
-import { createRouter, extractMetadata } from 'effect-trpc'
+import { Router, extractMetadata } from 'effect-trpc'
 
-export const appRouter = createRouter({
+export const appRouter = Router.make({
   user: UserProcedures,
   post: PostProcedures,
 })
@@ -910,17 +922,7 @@ utils.invalidateAll()
 Core functionality - procedures, router, errors, middleware:
 
 ```typescript
-import {
-  procedures,
-  procedure,
-  createRouter,
-  createClient,
-  middleware,
-  // Errors
-  NotFoundError,
-  UnauthorizedError,
-  // etc.
-} from 'effect-trpc'
+import { Procedures, Procedure, Router, createClient, middleware, // Errors   NotFoundError, UnauthorizedError, // etc. } from 'effect-trpc'
 ```
 
 ### `effect-trpc/react`
@@ -980,7 +982,15 @@ Builder methods:
 Next.js App Router integration:
 
 ```typescript
-import { createRouteHandler } from 'effect-trpc/next'
+import { Router } from 'effect-trpc'
+
+const rpc = appRouter.pipe(
+  Router.provide(AppLive),
+  Router.toHttpHandler(),
+)
+
+export const GET = rpc.handler
+export const POST = rpc.handler
 
 // SSR/RSC helpers are planned for v2.
 // In the meantime, call your Effect services directly in Server Components:

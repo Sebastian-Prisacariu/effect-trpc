@@ -23,9 +23,15 @@ import * as Predicate from "effect/Predicate"
 import * as HttpClient from "@effect/platform/HttpClient"
 import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
 import * as HttpClientError from "@effect/platform/HttpClientError"
-import type { Router, RouterRecord } from "./router.js"
-import type { ProceduresGroup, ProcedureRecord } from "./procedures.js"
-import type { ProcedureDefinition } from "./procedure.js"
+import type { Router, RouterRecord } from "./server/router.js"
+import type { ProceduresGroup, ProcedureRecord } from "./server/procedures.js"
+import type { ProcedureDefinition } from "./server/procedure.js"
+import {
+  RequestIdSchema,
+  RpcResponseMessageSchema,
+  RpcStreamMessageSchema,
+  type RequestId,
+} from "./rpc/messages.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -466,129 +472,11 @@ export interface TRPCClient<TRouter extends Router> {
   readonly dispose: Effect.Effect<void, never, never>
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RPC Message Schemas for type-safe parsing
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Schema for the Cause structure in failure responses.
- */
-const RpcCauseSchema = Schema.Union(
-  Schema.Struct({
-    _tag: Schema.Literal("Fail"),
-    error: Schema.Unknown,
-  }),
-  Schema.Struct({
-    _tag: Schema.Literal("Die"),
-    defect: Schema.Unknown,
-  }),
-  Schema.Struct({
-    _tag: Schema.Literal("Interrupt"),
-    fiberId: Schema.optional(Schema.Unknown),
-  }),
-)
-
-/**
- * Schema for successful exit in RPC responses.
- */
-const RpcExitSuccessSchema = Schema.Struct({
-  _tag: Schema.Literal("Success"),
-  value: Schema.Unknown,
-})
-
-/**
- * Schema for failed exit in RPC responses.
- */
-const RpcExitFailureSchema = Schema.Struct({
-  _tag: Schema.Literal("Failure"),
-  cause: Schema.optional(RpcCauseSchema),
-})
-
-/**
- * Schema for Exit message wrapper.
- */
-const RpcExitMessageSchema = Schema.Struct({
-  _tag: Schema.Literal("Exit"),
-  exit: Schema.Union(RpcExitSuccessSchema, RpcExitFailureSchema),
-})
-
-/**
- * Schema for Defect messages.
- */
-const RpcDefectMessageSchema = Schema.Struct({
-  _tag: Schema.Literal("Defect"),
-  defect: Schema.optional(Schema.String),
-})
-
-/**
- * Schema for stream part messages.
- */
-const RpcStreamPartSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("StreamPart"), Schema.Literal("Part")),
-  value: Schema.Unknown,
-})
-
-/**
- * Schema for stream end messages.
- */
-const RpcStreamEndSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("StreamEnd"), Schema.Literal("Complete")),
-})
-
-/**
- * Schema for stream error messages.
- */
-const RpcStreamErrorSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("Error"), Schema.Literal("Failure")),
-  error: Schema.optional(Schema.Unknown),
-})
-
-/**
- * Schema for keep-alive messages.
- *
- * Keep-alive messages are sent by the server every 15 seconds during stream/chat/subscription
- * procedures to prevent proxies and load balancers from closing idle connections.
- *
- * These messages use a fixed format (not user data) and are filtered out on the client side -
- * they never reach user code. The schema exists for explicit validation rather than relying
- * on the "unknown message" fallback path.
- *
- * @internal
- */
-const RpcKeepAliveSchema = Schema.Struct({
-  _tag: Schema.Literal("KeepAlive"),
-})
-
-/**
- * Union of all RPC response message types.
- */
-const RpcResponseMessageSchema = Schema.Union(RpcExitMessageSchema, RpcDefectMessageSchema)
-
-/**
- * Union of all stream message types.
- *
- * Includes keep-alive messages which are filtered out before reaching user code.
- */
-const RpcStreamMessageSchema = Schema.Union(
-  RpcStreamPartSchema,
-  RpcStreamEndSchema,
-  RpcStreamErrorSchema,
-  RpcKeepAliveSchema,
-)
+// RPC wire schemas are centralized in `core/rpc/messages.ts`.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request ID
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Branded type for RPC request IDs.
- * Ensures request IDs are not confused with other string types.
- *
- * @since 0.1.0
- * @category Types
- */
-const RequestIdSchema = Schema.String.pipe(Schema.brand("RequestId"))
-type RequestId = typeof RequestIdSchema.Type
 
 /**
  * Generate a unique request ID.
@@ -652,40 +540,7 @@ interface BatcherState {
  * Schema for batch response items.
  * Each line in the response corresponds to a request in the batch.
  */
-const BatchResponseItemSchema = Schema.Union(
-  Schema.Struct({
-    _tag: Schema.Literal("Exit"),
-    exit: Schema.Union(
-      Schema.Struct({
-        _tag: Schema.Literal("Success"),
-        value: Schema.Unknown,
-      }),
-      Schema.Struct({
-        _tag: Schema.Literal("Failure"),
-        cause: Schema.optional(
-          Schema.Union(
-            Schema.Struct({
-              _tag: Schema.Literal("Fail"),
-              error: Schema.Unknown,
-            }),
-            Schema.Struct({
-              _tag: Schema.Literal("Die"),
-              defect: Schema.Unknown,
-            }),
-            Schema.Struct({
-              _tag: Schema.Literal("Interrupt"),
-              fiberId: Schema.optional(Schema.Unknown),
-            }),
-          ),
-        ),
-      }),
-    ),
-  }),
-  Schema.Struct({
-    _tag: Schema.Literal("Defect"),
-    defect: Schema.optional(Schema.String),
-  }),
-)
+const BatchResponseItemSchema = RpcResponseMessageSchema
 
 type BatchResponseItem = typeof BatchResponseItemSchema.Type
 
@@ -1579,7 +1434,7 @@ const makeClientImpl = <TRouter extends Router>(
    * Creates a recursive proxy that handles nested routers.
    *
    * For a nested router structure like:
-   *   router({ user: router({ posts: procedures("posts", { list: ... }) }) })
+   *   router({ user: router({ posts: Procedures.make({ list: ... }) }) })
    *
    * The client access pattern is:
    *   client.procedures.user.posts.list(input)

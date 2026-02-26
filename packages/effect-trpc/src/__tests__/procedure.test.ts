@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest"
 import * as Schema from "effect/Schema"
-import { procedure } from "../core/procedure.js"
+import { Procedure } from "../core/index.js"
 
 describe("procedure builder", () => {
   it("creates a query procedure", () => {
-    const def = procedure.output(Schema.String).query()
+    const def = Procedure.output(Schema.String).query()
 
     expect(def._tag).toBe("ProcedureDefinition")
     expect(def.type).toBe("query")
@@ -16,7 +16,7 @@ describe("procedure builder", () => {
     const InputSchema = Schema.Struct({ name: Schema.String })
     const OutputSchema = Schema.Struct({ id: Schema.String, name: Schema.String })
 
-    const def = procedure.input(InputSchema).output(OutputSchema).mutation()
+    const def = Procedure.input(InputSchema).output(OutputSchema).mutation()
 
     expect(def._tag).toBe("ProcedureDefinition")
     expect(def.type).toBe("mutation")
@@ -27,7 +27,7 @@ describe("procedure builder", () => {
   it("creates a stream procedure", () => {
     const PartSchema = Schema.Struct({ chunk: Schema.String })
 
-    const def = procedure.output(PartSchema).stream()
+    const def = Procedure.output(PartSchema).stream()
 
     expect(def._tag).toBe("ProcedureDefinition")
     expect(def.type).toBe("stream")
@@ -35,18 +35,18 @@ describe("procedure builder", () => {
 
   it("creates a chat procedure", () => {
     const ChatPartSchema = Schema.Union(
-      Schema.Struct({ _tag: Schema.Literal("text-delta"), delta: Schema.String }),
-      Schema.Struct({ _tag: Schema.Literal("finish"), reason: Schema.String }),
+      Schema.TaggedStruct("text-delta", { delta: Schema.String }),
+      Schema.TaggedStruct("finish", { reason: Schema.String }),
     )
 
-    const def = procedure.output(ChatPartSchema).chat()
+    const def = Procedure.output(ChatPartSchema).chat()
 
     expect(def._tag).toBe("ProcedureDefinition")
     expect(def.type).toBe("chat")
   })
 
   it("supports invalidates declaration", () => {
-    const def = procedure
+    const def = Procedure
       .input(Schema.Struct({ name: Schema.String }))
       .invalidates(["user.list", "stats.count"])
       .mutation()
@@ -55,7 +55,7 @@ describe("procedure builder", () => {
   })
 
   it("supports tags declaration", () => {
-    const def = procedure
+    const def = Procedure
       .output(Schema.Array(Schema.String))
       .tags(["users", "list"])
       .query()
@@ -64,7 +64,7 @@ describe("procedure builder", () => {
   })
 
   it("supports invalidatesTags declaration", () => {
-    const def = procedure
+    const def = Procedure
       .input(Schema.Struct({ name: Schema.String }))
       .invalidatesTags(["users"])
       .mutation()
@@ -73,7 +73,7 @@ describe("procedure builder", () => {
   })
 
   it("chains multiple builder methods", () => {
-    const def = procedure
+    const def = Procedure
       .input(Schema.Struct({ id: Schema.String }))
       .output(Schema.Struct({ id: Schema.String, name: Schema.String }))
       .tags(["users"])
@@ -87,7 +87,7 @@ describe("procedure builder", () => {
 
   describe("OpenAPI metadata", () => {
     it("supports summary", () => {
-      const def = procedure
+      const def = Procedure
         .summary("Get user by ID")
         .output(Schema.String)
         .query()
@@ -96,7 +96,7 @@ describe("procedure builder", () => {
     })
 
     it("supports externalDocs", () => {
-      const def = procedure
+      const def = Procedure
         .externalDocs("https://docs.example.com/api/users")
         .output(Schema.String)
         .query()
@@ -105,7 +105,7 @@ describe("procedure builder", () => {
     })
 
     it("supports responseDescription", () => {
-      const def = procedure
+      const def = Procedure
         .output(Schema.String)
         .responseDescription("The user object with all profile fields")
         .query()
@@ -114,7 +114,7 @@ describe("procedure builder", () => {
     })
 
     it("supports all OpenAPI metadata together", () => {
-      const def = procedure
+      const def = Procedure
         .summary("Get user by ID")
         .description("Retrieves a user by their unique identifier. Returns 404 if not found.")
         .externalDocs("https://docs.example.com/api/users")

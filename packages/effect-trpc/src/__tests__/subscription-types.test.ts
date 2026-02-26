@@ -9,14 +9,14 @@ import * as Effect from "effect/Effect"
 import * as Stream from "effect/Stream"
 import * as Schema from "effect/Schema"
 
-import { procedures, procedure } from "../core/index.js"
+import { Procedures, Procedure } from "../core/index.js"
 import type {
   SubscriptionHandler,
   SubscriptionContext,
   UnsubscribeReason,
   InferHandler,
-} from "../core/procedures.js"
-import { UnsubscribeReason as UnsubscribeReasonCtor } from "../core/procedures.js"
+} from "../core/index.js"
+import { UnsubscribeReasonCtor } from "../core/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test: Procedure Definition
@@ -30,8 +30,8 @@ describe("subscription procedure type", () => {
       body: Schema.String,
     })
 
-    const NotificationProcedures = procedures("notifications", {
-      watch: procedure
+    const NotificationProcedures = Procedures.make({
+      watch: Procedure
         .input(Schema.Struct({ userId: Schema.String }))
         .output(NotificationSchema)
         .subscription(),
@@ -42,8 +42,8 @@ describe("subscription procedure type", () => {
   })
 
   it("subscription procedure has correct structure", () => {
-    const TestProcedures = procedures("test", {
-      events: procedure
+    const TestProcedures = Procedures.make({
+      events: Procedure
         .input(Schema.Struct({ topic: Schema.String }))
         .output(Schema.Struct({ data: Schema.Unknown }))
         .subscription(),
@@ -107,8 +107,8 @@ describe("subscription handler types", () => {
   })
 
   it("InferHandler produces SubscriptionHandler for subscription procedures", () => {
-    const _TestProcedures = procedures("test", {
-      sub: procedure
+    const _TestProcedures = Procedures.make({
+      sub: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(Schema.Struct({ value: Schema.Number }))
         .subscription(),

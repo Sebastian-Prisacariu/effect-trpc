@@ -45,7 +45,7 @@ import * as Schedule from "effect/Schedule"
 import * as Duration from "effect/Duration"
 import * as NodeContext from "@effect/platform-node/NodeContext"
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform"
-import type { Router } from "../core/router.js"
+import type { Router } from "../core/server/router.js"
 import {
   createWebSocketRuntimeWithHandlers,
   extractSubscriptionHandlersFromLayer,

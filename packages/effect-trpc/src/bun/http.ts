@@ -33,7 +33,7 @@
 import * as Layer from "effect/Layer"
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
-import type { Router } from "../core/router.js"
+import type { Router } from "../core/server/router.js"
 import {
   type CorsOptions,
   type SecurityHeadersOptions,

@@ -25,9 +25,9 @@ import * as AtomRegistry from "@effect-atom/atom/Registry"
 import * as AtomResult from "@effect-atom/atom/Result"
 import { RegistryContext } from "@effect-atom/atom-react"
 
-import { procedure } from "../core/procedure.js"
-import { procedures } from "../core/procedures.js"
-import { Router, extractMetadata } from "../core/router.js"
+import { Procedure } from "../core/index.js"
+import { Procedures } from "../core/index.js"
+import { Router, extractMetadata } from "../core/server/router.js"
 import {
   RegistryProvider,
   queryAtomFamily,
@@ -69,36 +69,36 @@ type Post = typeof PostSchema.Type
 // Test Fixtures - Procedures (for metadata extraction)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const UserProcedures = procedures("user", {
-  list: procedure.output(Schema.Array(UserSchema)).query(),
+const UserProcedures = Procedures.make({
+  list: Procedure.output(Schema.Array(UserSchema)).query(),
 
-  byId: procedure
+  byId: Procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(Schema.Union(UserSchema, Schema.Null))
     .query(),
 
-  create: procedure
+  create: Procedure
     .input(Schema.Struct({ name: Schema.String }))
     .output(UserSchema)
     .invalidates(["user.list"]) // Should invalidate user.list after mutation
     .mutation(),
 
-  update: procedure
+  update: Procedure
     .input(Schema.Struct({ id: Schema.String, name: Schema.String }))
     .output(UserSchema)
     .invalidates(["user.list", "user.byId"]) // Multiple invalidations
     .mutation(),
 })
 
-const PostProcedures = procedures("post", {
-  list: procedure.output(Schema.Array(PostSchema)).query(),
+const PostProcedures = Procedures.make({
+  list: Procedure.output(Schema.Array(PostSchema)).query(),
 
-  byUser: procedure
+  byUser: Procedure
     .input(Schema.Struct({ userId: Schema.String }))
     .output(Schema.Array(PostSchema))
     .query(),
 
-  create: procedure
+  create: Procedure
     .input(Schema.Struct({ title: Schema.String, userId: Schema.String }))
     .output(PostSchema)
     .invalidates(["post.list", "post.byUser"]) // Invalidates all post queries

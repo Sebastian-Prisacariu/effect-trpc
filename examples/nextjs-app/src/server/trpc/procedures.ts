@@ -6,7 +6,7 @@
 
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import { procedures, procedure } from "effect-trpc"
+import { Procedures, Procedure } from "effect-trpc"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -64,16 +64,16 @@ export type Health = typeof HealthSchema.Type
 // Used in: user.profile.get, user.profile.update
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const UserProfileProcedures = procedures("profile", {
+export const UserProfileProcedures = Procedures.make({
   /**
    * Get the current user's profile.
    */
-  get: procedure.output(UserSchema).query(),
+  get: Procedure.output(UserSchema).query(),
 
   /**
    * Update the current user's profile.
    */
-  update: procedure
+  update: Procedure
     .input(UpdateUserSchema)
     .output(UserSchema)
     .invalidates(["user.profile.get"])
@@ -85,16 +85,16 @@ export const UserProfileProcedures = procedures("profile", {
 // Used in: user.posts.list, user.posts.create
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const UserPostsProcedures = procedures("posts", {
+export const UserPostsProcedures = Procedures.make({
   /**
    * List the current user's posts.
    */
-  list: procedure.output(Schema.Array(PostSchema)).query(),
+  list: Procedure.output(Schema.Array(PostSchema)).query(),
 
   /**
    * Create a new post for the current user.
    */
-  create: procedure
+  create: Procedure
     .input(Schema.Struct({ title: Schema.String, content: Schema.String }))
     .output(PostSchema)
     .invalidates(["user.posts.list", "post.list"])
@@ -106,16 +106,16 @@ export const UserPostsProcedures = procedures("posts", {
 // Used in: admin.users.list, admin.users.delete
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const AdminUsersProcedures = procedures("users", {
+export const AdminUsersProcedures = Procedures.make({
   /**
    * List all users (admin only).
    */
-  list: procedure.output(Schema.Array(UserSchema)).query(),
+  list: Procedure.output(Schema.Array(UserSchema)).query(),
 
   /**
    * Delete a user by ID (admin only).
    */
-  delete: procedure
+  delete: Procedure
     .input(UserIdSchema)
     .output(Schema.Boolean)
     .invalidates(["admin.users.list", "user.list"])
@@ -126,16 +126,16 @@ export const AdminUsersProcedures = procedures("users", {
 // Top-level Post Procedures
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const PostProcedures = procedures("post", {
+export const PostProcedures = Procedures.make({
   /**
    * List all posts.
    */
-  list: procedure.output(Schema.Array(PostSchema)).query(),
+  list: Procedure.output(Schema.Array(PostSchema)).query(),
 
   /**
    * Get posts by author ID.
    */
-  byAuthor: procedure
+  byAuthor: Procedure
     .input(Schema.Struct({ authorId: Schema.String }))
     .output(Schema.Array(PostSchema))
     .query(),
@@ -143,7 +143,7 @@ export const PostProcedures = procedures("post", {
   /**
    * Create a new post.
    */
-  create: procedure
+  create: Procedure
     .input(CreatePostSchema)
     .output(PostSchema)
     .invalidates(["post.list", "post.byAuthor"])
@@ -154,9 +154,9 @@ export const PostProcedures = procedures("post", {
 // Health Check Procedures
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const HealthProcedures = procedures("health", {
+export const HealthProcedures = Procedures.make({
   /**
    * Check the health of the service.
    */
-  check: procedure.output(HealthSchema).query(),
+  check: Procedure.output(HealthSchema).query(),
 })

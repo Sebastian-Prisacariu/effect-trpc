@@ -16,18 +16,17 @@ import * as Random from "effect/Random"
 import * as HttpClient from "@effect/platform/HttpClient"
 import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
 import type * as HttpClientError from "@effect/platform/HttpClientError"
-import { RpcClientError, RpcResponseError } from "../../core/client.js"
+import { RpcClientError, RpcResponseError } from "../../core/client/index.js"
+import {
+  RequestIdSchema,
+  RpcResponseMessageSchema,
+  RpcStreamMessageSchema,
+  type RequestId,
+} from "../../core/rpc/messages.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request ID
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Branded type for RPC request IDs.
- * @internal
- */
-const RequestId = Schema.String.pipe(Schema.brand("RequestId"))
-type RequestId = typeof RequestId.Type
 
 /**
  * Generate a unique request ID.
@@ -36,109 +35,11 @@ type RequestId = typeof RequestId.Type
 export const generateRequestId: Effect.Effect<RequestId> = Effect.gen(function* () {
   const timestamp = yield* Clock.currentTimeMillis
   const random = yield* Random.nextIntBetween(0, 1000000)
-  return (String(timestamp) + String(random).padStart(6, "0")) as RequestId
+  const requestId = String(timestamp) + String(random).padStart(6, "0")
+  return yield* Schema.decode(RequestIdSchema)(requestId).pipe(Effect.orDie)
 })
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RPC Message Schemas
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Schema for the Cause structure in failure responses.
- * @internal
- */
-const RpcCauseSchema = Schema.Union(
-  Schema.Struct({
-    _tag: Schema.Literal("Fail"),
-    error: Schema.Unknown,
-  }),
-  Schema.Struct({
-    _tag: Schema.Literal("Die"),
-    defect: Schema.Unknown,
-  }),
-  Schema.Struct({
-    _tag: Schema.Literal("Interrupt"),
-    fiberId: Schema.optional(Schema.Unknown),
-  }),
-)
-
-/**
- * Schema for successful exit in RPC responses.
- * @internal
- */
-const RpcExitSuccessSchema = Schema.Struct({
-  _tag: Schema.Literal("Success"),
-  value: Schema.Unknown,
-})
-
-/**
- * Schema for failed exit in RPC responses.
- * @internal
- */
-const RpcExitFailureSchema = Schema.Struct({
-  _tag: Schema.Literal("Failure"),
-  cause: Schema.optional(RpcCauseSchema),
-})
-
-/**
- * Schema for Exit message wrapper.
- * @internal
- */
-const RpcExitMessageSchema = Schema.Struct({
-  _tag: Schema.Literal("Exit"),
-  exit: Schema.Union(RpcExitSuccessSchema, RpcExitFailureSchema),
-})
-
-/**
- * Schema for Defect messages.
- * @internal
- */
-const RpcDefectMessageSchema = Schema.Struct({
-  _tag: Schema.Literal("Defect"),
-  defect: Schema.optional(Schema.String),
-})
-
-/**
- * Schema for stream part messages.
- * @internal
- */
-const RpcStreamPartSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("StreamPart"), Schema.Literal("Part")),
-  value: Schema.Unknown,
-})
-
-/**
- * Schema for stream end messages.
- * @internal
- */
-const RpcStreamEndSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("StreamEnd"), Schema.Literal("Complete")),
-})
-
-/**
- * Schema for stream error messages.
- * @internal
- */
-const RpcStreamErrorSchema = Schema.Struct({
-  _tag: Schema.Union(Schema.Literal("Error"), Schema.Literal("Failure")),
-  error: Schema.optional(Schema.Unknown),
-})
-
-/**
- * Union of all RPC response message types.
- * @internal
- */
-const RpcResponseMessageSchema = Schema.Union(RpcExitMessageSchema, RpcDefectMessageSchema)
-
-/**
- * Union of all stream message types.
- * @internal
- */
-const RpcStreamMessageSchema = Schema.Union(
-  RpcStreamPartSchema,
-  RpcStreamEndSchema,
-  RpcStreamErrorSchema,
-)
+// RPC wire schemas are centralized in `core/rpc/messages.ts`.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chat Part Schema

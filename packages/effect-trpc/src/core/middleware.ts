@@ -4,31 +4,30 @@
  * Middleware system for effect-trpc.
  * Middleware can be applied at the procedure or router level.
  *
- * Middleware is pipeable and composable, following Effect's patterns:
+ * Middleware uses a builder-first API with explicit implementation layers:
  * @example
  * ```ts
- * const orgMiddleware = Middleware.make("org", (ctx, input, next) =>
+ * const OrgMiddleware = Middleware("org")
+ *   .input(Schema.Struct({ organizationSlug: Schema.String }))
+ *   .provides<{ org: Organization }>()
+ *
+ * const OrgMiddlewareLive = OrgMiddleware.toLayer((ctx, input) =>
  *   Effect.gen(function* () {
  *     const org = yield* OrgService.getBySlug(input.organizationSlug)
- *     return yield* next({ ...ctx, org })
- *   })
- * ).pipe(
- *   Middleware.withInput(Schema.Struct({ organizationSlug: Schema.String }))
+ *     return { ...ctx, org }
+ *   }),
  * )
  * ```
  */
 
 import * as Effect from "effect/Effect"
-import * as Array from "effect/Array"
 import * as Clock from "effect/Clock"
-import type * as Context from "effect/Context"
+import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
-import { dual } from "effect/Function"
 import * as HashMap from "effect/HashMap"
 import * as Ref from "effect/Ref"
-import * as FiberRef from "effect/FiberRef"
+import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
-import * as Option from "effect/Option"
 import type { Pipeable } from "effect/Pipeable"
 import { pipeArguments } from "effect/Pipeable"
 
@@ -90,6 +89,75 @@ export interface BaseContext {
 }
 
 /**
+ * Runtime constructor + schema type for tagged errors.
+ */
+export type TaggedErrorClass = Schema.Schema<unknown, unknown> &
+  (abstract new (...args: ReadonlyArray<unknown>) => { readonly _tag: string })
+
+/**
+ * Runtime implementation signature for middleware definitions.
+ */
+export type MiddlewareImplementation<CtxIn, CtxOut, InputExt, E, R = never> = (
+  ctx: CtxIn,
+  input: InputExt,
+) => Effect.Effect<CtxOut, E, R>
+
+/**
+ * Fluent middleware builder used by `Middleware("name")`.
+ */
+export interface MiddlewareBuilder<
+  CtxIn extends BaseContext,
+  CtxOut extends BaseContext,
+  E,
+  R,
+  Provides,
+  InputExt,
+> extends Middleware<CtxIn, CtxOut, E, R, Provides, InputExt> {
+  input<I, IFrom>(
+    schema: Schema.Schema<I, IFrom>,
+  ): MiddlewareBuilder<CtxIn, CtxOut, E, R, Provides, InputExt & I>
+
+  error<Errors extends readonly [TaggedErrorClass, ...ReadonlyArray<TaggedErrorClass>]>(
+    ...errors: Errors
+  ): MiddlewareBuilder<CtxIn, CtxOut, E | InstanceType<Errors[number]>, R, Provides, InputExt>
+
+  provides<P extends object>(): MiddlewareBuilder<CtxIn, CtxOut & P, E, R, Provides | P, InputExt>
+
+  toLayer<RImpl>(
+    implementation: MiddlewareImplementation<CtxIn, CtxOut, InputExt, E, RImpl>,
+  ): Layer.Layer<R, never, RImpl>
+}
+
+let middlewareDefinitionId = 0
+
+const nextMiddlewareImplementationTagId = (name: string): string => {
+  middlewareDefinitionId += 1
+  return `@effect-trpc/middleware/${name}/${middlewareDefinitionId}`
+}
+
+function mergeInputSchemas(
+  left: Schema.Schema<unknown, unknown> | undefined,
+  right: Schema.Schema<unknown, unknown> | undefined,
+): Schema.Schema<unknown, unknown> | undefined {
+  if (left === undefined) {
+    return right
+  }
+  if (right === undefined) {
+    return left
+  }
+  return Schema.extend(
+    left as Schema.Schema<object, unknown>,
+    right as Schema.Schema<object, unknown>,
+  ) as Schema.Schema<unknown, unknown>
+}
+
+function unsafeAssertLayerRequirements<A, RRequirements>(
+  layer: Layer.Layer<A, never, never>,
+): Layer.Layer<A, never, RRequirements> {
+  return layer as Layer.Layer<A, never, RRequirements>
+}
+
+/**
  * Context with authenticated user (after auth middleware).
  *
  * @since 0.1.0
@@ -133,7 +201,7 @@ export type MiddlewareTypeId = typeof MiddlewareTypeId
 /**
  * A middleware object with metadata.
  *
- * Middleware is pipeable, allowing composition with combinators like `withInput`.
+ * Middleware is pipeable and can be provided via `Router.provide(...)`.
  *
  * @template CtxIn - The input context type
  * @template CtxOut - The output context type
@@ -144,20 +212,15 @@ export type MiddlewareTypeId = typeof MiddlewareTypeId
  *
  * @example
  * ```ts
- * // Basic middleware
- * const logMiddleware = Middleware.make("log", (ctx, input, next) => {
- *   console.log("Request:", ctx.procedure)
- *   return next(ctx)
- * })
+ * const OrgMiddleware = Middleware("org")
+ *   .input(Schema.Struct({ organizationSlug: Schema.String }))
+ *   .provides<{ org: Organization }>()
  *
- * // Middleware with input requirements (pipeable)
- * const orgMiddleware = Middleware.make("org", (ctx, input, next) =>
+ * const OrgMiddlewareLive = OrgMiddleware.toLayer((ctx, input) =>
  *   Effect.gen(function* () {
  *     const org = yield* OrgService.getBySlug(input.organizationSlug)
- *     return yield* next({ ...ctx, org })
- *   })
- * ).pipe(
- *   Middleware.withInput(Schema.Struct({ organizationSlug: Schema.String }))
+ *     return { ...ctx, org }
+ *   }),
  * )
  * ```
  *
@@ -190,6 +253,10 @@ export interface Middleware<
    * Runtime schema for input extension (used for schema merging).
    */
   readonly inputSchema?: Schema.Schema<InputExt, unknown>
+  /**
+   * Declared tagged error classes for this middleware.
+   */
+  readonly errorSchemas?: ReadonlyArray<TaggedErrorClass>
 }
 
 /**
@@ -242,6 +309,7 @@ function makeMiddlewareInternal<
   name: string
   fn: MiddlewareFn<CtxIn, CtxOut, InputExt, E, R>
   inputSchema?: Schema.Schema<InputExt, unknown>
+  errorSchemas?: ReadonlyArray<TaggedErrorClass>
 }): Middleware<CtxIn, CtxOut, E, R, Provides, InputExt> {
   const self = Object.create(MiddlewareProto) as Middleware<CtxIn, CtxOut, E, R, Provides, InputExt>
   return Object.assign(self, {
@@ -249,691 +317,124 @@ function makeMiddlewareInternal<
     name: options.name,
     fn: options.fn,
     inputSchema: options.inputSchema,
+    errorSchemas: options.errorSchemas,
   })
+}
+
+function createMiddlewareBuilder<
+  CtxIn extends BaseContext,
+  CtxOut extends BaseContext,
+  E,
+  InputExt,
+  RTag extends Context.Tag<unknown, MiddlewareImplementation<CtxIn, CtxOut, InputExt, E>>,
+  Provides,
+>(
+  name: string,
+  implementationTag: RTag,
+  inputSchema: Schema.Schema<InputExt, unknown> | undefined,
+  errorSchemas: ReadonlyArray<TaggedErrorClass>,
+): MiddlewareBuilder<CtxIn, CtxOut, E, RTag, Provides, InputExt> {
+  const middleware = makeMiddlewareInternal<CtxIn, CtxOut, E, RTag, Provides, InputExt>({
+    name,
+    fn: (ctx, input, next) =>
+      Effect.flatMap(
+        implementationTag,
+        (implementation: MiddlewareImplementation<CtxIn, CtxOut, InputExt, E>) =>
+          Effect.flatMap(implementation(ctx, input), (nextContext: CtxOut) => next(nextContext)),
+      ),
+    inputSchema,
+    errorSchemas,
+  })
+
+  return Object.assign(middleware, {
+    input: <I, IFrom>(schema: Schema.Schema<I, IFrom>) =>
+      createMiddlewareBuilder<CtxIn, CtxOut, E, InputExt & I, RTag, Provides>(
+        name,
+        implementationTag as unknown as Context.Tag<
+          unknown,
+          MiddlewareImplementation<CtxIn, CtxOut, InputExt & I, E>
+        >,
+        mergeInputSchemas(
+          inputSchema as Schema.Schema<unknown, unknown> | undefined,
+          schema as Schema.Schema<unknown, unknown>,
+        ) as Schema.Schema<InputExt & I, unknown>,
+        errorSchemas,
+      ),
+
+    error: <Errors extends readonly [TaggedErrorClass, ...ReadonlyArray<TaggedErrorClass>]>(
+      ...errors: Errors
+    ) =>
+      createMiddlewareBuilder<
+        CtxIn,
+        CtxOut,
+        E | InstanceType<Errors[number]>,
+        InputExt,
+        Context.Tag<unknown, MiddlewareImplementation<CtxIn, CtxOut, InputExt, E | InstanceType<Errors[number]>>>,
+        Provides
+      >(
+        name,
+        implementationTag as unknown as Context.Tag<
+          unknown,
+          MiddlewareImplementation<CtxIn, CtxOut, InputExt, E | InstanceType<Errors[number]>>
+        >,
+        inputSchema,
+        [...errorSchemas, ...errors],
+      ),
+
+    provides: <P extends object>() =>
+      createMiddlewareBuilder<
+        CtxIn,
+        CtxOut & P,
+        E,
+        InputExt,
+        Context.Tag<unknown, MiddlewareImplementation<CtxIn, CtxOut & P, InputExt, E>>,
+        Provides | P
+      >(
+        name,
+        implementationTag as unknown as Context.Tag<
+          unknown,
+          MiddlewareImplementation<CtxIn, CtxOut & P, InputExt, E>
+        >,
+        inputSchema,
+        errorSchemas,
+      ),
+
+    toLayer: <RImpl>(implementation: MiddlewareImplementation<CtxIn, CtxOut, InputExt, E, RImpl>) =>
+      unsafeAssertLayerRequirements<RTag, RImpl>(
+        Layer.effect(
+          implementationTag,
+          Effect.succeed(implementation as MiddlewareImplementation<CtxIn, CtxOut, InputExt, E>),
+        ),
+      ),
+  })
+}
+
+/**
+ * Create a named middleware definition.
+ *
+ * v2 usage:
+ * `Middleware("Org").input(...).error(...).provides<...>().toLayer(...)`
+ */
+const MiddlewareBuilderEntry = <CtxIn extends BaseContext = BaseContext>(name: string) => {
+  const implementationTag = Context.GenericTag<
+    MiddlewareImplementation<CtxIn, CtxIn, unknown, never>
+  >(nextMiddlewareImplementationTagId(name))
+
+  return createMiddlewareBuilder<
+    CtxIn,
+    CtxIn,
+    never,
+    unknown,
+    typeof implementationTag,
+    never
+  >(name, implementationTag, undefined, [])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Middleware Creation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Namespace for middleware creation utilities.
- *
- * @since 0.1.0
- */
-export const Middleware = {
-  /**
-   * Create a named middleware.
-   *
-   * Supports both data-first and data-last (curried) usage:
-   *
-   * @example
-   * ```ts
-   * // Data-first: Middleware.make(name, fn)
-   * const authMiddleware = Middleware.make('auth', (ctx, input, next) =>
-   *   Effect.gen(function* () {
-   *     const token = ctx.headers.get('authorization')
-   *     if (!token) {
-   *       return yield* Effect.fail(new UnauthorizedError({ procedure: ctx.procedure }))
-   *     }
-   *     const user = yield* verifyToken(token)
-   *     return yield* next({ ...ctx, user })
-   *   })
-   * )
-   *
-   * // Data-last: pipe(fn, Middleware.make(name)) - for composition
-   * const authMiddleware = pipe(
-   *   (ctx, input, next) => Effect.gen(function* () {
-   *     // ...
-   *   }),
-   *   Middleware.make('auth')
-   * )
-   * ```
-   *
-   * @since 0.1.0
-   */
-  make: dual<
-    // Data-last: takes name, returns function that takes fn
-    <
-      CtxIn extends BaseContext = BaseContext,
-      CtxOut extends BaseContext = CtxIn,
-      E = never,
-      R = never,
-    >(
-      name: string,
-    ) => (
-      fn: MiddlewareFn<CtxIn, CtxOut, unknown, E, R>,
-    ) => Middleware<CtxIn, CtxOut, E, R, never, unknown>,
-    // Data-first: takes name and fn
-    <
-      CtxIn extends BaseContext = BaseContext,
-      CtxOut extends BaseContext = CtxIn,
-      E = never,
-      R = never,
-    >(
-      name: string,
-      fn: MiddlewareFn<CtxIn, CtxOut, unknown, E, R>,
-    ) => Middleware<CtxIn, CtxOut, E, R, never, unknown>
-  >(
-    2,
-    <CtxIn extends BaseContext, CtxOut extends BaseContext, E, R>(
-      name: string,
-      fn: MiddlewareFn<CtxIn, CtxOut, unknown, E, R>,
-    ) => makeMiddlewareInternal<CtxIn, CtxOut, E, R, never, unknown>({ name, fn }),
-  ),
-
-  /**
-   * Create a middleware that provides a request-scoped service to handlers.
-   *
-   * This is the recommended way to provide per-request services. The framework
-   * will use the correct method to provide the service:
-   * - For Effects: `Effect.provideServiceEffect()`
-   * - For Streams: `Stream.provideServiceEffect()`
-   *
-   * @see serviceMiddleware for full documentation and examples
-   * @since 0.3.0
-   */
-  withService: serviceMiddleware,
-
-  /**
-   * Add input schema requirements to a middleware.
-   *
-   * When a procedure uses this middleware, the input type will be extended
-   * to include the fields from the schema.
-   *
-   * This is a dual function supporting both data-first and data-last styles:
-   *
-   * @example
-   * ```ts
-   * // Data-last (pipeable)
-   * const orgMiddleware = Middleware.make("org", (ctx, input, next) =>
-   *   Effect.gen(function* () {
-   *     // input.organizationSlug is typed!
-   *     const org = yield* OrgService.getBySlug(input.organizationSlug)
-   *     return yield* next({ ...ctx, org })
-   *   })
-   * ).pipe(
-   *   Middleware.withInput(Schema.Struct({ organizationSlug: Schema.String }))
-   * )
-   *
-   * // Data-first
-   * const orgMiddleware = Middleware.withInput(
-   *   baseMiddleware,
-   *   Schema.Struct({ organizationSlug: Schema.String })
-   * )
-   *
-   * // When used on a procedure:
-   * const myProc = procedure
-   *   .use(orgMiddleware)  // Input now requires { organizationSlug: string }
-   *   .input(Schema.Struct({ id: Schema.String }))
-   *   .query()
-   * // Final input type: { organizationSlug: string } & { id: string }
-   * ```
-   *
-   * @since 0.4.0
-   */
-  withInput: dual<
-    // Data-last: withInput(schema) returns transformer
-    <I, IFrom>(
-      schema: Schema.Schema<I, IFrom>,
-    ) => <CtxIn extends BaseContext, CtxOut extends BaseContext, E, R, P, OldInputExt>(
-      self: Middleware<CtxIn, CtxOut, E, R, P, OldInputExt>,
-    ) => Middleware<CtxIn, CtxOut, E, R, P, OldInputExt & I>,
-    // Data-first: withInput(self, schema)
-    <CtxIn extends BaseContext, CtxOut extends BaseContext, E, R, P, OldInputExt, I, IFrom>(
-      self: Middleware<CtxIn, CtxOut, E, R, P, OldInputExt>,
-      schema: Schema.Schema<I, IFrom>,
-    ) => Middleware<CtxIn, CtxOut, E, R, P, OldInputExt & I>
-  >(
-    2,
-    <CtxIn extends BaseContext, CtxOut extends BaseContext, E, R, P, OldInputExt, I, IFrom>(
-      self: Middleware<CtxIn, CtxOut, E, R, P, OldInputExt>,
-      schema: Schema.Schema<I, IFrom>,
-    ): Middleware<CtxIn, CtxOut, E, R, P, OldInputExt & I> => {
-      // Merge schemas if there's an existing inputSchema
-      const mergedSchema = self.inputSchema
-        ? Schema.extend(
-            self.inputSchema as Schema.Schema<OldInputExt & object, unknown>,
-            schema as Schema.Schema<I & object, IFrom>,
-          )
-        : schema
-
-      return makeMiddlewareInternal<CtxIn, CtxOut, E, R, P, OldInputExt & I>({
-        name: self.name,
-        fn: self.fn as MiddlewareFn<CtxIn, CtxOut, OldInputExt & I, E, R>,
-        inputSchema: mergedSchema as Schema.Schema<OldInputExt & I, unknown>,
-      })
-    },
-  ),
-
-  /**
-   * Add a name to an existing middleware.
-   *
-   * @since 0.4.0
-   */
-  withName: dual<
-    (name: string) => <M extends Middleware<any, any, any, any, any, any>>(self: M) => M,
-    <M extends Middleware<any, any, any, any, any, any>>(self: M, name: string) => M
-  >(2, <M extends Middleware<any, any, any, any, any, any>>(self: M, name: string): M => {
-    const options: {
-      name: string
-      fn: MiddlewareFn<any, any, any, any, any>
-      inputSchema?: Schema.Schema<any, unknown>
-    } = {
-      name,
-      fn: self.fn,
-    }
-    if (self.inputSchema !== undefined) {
-      options.inputSchema = self.inputSchema
-    }
-    return makeMiddlewareInternal(options) as M
-  }),
-}
-
-/**
- * Create a middleware that provides services to downstream handlers.
- *
- * When a middleware "provides" a service, handlers using that middleware
- * don't need to require that service themselves - the middleware takes
- * care of providing it.
- *
- * @example
- * ```ts
- * // Create a middleware that provides Database to handlers
- * const dbMiddleware = middlewareWithProvides<
- *   BaseContext,
- *   BaseContext,
- *   never,
- *   ConnectionPool,  // Middleware needs ConnectionPool
- *   Database          // Middleware provides Database
- * >({
- *   name: 'database',
- *   fn: (ctx, input, next) =>
- *     Effect.gen(function* () {
- *       const pool = yield* ConnectionPool
- *       const db = new DatabaseImpl(pool)
- *       return yield* Effect.provideService(next(ctx), Database, db)
- *     })
- * })
- *
- * // Handlers can now use Database without requiring it
- * procedure
- *   .use(dbMiddleware)
- *   .query()
- *
- * const handlers = {
- *   myProc: (ctx, input) =>
- *     Effect.flatMap(Database, db => db.find(input.id))
- *     // Database requirement is satisfied by middleware!
- * }
- * ```
- *
- * @since 0.1.0
- */
-export function middlewareWithProvides<
-  CtxIn extends BaseContext,
-  CtxOut extends BaseContext,
-  E,
-  R,
-  Provides,
-  InputExt = unknown,
->(options: {
-  name: string
-  fn: MiddlewareFn<CtxIn, CtxOut, InputExt, E, R>
-  inputSchema?: Schema.Schema<InputExt, unknown>
-}): Middleware<CtxIn, CtxOut, E, R, Provides, InputExt> {
-  return makeMiddlewareInternal<CtxIn, CtxOut, E, R, Provides, InputExt>(options)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Service-Providing Middleware (Request-Scoped Services)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Symbol to identify ServiceMiddleware at runtime.
- * @internal
- */
-export const ServiceMiddlewareTypeId: unique symbol = Symbol.for("@effect-trpc/ServiceMiddleware")
-
-/**
- * @internal
- */
-export type ServiceMiddlewareTypeId = typeof ServiceMiddlewareTypeId
-
-/**
- * A middleware that provides a service to downstream handlers.
- *
- * Unlike regular middleware that uses `Effect.provideService()` internally,
- * ServiceMiddleware declares its provided service at runtime, allowing the
- * framework to apply the service correctly for both Effects and Streams.
- *
- * This solves the problem where `Effect.provideService()` doesn't propagate
- * to Stream's internal effects.
- *
- * @template CtxIn - The input context type
- * @template CtxOut - The output context type (after adding service data to context)
- * @template S - The service type being provided
- * @template E - Error type the middleware can produce
- * @template R - Requirements (Effect context) the middleware needs
- * @template InputExt - Input schema extension this middleware requires
- *
- * @since 0.3.0
- */
-export interface ServiceMiddleware<
-  CtxIn extends BaseContext = BaseContext,
-  CtxOut extends BaseContext = CtxIn,
-  S = unknown,
-  E = never,
-  R = never,
-  InputExt = unknown,
-> extends Pipeable {
-  readonly [ServiceMiddlewareTypeId]: ServiceMiddlewareTypeId
-  readonly _tag: "ServiceMiddleware"
-  readonly name: string
-
-  /**
-   * The Context.Tag for the service this middleware provides.
-   * This is used at runtime to apply the service correctly.
-   */
-  readonly provides: Context.Tag<any, S>
-
-  /**
-   * Function that creates the service value from the context and input.
-   * This is evaluated per-request and the result is provided to handlers.
-   */
-  readonly make: (ctx: CtxIn, input: InputExt) => Effect.Effect<S, E, R>
-
-  /**
-   * Optional function to transform the context after creating the service.
-   * If provided, the handler receives CtxOut instead of CtxIn.
-   * The service value is passed so it can be added to the context.
-   */
-  readonly transformContext?: ((ctx: CtxIn, service: S) => CtxOut) | undefined
-
-  /**
-   * Phantom type for input extension.
-   * @internal
-   */
-  readonly _inputExt?: InputExt
-
-  /**
-   * Runtime schema for input extension (used for schema merging).
-   */
-  readonly inputSchema?: Schema.Schema<InputExt, unknown>
-}
-
-/**
- * Prototype for ServiceMiddleware (for Pipeable).
- * @internal
- */
-const ServiceMiddlewareProto = {
-  [ServiceMiddlewareTypeId]: ServiceMiddlewareTypeId,
-  pipe() {
-    return pipeArguments(this, arguments)
-  },
-}
-
-/**
- * Check if a middleware is a ServiceMiddleware.
- *
- * @since 0.3.0
- */
-export const isServiceMiddleware = (
-  middleware:
-    | Middleware<any, any, any, any, any, any>
-    | ServiceMiddleware<any, any, any, any, any, any>,
-): middleware is ServiceMiddleware<any, any, any, any, any, any> =>
-  ServiceMiddlewareTypeId in middleware
-
-/**
- * Extract the service type from a ServiceMiddleware.
- *
- * @since 0.3.0
- */
-export type ServiceMiddlewareService<M> =
-  M extends ServiceMiddleware<any, any, infer S, any, any, any> ? S : never
-
-/**
- * Create a middleware that provides a request-scoped service to handlers.
- *
- * This is the recommended way to provide per-request services like `CurrentUser`,
- * `RequestContext`, or `Database` connections. The framework will:
- *
- * - For **Effects** (query/mutation): Use `Effect.provideServiceEffect()`
- * - For **Streams** (stream/chat/subscription): Use `Stream.provideServiceEffect()`
- *
- * This ensures the service is properly available in all handler contexts.
- *
- * @example
- * ```ts
- * import { Middleware } from 'effect-trpc'
- * import { Context, Effect } from 'effect'
- *
- * // Define your service tag
- * class CurrentUser extends Context.Tag('CurrentUser')<
- *   CurrentUser,
- *   { readonly userId: string; readonly permissions: Set<string> }
- * >() {}
- *
- * // Create auth middleware that provides CurrentUser
- * const authMiddleware = Middleware.withService({
- *   name: 'auth',
- *   provides: CurrentUser,
- *   make: (ctx, input) =>
- *     Effect.gen(function* () {
- *       const token = ctx.headers.get('authorization')
- *       if (!token) {
- *         return yield* Effect.fail(new UnauthorizedError())
- *       }
- *       const session = yield* verifyToken(token)
- *       return {
- *         userId: session.userId,
- *         permissions: new Set(session.permissions),
- *       }
- *     }),
- *   // Optionally add the user to the context for other middleware
- *   transformContext: (ctx, user) => ({ ...ctx, user }),
- * })
- *
- * // Use in router
- * const router = Router.make({
- *   user: UserProcedures,
- * }).use(authMiddleware)
- *
- * // Handlers can now use CurrentUser
- * const handlers = {
- *   me: (ctx, input) =>
- *     Effect.gen(function* () {
- *       const user = yield* CurrentUser  // Provided by middleware!
- *       return { userId: user.userId }
- *     }),
- * }
- * ```
- *
- * @since 0.3.0
- */
-export function serviceMiddleware<
-  CtxIn extends BaseContext,
-  CtxOut extends BaseContext,
-  S,
-  E,
-  R,
-  InputExt = unknown,
->(options: {
-  readonly name: string
-  readonly provides: Context.Tag<any, S>
-  readonly make: (ctx: CtxIn, input: InputExt) => Effect.Effect<S, E, R>
-  readonly transformContext?: (ctx: CtxIn, service: S) => CtxOut
-  readonly inputSchema?: Schema.Schema<InputExt, unknown>
-}): ServiceMiddleware<CtxIn, CtxOut, S, E, R, InputExt> {
-  const self = Object.create(ServiceMiddlewareProto) as ServiceMiddleware<
-    CtxIn,
-    CtxOut,
-    S,
-    E,
-    R,
-    InputExt
-  >
-  return Object.assign(self, {
-    _tag: "ServiceMiddleware" as const,
-    name: options.name,
-    provides: options.provides,
-    make: options.make,
-    transformContext: options.transformContext,
-    inputSchema: options.inputSchema,
-  })
-}
-
-/**
- * Add input schema requirements to a ServiceMiddleware.
- *
- * @since 0.4.0
- */
-export const withInputService = dual<
-  // Data-last
-  <I, IFrom>(
-    schema: Schema.Schema<I, IFrom>,
-  ) => <CtxIn extends BaseContext, CtxOut extends BaseContext, S, E, R, OldInputExt>(
-    self: ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt>,
-  ) => ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt & I>,
-  // Data-first
-  <CtxIn extends BaseContext, CtxOut extends BaseContext, S, E, R, OldInputExt, I, IFrom>(
-    self: ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt>,
-    schema: Schema.Schema<I, IFrom>,
-  ) => ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt & I>
->(
-  2,
-  <CtxIn extends BaseContext, CtxOut extends BaseContext, S, E, R, OldInputExt, I, IFrom>(
-    self: ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt>,
-    schema: Schema.Schema<I, IFrom>,
-  ): ServiceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt & I> => {
-    const mergedSchema = self.inputSchema
-      ? Schema.extend(
-          self.inputSchema as Schema.Schema<OldInputExt & object, unknown>,
-          schema as Schema.Schema<I & object, IFrom>,
-        )
-      : schema
-
-    // Build options object conditionally to satisfy exactOptionalPropertyTypes
-    const baseOptions = {
-      name: self.name,
-      provides: self.provides,
-      make: self.make as (ctx: CtxIn, input: OldInputExt & I) => Effect.Effect<S, E, R>,
-      inputSchema: mergedSchema as Schema.Schema<OldInputExt & I, unknown>,
-    }
-
-    if (self.transformContext !== undefined) {
-      return serviceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt & I>({
-        ...baseOptions,
-        transformContext: self.transformContext,
-      })
-    }
-
-    return serviceMiddleware<CtxIn, CtxOut, S, E, R, OldInputExt & I>(baseOptions)
-  },
-)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Middleware Composition
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Compose multiple middleware into one.
- * Middleware are executed in order (first to last).
- *
- * Input extensions are merged from all middleware.
- *
- * @since 0.1.0
- */
-export function composeMiddleware<
-  Ctx1 extends BaseContext,
-  Ctx2 extends BaseContext,
-  E1,
-  R1,
-  I1,
-  Ctx3 extends BaseContext,
-  E2,
-  R2,
-  I2,
->(
-  m1: Middleware<Ctx1, Ctx2, E1, R1, never, I1>,
-  m2: Middleware<Ctx2, Ctx3, E2, R2, never, I2>,
-): Middleware<Ctx1, Ctx3, E1 | E2, R1 | R2, never, I1 & I2>
-
-export function composeMiddleware<
-  Ctx1 extends BaseContext,
-  Ctx2 extends BaseContext,
-  E1,
-  R1,
-  I1,
-  Ctx3 extends BaseContext,
-  E2,
-  R2,
-  I2,
-  Ctx4 extends BaseContext,
-  E3,
-  R3,
-  I3,
->(
-  m1: Middleware<Ctx1, Ctx2, E1, R1, never, I1>,
-  m2: Middleware<Ctx2, Ctx3, E2, R2, never, I2>,
-  m3: Middleware<Ctx3, Ctx4, E3, R3, never, I3>,
-): Middleware<Ctx1, Ctx4, E1 | E2 | E3, R1 | R2 | R3, never, I1 & I2 & I3>
-
-export function composeMiddleware<
-  Ctx1 extends BaseContext,
-  Ctx2 extends BaseContext,
-  E1,
-  R1,
-  I1,
-  Ctx3 extends BaseContext,
-  E2,
-  R2,
-  I2,
-  Ctx4 extends BaseContext,
-  E3,
-  R3,
-  I3,
-  Ctx5 extends BaseContext,
-  E4,
-  R4,
-  I4,
->(
-  m1: Middleware<Ctx1, Ctx2, E1, R1, never, I1>,
-  m2: Middleware<Ctx2, Ctx3, E2, R2, never, I2>,
-  m3: Middleware<Ctx3, Ctx4, E3, R3, never, I3>,
-  m4: Middleware<Ctx4, Ctx5, E4, R4, never, I4>,
-): Middleware<Ctx1, Ctx5, E1 | E2 | E3 | E4, R1 | R2 | R3 | R4, never, I1 & I2 & I3 & I4>
-
-export function composeMiddleware<
-  Ctx1 extends BaseContext,
-  Ctx2 extends BaseContext,
-  E1,
-  R1,
-  I1,
-  Ctx3 extends BaseContext,
-  E2,
-  R2,
-  I2,
-  Ctx4 extends BaseContext,
-  E3,
-  R3,
-  I3,
-  Ctx5 extends BaseContext,
-  E4,
-  R4,
-  I4,
-  Ctx6 extends BaseContext,
-  E5,
-  R5,
-  I5,
->(
-  m1: Middleware<Ctx1, Ctx2, E1, R1, never, I1>,
-  m2: Middleware<Ctx2, Ctx3, E2, R2, never, I2>,
-  m3: Middleware<Ctx3, Ctx4, E3, R3, never, I3>,
-  m4: Middleware<Ctx4, Ctx5, E4, R4, never, I4>,
-  m5: Middleware<Ctx5, Ctx6, E5, R5, never, I5>,
-): Middleware<
-  Ctx1,
-  Ctx6,
-  E1 | E2 | E3 | E4 | E5,
-  R1 | R2 | R3 | R4 | R5,
-  never,
-  I1 & I2 & I3 & I4 & I5
->
-
-export function composeMiddleware<
-  Ctx1 extends BaseContext,
-  Ctx2 extends BaseContext,
-  E1,
-  R1,
-  I1,
-  Ctx3 extends BaseContext,
-  E2,
-  R2,
-  I2,
-  Ctx4 extends BaseContext,
-  E3,
-  R3,
-  I3,
-  Ctx5 extends BaseContext,
-  E4,
-  R4,
-  I4,
-  Ctx6 extends BaseContext,
-  E5,
-  R5,
-  I5,
-  Ctx7 extends BaseContext,
-  E6,
-  R6,
-  I6,
->(
-  m1: Middleware<Ctx1, Ctx2, E1, R1, never, I1>,
-  m2: Middleware<Ctx2, Ctx3, E2, R2, never, I2>,
-  m3: Middleware<Ctx3, Ctx4, E3, R3, never, I3>,
-  m4: Middleware<Ctx4, Ctx5, E4, R4, never, I4>,
-  m5: Middleware<Ctx5, Ctx6, E5, R5, never, I5>,
-  m6: Middleware<Ctx6, Ctx7, E6, R6, never, I6>,
-): Middleware<
-  Ctx1,
-  Ctx7,
-  E1 | E2 | E3 | E4 | E5 | E6,
-  R1 | R2 | R3 | R4 | R5 | R6,
-  never,
-  I1 & I2 & I3 & I4 & I5 & I6
->
-
-/**
- * Implementation uses `any` types for the variadic case.
- * Type safety is provided by the overload signatures above (2-6 middlewares).
- * For more than 6 middlewares, chain multiple composeMiddleware calls.
- */
-export function composeMiddleware(
-  ...middlewares: Middleware<any, any, any, any, any, any>[]
-): Middleware<any, any, any, any, any, any> {
-  if (middlewares.length === 0) {
-    return Middleware.make("identity", (_ctx, _input, next) => next(_ctx))
-  }
-
-  if (middlewares.length === 1) {
-    return middlewares[0]!
-  }
-
-  // Using native map/join for simple string concatenation (cleaner than Effect Array)
-  const names = middlewares.map((m) => m.name).join(" -> ")
-
-  // Merge all input schemas
-  let mergedSchema: Schema.Schema<any, any> | undefined
-  for (const m of middlewares) {
-    if (m.inputSchema) {
-      mergedSchema = mergedSchema ? Schema.extend(mergedSchema, m.inputSchema) : m.inputSchema
-    }
-  }
-
-  const options: {
-    name: string
-    fn: MiddlewareFn<any, any, any, any, any>
-    inputSchema?: Schema.Schema<any, unknown>
-  } = {
-    name: names,
-    fn: (ctx, input, next) => {
-      // Build the middleware chain from right to left using reduceRight
-      const chain = Array.reduceRight(
-        middlewares,
-        next,
-        (nextFn, current) => (c: any) => current.fn(c, input, nextFn),
-      )
-      return chain(ctx)
-    },
-  }
-
-  if (mergedSchema !== undefined) {
-    options.inputSchema = mergedSchema
-  }
-
-  return makeMiddlewareInternal(options)
-}
+export const Middleware = MiddlewareBuilderEntry
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Built-in Middleware
@@ -956,9 +457,13 @@ export function composeMiddleware(
  * @since 0.1.0
  */
 export const loggingMiddleware: Middleware<BaseContext, BaseContext, never, never, never, unknown> =
-  Middleware.make(
-    "logging",
-    (ctx, _input, next) =>
+  makeMiddlewareInternal({
+    name: "logging",
+    fn: (
+      ctx: BaseContext,
+      _input: unknown,
+      next: (ctx: BaseContext) => Effect.Effect<unknown, unknown, unknown>,
+    ) =>
       Effect.gen(function* () {
         const start = yield* Clock.currentTimeMillis
         yield* Effect.logDebug(`→ ${ctx.procedure}`)
@@ -975,7 +480,7 @@ export const loggingMiddleware: Middleware<BaseContext, BaseContext, never, neve
 
         return yield* result
       }) as Effect.Effect<unknown, never, never>,
-  )
+  })
 
 /**
  * Timing middleware - adds timing information to the response.
@@ -996,14 +501,18 @@ export const timingMiddleware: Middleware<
   never,
   never,
   unknown
-> = Middleware.make(
-  "timing",
-  (ctx, _input, next) =>
+> = makeMiddlewareInternal({
+  name: "timing",
+  fn: (
+    ctx: BaseContext,
+    _input: unknown,
+    next: (ctx: BaseContext & { startTime: number }) => Effect.Effect<unknown, unknown, unknown>,
+  ) =>
     Effect.gen(function* () {
       const startTime = yield* Clock.currentTimeMillis
       return yield* next({ ...ctx, startTime: Number(startTime) })
     }) as Effect.Effect<unknown, never, never>,
-)
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Timeout Middleware
@@ -1046,7 +555,7 @@ export class MiddlewareTimeoutError extends Schema.TaggedError<MiddlewareTimeout
  *
  * @example
  * ```ts
- * const slowProcedure = procedure
+ * const slowProcedure = Procedure
  *   .use(timeoutMiddleware(1000)) // 1 second timeout
  *   .query(() => Effect.sleep(2000)) // Will fail with MiddlewareTimeoutError
  * ```
@@ -1058,7 +567,11 @@ export function timeoutMiddleware(
 ): Middleware<BaseContext, BaseContext, MiddlewareTimeoutError, never, never, unknown> {
   return makeMiddlewareInternal({
     name: "timeout",
-    fn: (ctx, _input, next) =>
+    fn: (
+      ctx: BaseContext,
+      _input: unknown,
+      next: (ctx: BaseContext) => Effect.Effect<unknown, unknown, unknown>,
+    ) =>
       Effect.gen(function* () {
         const result = yield* next(ctx).pipe(
           Effect.timeoutFail({
@@ -1168,7 +681,7 @@ export interface RateLimitOptions {
  * // Use in your setup
  * const setup = Effect.gen(function* () {
  *   const rateLimit = yield* globalRateLimitEffect
- *   return createRouter({ middleware: [rateLimit] })
+ *   return Router.make({ middleware: [rateLimit] })
  * })
  *
  * // Per-client rate limit with cleanup
@@ -1272,7 +785,11 @@ export const rateLimitMiddleware = (
       unknown
     >({
       name: "rateLimit",
-      fn: (ctx, _input, next) =>
+      fn: (
+        ctx: BaseContext,
+        _input: unknown,
+        next: (ctx: BaseContext) => Effect.Effect<unknown, unknown, unknown>,
+      ) =>
         Effect.gen(function* () {
           const key = keyFn(ctx)
           const result = yield* checkRateLimit(key)
@@ -1411,7 +928,11 @@ export function authMiddleware<TUser>(
 > {
   return makeMiddlewareInternal({
     name: "auth",
-    fn: (ctx, _input, next) =>
+    fn: (
+      ctx: BaseContext,
+      _input: unknown,
+      next: (ctx: AuthenticatedContext<TUser>) => Effect.Effect<unknown, unknown, unknown>,
+    ) =>
       Effect.gen(function* () {
         const authHeader = ctx.headers.get("authorization")
         if (!authHeader) {
@@ -1482,7 +1003,11 @@ export function requirePermission<TUser>(
 > {
   return makeMiddlewareInternal({
     name: `requirePermission:${permission}`,
-    fn: (ctx, _input, next) =>
+    fn: (
+      ctx: AuthenticatedContext<TUser>,
+      _input: unknown,
+      next: (ctx: AuthenticatedContext<TUser>) => Effect.Effect<unknown, unknown, unknown>,
+    ) =>
       Effect.gen(function* () {
         if (!hasPermission(ctx.user, permission)) {
           return yield* Effect.fail(
@@ -1526,82 +1051,3 @@ export class MiddlewarePermissionError extends Schema.TaggedError<MiddlewarePerm
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Middleware Context FiberRef
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * FiberRef that holds the middleware context during request processing.
- *
- * This allows handlers to access the enriched context from middleware
- * (e.g., authenticated user, organization, etc.) without changing the
- * handler function signature.
- *
- * @remarks
- * The FiberRef is set by `applyMiddleware` in rpc-bridge.ts after the
- * middleware chain has built up the context. Handlers can access it
- * using `getMiddlewareContext()`.
- *
- * @internal
- */
-export const MiddlewareContextRef: FiberRef.FiberRef<unknown> =
-  FiberRef.unsafeMake<unknown>(undefined)
-
-/**
- * Get the middleware context in a handler.
- *
- * Use this to access context enriched by middleware (e.g., authenticated user).
- * Returns `Option.none()` if called outside of a middleware chain or if no
- * middleware has set the context.
- *
- * @example
- * ```ts
- * const getUserProcedure = procedure
- *   .use(authMiddleware)
- *   .query(({ input }) =>
- *     Effect.gen(function* () {
- *       const ctx = yield* getMiddlewareContext<AuthenticatedContext>()
- *       if (Option.isNone(ctx)) return yield* Effect.fail(new UnauthorizedError())
- *       return yield* db.getUser(ctx.value.user.id)
- *     })
- *   )
- * ```
- *
- * @since 0.1.0
- */
-export const getMiddlewareContext = <T = BaseContext>(): Effect.Effect<Option.Option<T>> =>
-  FiberRef.get(MiddlewareContextRef).pipe(
-    Effect.map((ctx) => Option.fromNullable(ctx as T | null | undefined)),
-  )
-
-/**
- * Get the middleware context, failing if not available.
- *
- * Use this when you know middleware has run and the context must exist.
- * Fails with the provided error if context is not available.
- *
- * @example
- * ```ts
- * const getUserProcedure = procedure
- *   .use(authMiddleware) // Ensures user is always set
- *   .query(({ input }) =>
- *     Effect.gen(function* () {
- *       const ctx = yield* requireMiddlewareContext<AuthenticatedContext>(
- *         new UnauthorizedError({ procedure: "getUser", reason: "No auth context" })
- *       )
- *       return yield* db.getUser(ctx.user.id)
- *     })
- *   )
- * ```
- *
- * @since 0.1.0
- */
-export const requireMiddlewareContext = <T, E>(onMissing: E): Effect.Effect<T, E> =>
-  getMiddlewareContext<T>().pipe(
-    Effect.flatMap(
-      Option.match({
-        onNone: () => Effect.fail(onMissing),
-        onSome: (ctx) => Effect.succeed(ctx),
-      }),
-    ),
-  )

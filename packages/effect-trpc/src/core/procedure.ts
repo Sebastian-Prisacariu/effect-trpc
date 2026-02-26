@@ -1,11 +1,15 @@
 /**
- * @module effect-trpc/core/procedure
+ * @module effect-trpc/core/Procedure
  *
  * Procedure builder API for defining type-safe RPC endpoints.
- * Uses a fluent builder pattern: procedure.input(...).output(...).query()
+ * Uses a fluent builder pattern: Procedure.input(...).output(...).query()
  */
 
-import type * as Schema from "effect/Schema"
+import * as Context from "effect/Context"
+import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
+import * as Schema from "effect/Schema"
+import type * as Stream from "effect/Stream"
 import type { Middleware, BaseContext } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13,7 +17,7 @@ import type { Middleware, BaseContext } from "./middleware.js"
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * The type of a procedure, determining its transport and behavior.
+ * The type of a Procedure, determining its transport and behavior.
  *
  * - `query` - HTTP GET, cached, for reading data
  * - `mutation` - HTTP POST, not cached, for writing data
@@ -27,6 +31,37 @@ import type { Middleware, BaseContext } from "./middleware.js"
 export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscription"
 
 /**
+ * Runtime constructor + schema type for tagged errors.
+ */
+export type TaggedErrorClass = Schema.Schema<unknown, unknown> &
+  (abstract new (...args: ReadonlyArray<unknown>) => { readonly _tag: string })
+
+/**
+ * Runtime implementation handler for a procedure.
+ */
+export type ProcedureImplementation<
+  I,
+  A,
+  E,
+  Ctx extends BaseContext,
+  Type extends ProcedureType,
+  R = never,
+> = Type extends "stream" | "chat" | "subscription"
+  ? (ctx: Ctx, input: I) => Stream.Stream<A, E, R>
+  : (ctx: Ctx, input: I) => Effect.Effect<A, E, R>
+
+/**
+ * Runtime implementation tag for a procedure.
+ */
+export type ProcedureImplementationTag<
+  I,
+  A,
+  E,
+  Ctx extends BaseContext,
+  Type extends ProcedureType,
+> = Context.Tag<unknown, ProcedureImplementation<I, A, E, Ctx, Type>>
+
+/**
  * A procedure definition containing all configuration for an RPC endpoint.
  *
  * @remarks
@@ -37,7 +72,7 @@ export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscrip
  *
  * ```ts
  * // Context type flows through middleware
- * procedure
+ * Procedure
  *   .use(authMiddleware)   // Ctx becomes AuthenticatedContext<User>
  *   .use(orgMiddleware)    // Ctx becomes AuthenticatedContext<User> & OrgContext
  *   .query()
@@ -54,11 +89,12 @@ export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscrip
  * @example
  * ```ts
  * // Type-safe composition
- * const authAndRateLimit = composeMiddleware(authMiddleware, rateLimitMiddleware)
- *
- * // Use composed middleware
- * const UserProcedures = procedures('user', {
- *   update: procedure.use(authAndRateLimit).input(UpdateSchema).mutation(),
+ * const UserProcedures = Procedures.make({
+ *   update: Procedure
+ *     .use(AuthMiddleware)
+ *     .use(RateLimitMiddleware)
+ *     .input(UpdateSchema)
+ *     .mutation(),
  * })
  * ```
  *
@@ -85,7 +121,7 @@ export interface ProcedureDefinition<
    */
   readonly summary?: string
   /**
-   * URL to external documentation for this procedure.
+   * URL to external documentation for this Procedure.
    * Used in OpenAPI externalDocs field.
    * @since 0.1.0
    */
@@ -101,6 +137,16 @@ export interface ProcedureDefinition<
   readonly tags: ReadonlyArray<string>
   readonly invalidates: ReadonlyArray<string>
   readonly invalidatesTags: ReadonlyArray<string>
+  /**
+   * Runtime tag used to resolve this procedure implementation from Layer context.
+   */
+  readonly implementationTag: ProcedureImplementationTag<I, A, E, Ctx, Type>
+  /**
+   * Create a layer that provides this procedure implementation.
+   */
+  toLayer<R>(
+    implementation: ProcedureImplementation<I, A, E, Ctx, Type, R>,
+  ): Layer.Layer<ProcedureImplementationTag<I, A, E, Ctx, Type>, never, R>
   /** Middleware chain - context type is tracked via Ctx, input type is accumulated via InputExt */
   readonly middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
   /**
@@ -132,7 +178,7 @@ export interface ProcedureDefinition<
  *
  * @example
  * ```ts
- * const myProc = procedure.use(authMiddleware).query()
+ * const myProc = Procedure.use(authMiddleware).query()
  * type MyContext = InferProcedureContext<typeof myProc>
  * // AuthenticatedContext<User>
  * ```
@@ -148,7 +194,7 @@ export type InferProcedureContext<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure.input(Schema.Struct({ id: Schema.String })).query()
+ * const myProc = Procedure.input(Schema.Struct({ id: Schema.String })).query()
  * type MyInput = InferProcedureInput<typeof myProc>
  * // { id: string }
  * ```
@@ -164,7 +210,7 @@ export type InferProcedureInput<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure.output(UserSchema).query()
+ * const myProc = Procedure.output(UserSchema).query()
  * type MyOutput = InferProcedureOutput<typeof myProc>
  * // User
  * ```
@@ -180,7 +226,7 @@ export type InferProcedureOutput<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure.error(NotFoundError).query()
+ * const myProc = Procedure.error(NotFoundError).query()
  * type MyError = InferProcedureError<typeof myProc>
  * // NotFoundError
  * ```
@@ -196,7 +242,7 @@ export type InferProcedureError<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure
+ * const myProc = Procedure
  *   .use(authMiddleware)  // Requires TokenService
  *   .use(loggingMiddleware)  // Requires Logger
  *   .query()
@@ -215,7 +261,7 @@ export type InferProcedureMiddlewareR<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure
+ * const myProc = Procedure
  *   .use(dbMiddleware)  // Provides Database
  *   .query()
  * type Provided = InferProcedureProvides<typeof myProc>
@@ -245,7 +291,7 @@ export type InferProcedureProvides<T> =
  *
  * @example
  * ```ts
- * const myProc = procedure
+ * const myProc = Procedure
  *   .description("Get user by ID")
  *   .use(authMiddleware)
  *   .input(Schema.Struct({ id: Schema.String }))
@@ -259,24 +305,24 @@ export type InferProcedureProvides<T> =
 export interface ProcedureBuilder<
   I = unknown,
   A = unknown,
-  E = unknown,
+  E = never,
   Ctx extends BaseContext = BaseContext,
   R = never,
   Provides = never,
 > {
   /**
-   * Add a description to this procedure.
+   * Add a description to this Procedure.
    * Useful for documentation and OpenAPI generation.
    */
   description(text: string): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
-   * Add a short summary to this procedure.
+   * Add a short summary to this Procedure.
    * Unlike description, this should be a brief one-liner for OpenAPI.
    *
    * @example
    * ```ts
-   * procedure
+   * Procedure
    *   .summary("Get user by ID")
    *   .description("Retrieves a user by their unique identifier. Returns 404 if not found.")
    *   .query()
@@ -285,12 +331,12 @@ export interface ProcedureBuilder<
   summary(text: string): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
-   * Add a link to external documentation for this procedure.
+   * Add a link to external documentation for this Procedure.
    * Used in OpenAPI externalDocs field.
    *
    * @example
    * ```ts
-   * procedure
+   * Procedure
    *   .externalDocs("https://docs.example.com/api/users")
    *   .query()
    * ```
@@ -303,7 +349,7 @@ export interface ProcedureBuilder<
    *
    * @example
    * ```ts
-   * procedure
+   * Procedure
    *   .output(UserSchema)
    *   .responseDescription("The user object with all profile fields")
    *   .query()
@@ -318,7 +364,7 @@ export interface ProcedureBuilder<
   deprecated(): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
-   * Apply middleware to this procedure.
+   * Apply middleware to this Procedure.
    * Middleware can transform context, add authentication, rate limiting, etc.
    *
    * **Type Tracking:**
@@ -329,8 +375,8 @@ export interface ProcedureBuilder<
    *
    * @example
    * ```ts
-   * const UserProcedures = procedures('user', {
-   *   update: procedure
+   * const UserProcedures = Procedures.make({
+   *   update: Procedure
    *     .use(authMiddleware)     // Context: AuthenticatedContext, Error: AuthError, R: TokenService
    *     .use(dbMiddleware)       // Provides: Database
    *     .input(UpdateUserSchema)
@@ -352,7 +398,7 @@ export interface ProcedureBuilder<
   ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>
 
   /**
-   * Define the input schema for this procedure.
+   * Define the input schema for this Procedure.
    * Input is validated before the handler is called.
    *
    * **Note:** If middleware with `withInput` has been applied, the final input
@@ -364,7 +410,7 @@ export interface ProcedureBuilder<
   ): ProcedureBuilder<I & I2, A, E, Ctx, R, Provides>
 
   /**
-   * Define the output schema for this procedure.
+   * Define the output schema for this Procedure.
    * For stream/chat procedures, this is the schema for each streamed part.
    */
   output<A2, AFrom = A2>(
@@ -372,7 +418,7 @@ export interface ProcedureBuilder<
   ): ProcedureBuilder<I, A2, E, Ctx, R, Provides>
 
   /**
-   * Define the typed error schema for this procedure.
+   * Define the typed error schema for this Procedure.
    *
    * @remarks
    * **Middleware Error Types:**
@@ -385,7 +431,7 @@ export interface ProcedureBuilder<
    * @example
    * ```ts
    * // Include middleware errors in error schema for full type safety
-   * const updateUser = procedure
+   * const updateUser = Procedure
    *   .use(authMiddleware)  // Adds AuthError to type
    *   .use(rateLimitMiddleware)  // Adds RateLimitError to type
    *   .input(UpdateUserSchema)
@@ -397,9 +443,9 @@ export interface ProcedureBuilder<
    *   .mutation()
    * ```
    */
-  error<E2, EFrom = E2>(
-    schema: Schema.Schema<E2, EFrom>,
-  ): ProcedureBuilder<I, A, E2, Ctx, R, Provides>
+  error<Errors extends readonly [TaggedErrorClass, ...ReadonlyArray<TaggedErrorClass>]>(
+    ...errors: Errors
+  ): ProcedureBuilder<I, A, E | InstanceType<Errors[number]>, Ctx, R, Provides>
 
   /**
    * Add tags to this procedure for tag-based cache invalidation.
@@ -408,40 +454,40 @@ export interface ProcedureBuilder<
 
   /**
    * Declare which procedure paths this mutation invalidates.
-   * @example procedure.invalidates(['user.list']).mutation()
+   * @example Procedure.invalidates(['user.list']).mutation()
    */
   invalidates(paths: ReadonlyArray<string>): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
    * Declare which tags this mutation invalidates.
-   * @example procedure.invalidatesTags(['users']).mutation()
+   * @example Procedure.invalidatesTags(['users']).mutation()
    */
   invalidatesTags(tags: ReadonlyArray<string>): ProcedureBuilder<I, A, E, Ctx, R, Provides>
 
   /**
-   * Create a query procedure (HTTP GET, cached).
+   * Create a query Procedure (HTTP GET, cached).
    */
   query(): ProcedureDefinition<I, A, E, Ctx, "query", R, Provides>
 
   /**
-   * Create a mutation procedure (HTTP POST, not cached).
+   * Create a mutation Procedure (HTTP POST, not cached).
    */
   mutation(): ProcedureDefinition<I, A, E, Ctx, "mutation", R, Provides>
 
   /**
-   * Create a stream procedure (HTTP streaming via NDJSON).
+   * Create a stream Procedure (HTTP streaming via NDJSON).
    * Output schema validates each streamed part.
    */
   stream(): ProcedureDefinition<I, A, E, Ctx, "stream", R, Provides>
 
   /**
-   * Create a chat procedure (HTTP streaming via NDJSON, @effect/ai compatible).
+   * Create a chat Procedure (HTTP streaming via NDJSON, @effect/ai compatible).
    * Output schema validates each ChatPart.
    */
   chat(): ProcedureDefinition<I, A, E, Ctx, "chat", R, Provides>
 
   /**
-   * Create a subscription procedure (WebSocket-based real-time).
+   * Create a subscription Procedure (WebSocket-based real-time).
    *
    * Handler returns Effect<Stream<A, E>, E, R>.
    * Output schema validates each streamed item.
@@ -452,8 +498,8 @@ export interface ProcedureBuilder<
    *
    * @example
    * ```ts
-   * const NotificationProcedures = procedures('notifications', {
-   *   watch: procedure
+   * const NotificationProcedures = Procedures.make({
+   *   watch: Procedure
    *     .input(Schema.Struct({ userId: Schema.String }))
    *     .output(NotificationSchema)
    *     .subscription(),
@@ -473,13 +519,55 @@ interface BuilderState {
   externalDocs?: string
   responseDescription?: string
   deprecated?: boolean
-  inputSchema: unknown
-  outputSchema: unknown
-  errorSchema: unknown
+  inputSchema: Schema.Schema<unknown, unknown> | undefined
+  outputSchema: Schema.Schema<unknown, unknown> | undefined
+  errorSchemas: ReadonlyArray<TaggedErrorClass>
   tags: ReadonlyArray<string>
   invalidates: ReadonlyArray<string>
   invalidatesTags: ReadonlyArray<string>
   middlewares: ReadonlyArray<Middleware<any, any, any, any, any, any>>
+}
+
+let procedureDefinitionId = 0
+
+const nextProcedureImplementationTagId = (): string => {
+  procedureDefinitionId += 1
+  return `@effect-trpc/procedure/${procedureDefinitionId}`
+}
+
+function buildErrorSchema(
+  errorSchemas: ReadonlyArray<TaggedErrorClass>,
+): Schema.Schema<unknown, unknown> | undefined {
+  const [head, ...tail] = errorSchemas
+  if (head === undefined) {
+    return undefined
+  }
+  if (tail.length === 0) {
+    return head
+  }
+  return Schema.Union(head, ...tail)
+}
+
+function mergeInputSchemas(
+  left: Schema.Schema<unknown, unknown> | undefined,
+  right: Schema.Schema<unknown, unknown> | undefined,
+): Schema.Schema<unknown, unknown> | undefined {
+  if (left === undefined) {
+    return right
+  }
+  if (right === undefined) {
+    return left
+  }
+  return Schema.extend(
+    left as Schema.Schema<object, unknown>,
+    right as Schema.Schema<object, unknown>,
+  ) as Schema.Schema<unknown, unknown>
+}
+
+function unsafeAssertLayerRequirements<A, R>(
+  layer: Layer.Layer<A, never, never>,
+): Layer.Layer<A, never, R> {
+  return layer as Layer.Layer<A, never, R>
 }
 
 /**
@@ -513,23 +601,44 @@ const createDefinition = <
   state: BuilderState,
   type: Type,
 ): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> =>
-  ({
-    _tag: "ProcedureDefinition",
-    type,
-    description: state.description,
-    summary: state.summary,
-    externalDocs: state.externalDocs,
-    responseDescription: state.responseDescription,
-    deprecated: state.deprecated,
-    inputSchema: state.inputSchema,
-    outputSchema: state.outputSchema,
-    errorSchema: state.errorSchema,
-    tags: state.tags,
-    invalidates: state.invalidates,
-    invalidatesTags: state.invalidatesTags,
-    middlewares: state.middlewares,
-    // _contextType, _middlewareR, and _provides are intentionally not set - they're phantom types
-  }) as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+  {
+    const implementationTag = Context.GenericTag<ProcedureImplementation<I, A, E, Ctx, Type>>(
+      nextProcedureImplementationTagId(),
+    )
+
+    const toLayer = <RImpl>(
+      implementation: ProcedureImplementation<I, A, E, Ctx, Type, RImpl>,
+    ): Layer.Layer<ProcedureImplementationTag<I, A, E, Ctx, Type>, never, RImpl> =>
+      unsafeAssertLayerRequirements<
+        ProcedureImplementationTag<I, A, E, Ctx, Type>,
+        RImpl
+      >(
+        Layer.effect(
+          implementationTag,
+          Effect.succeed(implementation as ProcedureImplementation<I, A, E, Ctx, Type>),
+        ),
+      )
+
+    return {
+      _tag: "ProcedureDefinition",
+      type,
+      description: state.description,
+      summary: state.summary,
+      externalDocs: state.externalDocs,
+      responseDescription: state.responseDescription,
+      deprecated: state.deprecated,
+      inputSchema: state.inputSchema as Schema.Schema<I, unknown> | undefined,
+      outputSchema: state.outputSchema as Schema.Schema<A, unknown> | undefined,
+      errorSchema: buildErrorSchema(state.errorSchemas) as Schema.Schema<E, unknown> | undefined,
+      tags: state.tags,
+      invalidates: state.invalidates,
+      invalidatesTags: state.invalidatesTags,
+      implementationTag,
+      toLayer,
+      middlewares: state.middlewares,
+      // _contextType, _middlewareR, and _provides are intentionally not set - they're phantom types
+    } as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+  }
 
 const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = never>(
   state: BuilderState,
@@ -549,14 +658,33 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
     ) =>
       createBuilder<I & InputExt, A, E | E2, CtxOut, R | R2, Provides | P>({
         ...state,
+        inputSchema: mergeInputSchemas(
+          state.inputSchema,
+          middleware.inputSchema as Schema.Schema<unknown, unknown> | undefined,
+        ),
+        errorSchemas:
+          middleware.errorSchemas === undefined
+            ? state.errorSchemas
+            : [...state.errorSchemas, ...middleware.errorSchemas],
         middlewares: [...state.middlewares, middleware],
       }),
-    input: <I2>(schema: unknown) =>
-      createBuilder<I & I2, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),
-    output: (schema: unknown) =>
-      createBuilder<I, unknown, E, Ctx, R, Provides>({ ...state, outputSchema: schema }),
-    error: (schema: unknown) =>
-      createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema: schema }),
+    input: <I2, IFrom = I2>(schema: Schema.Schema<I2, IFrom>) =>
+      createBuilder<I & I2, A, E, Ctx, R, Provides>({
+        ...state,
+        inputSchema: mergeInputSchemas(state.inputSchema, schema as Schema.Schema<unknown, unknown>),
+      }),
+    output: <A2, AFrom = A2>(schema: Schema.Schema<A2, AFrom>) =>
+      createBuilder<I, A2, E, Ctx, R, Provides>({
+        ...state,
+        outputSchema: schema as Schema.Schema<unknown, unknown>,
+      }),
+    error: <Errors extends readonly [TaggedErrorClass, ...ReadonlyArray<TaggedErrorClass>]>(
+      ...errors: Errors
+    ) =>
+      createBuilder<I, A, E | InstanceType<Errors[number]>, Ctx, R, Provides>({
+        ...state,
+        errorSchemas: [...state.errorSchemas, ...errors],
+      }),
     tags: (tags: ReadonlyArray<string>) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, tags }),
     invalidates: (paths: ReadonlyArray<string>) =>
@@ -582,21 +710,21 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
  *
  * @example
  * ```ts
- * const UserProcedures = procedures('user', {
- *   list: procedure.output(Schema.Array(UserSchema)).query(),
- *   byId: procedure.input(IdSchema).output(UserSchema).query(),
- *   create: procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
+ * const UserProcedures = Procedures.make({
+ *   list: Procedure.output(Schema.Array(UserSchema)).query(),
+ *   byId: Procedure.input(IdSchema).output(UserSchema).query(),
+ *   create: Procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
  * })
  * ```
  *
  * @since 0.1.0
  * @category constructors
  */
-export const procedure: ProcedureBuilder<unknown, unknown, never, BaseContext, never, never> =
+export const Procedure: ProcedureBuilder<unknown, unknown, never, BaseContext, never, never> =
   createBuilder<unknown, unknown, never, BaseContext, never, never>({
     inputSchema: undefined,
     outputSchema: undefined,
-    errorSchema: undefined,
+    errorSchemas: [],
     tags: [],
     invalidates: [],
     invalidatesTags: [],

@@ -11,28 +11,29 @@ import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import * as Cause from "effect/Cause"
 
-import { procedure, procedures } from "../index.js"
-import { Middleware, type BaseContext, type AuthenticatedContext } from "../core/middleware.js"
+import { Procedure, Procedures } from "../index.js"
+import { Middleware, type BaseContext, type AuthenticatedContext } from "../core/server/middleware.js"
 import {
   procedureToRpc,
   proceduresGroupToRpcGroup,
   convertHandlers,
   createRpcComponents,
   RpcBridgeValidationError,
-} from "../core/rpc-bridge.js"
+} from "../core/rpc/index.js"
 
 /**
  * Helper to cast MiddlewareResult (Effect | Stream) to runnable Effect for tests.
  */
 
-const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
+const asRunnable = <A, E>(effect: unknown): Effect.Effect<A, E, never> =>
   effect as Effect.Effect<A, E, never>
 
 /**
  * Helper to cast procedure to AnyProcedure for tests.
  */
 
-const asProcedure = <T>(proc: T): any => proc
+const asProcedure = <T>(proc: T): Parameters<typeof procedureToRpc>[1] =>
+  proc as unknown as Parameters<typeof procedureToRpc>[1]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures
@@ -47,8 +48,7 @@ const CreateUserSchema = Schema.Struct({
   name: Schema.String,
 })
 
-const UserErrorSchema = Schema.Struct({
-  _tag: Schema.Literal("UserError"),
+const UserErrorSchema = Schema.TaggedStruct("UserError", {
   message: Schema.String,
 })
 
@@ -58,7 +58,7 @@ const UserErrorSchema = Schema.Struct({
 
 describe("procedureToRpc", () => {
   it("converts a query procedure", () => {
-    const queryProc = procedure
+    const queryProc = Procedure
       .input(Schema.Struct({ id: Schema.String }))
       .output(UserSchema)
       .query()
@@ -71,7 +71,7 @@ describe("procedureToRpc", () => {
   })
 
   it("converts a mutation procedure", () => {
-    const mutationProc = procedure.input(CreateUserSchema).output(UserSchema).mutation()
+    const mutationProc = Procedure.input(CreateUserSchema).output(UserSchema).mutation()
 
     const rpc = procedureToRpc("user.create", asProcedure(mutationProc))
 
@@ -79,7 +79,7 @@ describe("procedureToRpc", () => {
   })
 
   it("converts a stream procedure", () => {
-    const streamProc = procedure
+    const streamProc = Procedure
       .input(Schema.Struct({ count: Schema.Number }))
       .output(Schema.Number)
       .stream()
@@ -90,7 +90,7 @@ describe("procedureToRpc", () => {
   })
 
   it("converts a procedure with error schema", () => {
-    const procWithError = procedure
+    const procWithError = Procedure
       .input(CreateUserSchema)
       .output(UserSchema)
       .error(UserErrorSchema)
@@ -102,7 +102,7 @@ describe("procedureToRpc", () => {
   })
 
   it("converts a procedure without input schema", () => {
-    const procNoInput = procedure.output(Schema.Array(UserSchema)).query()
+    const procNoInput = Procedure.output(Schema.Array(UserSchema)).query()
 
     const rpc = procedureToRpc("user.list", asProcedure(procNoInput))
 
@@ -116,36 +116,36 @@ describe("procedureToRpc", () => {
 
 describe("proceduresGroupToRpcGroup", () => {
   it("converts a procedures group to RpcGroup", () => {
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),
-      create: procedure.input(CreateUserSchema).output(UserSchema).mutation(),
-      list: procedure.output(Schema.Array(UserSchema)).query(),
+      create: Procedure.input(CreateUserSchema).output(UserSchema).mutation(),
+      list: Procedure.output(Schema.Array(UserSchema)).query(),
     })
 
-    const rpcGroup = proceduresGroupToRpcGroup(UserProcedures)
+    const rpcGroup = proceduresGroupToRpcGroup(UserProcedures, "user.")
 
     expect(rpcGroup).toBeDefined()
   })
 
   it("uses path prefix for nested routers", () => {
-    const PostProcedures = procedures("posts", {
-      get: procedure
+    const PostProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(Schema.String)
         .query(),
     })
 
-    const rpcGroup = proceduresGroupToRpcGroup(PostProcedures, "user.")
+    const rpcGroup = proceduresGroupToRpcGroup(PostProcedures, "user.posts.")
 
     expect(rpcGroup).toBeDefined()
     // The full path should be "user.posts.get"
   })
 
   it("throws RpcBridgeValidationError for empty procedures group", () => {
-    const EmptyProcedures = procedures("empty", {})
+    const EmptyProcedures = Procedures.make({})
 
     expect(() => proceduresGroupToRpcGroup(EmptyProcedures)).toThrow(RpcBridgeValidationError)
   })
@@ -157,12 +157,12 @@ describe("proceduresGroupToRpcGroup", () => {
 
 describe("convertHandlers", () => {
   it("converts handlers to RPC format", () => {
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),
-      create: procedure.input(CreateUserSchema).output(UserSchema).mutation(),
+      create: Procedure.input(CreateUserSchema).output(UserSchema).mutation(),
     })
 
     const handlers = {
@@ -170,7 +170,7 @@ describe("convertHandlers", () => {
       create: (_ctx: BaseContext, { name }: { name: string }) => Effect.succeed({ id: "1", name }),
     }
 
-    const rpcHandlers = convertHandlers(UserProcedures, handlers)
+    const rpcHandlers = convertHandlers(UserProcedures, handlers, "user.")
 
     expect(rpcHandlers).toBeDefined()
     expect(typeof rpcHandlers["user.get"]).toBe("function")
@@ -178,8 +178,8 @@ describe("convertHandlers", () => {
   })
 
   it("applies path prefix for nested routers", () => {
-    const PostProcedures = procedures("posts", {
-      get: procedure
+    const PostProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(Schema.String)
         .query(),
@@ -189,18 +189,18 @@ describe("convertHandlers", () => {
       get: (_ctx: BaseContext, { id }: { id: string }) => Effect.succeed(`Post ${id}`),
     }
 
-    const rpcHandlers = convertHandlers(PostProcedures, handlers, "user.")
+    const rpcHandlers = convertHandlers(PostProcedures, handlers, "user.posts.")
 
     expect(typeof rpcHandlers["user.posts.get"]).toBe("function")
   })
 
   it("throws on missing handlers", () => {
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),
-      list: procedure.output(Schema.Array(UserSchema)).query(),
+      list: Procedure.output(Schema.Array(UserSchema)).query(),
     })
 
     // Only provide 'get' handler, not 'list'
@@ -223,16 +223,16 @@ describe("Middleware Application", () => {
   it("handlers with middleware are wrapped correctly", async () => {
     let middlewareCalled = false
 
-    const testMiddleware = Middleware.make<BaseContext, BaseContext, never, never>(
-      "test",
-      (ctx, _input, next) => {
+    const testMiddleware = Middleware("test")
+    const testMiddlewareLive = testMiddleware.toLayer((ctx) =>
+      Effect.sync(() => {
         middlewareCalled = true
-        return next(ctx) as Effect.Effect<unknown, never, never>
-      },
+        return ctx
+      }),
     )
 
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .use(testMiddleware)
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
@@ -243,7 +243,7 @@ describe("Middleware Application", () => {
       get: (_ctx: BaseContext, { id }: { id: string }) => Effect.succeed({ id, name: "Test User" }),
     }
 
-    const rpcHandlers = convertHandlers(UserProcedures, handlers)
+    const rpcHandlers = convertHandlers(UserProcedures, handlers, "user.")
 
     // Call the handler with mock options
     const mockOptions = {
@@ -252,7 +252,15 @@ describe("Middleware Application", () => {
     }
 
     const result = await Effect.runPromise(
-      asRunnable(rpcHandlers["user.get"]!({ id: "1" }, mockOptions as any)),
+      Effect.provide(
+        asRunnable(
+          rpcHandlers["user.get"]!(
+            { id: "1" },
+            mockOptions as unknown as { readonly clientId: number; readonly headers: unknown },
+          ),
+        ),
+        testMiddlewareLive,
+      ),
     )
 
     expect(middlewareCalled).toBe(true)
@@ -265,25 +273,20 @@ describe("Middleware Application", () => {
       name: string
     }
 
-    const authMiddleware = Middleware.make<BaseContext, AuthenticatedContext<User>, never, never>(
-      "auth",
-      (ctx, _input, next) =>
-        next({ ...ctx, user: { id: "user-1", name: "Test User" } }) as Effect.Effect<
-          unknown,
-          never,
-          never
-        >,
+    const authMiddleware = Middleware<BaseContext>("auth").provides<{ user: User }>()
+    const authMiddlewareLive = authMiddleware.toLayer((ctx) =>
+      Effect.succeed({ ...ctx, user: { id: "user-1", name: "Test User" } }),
     )
 
-    const UserProcedures = procedures("user", {
-      me: procedure.use(authMiddleware).output(UserSchema).query(),
+    const UserProcedures = Procedures.make({
+      me: Procedure.use(authMiddleware).output(UserSchema).query(),
     })
 
     const handlers = {
       me: (_ctx: AuthenticatedContext<User>) => Effect.succeed({ id: "user-1", name: "Test User" }),
     }
 
-    const rpcHandlers = convertHandlers(UserProcedures, handlers)
+    const rpcHandlers = convertHandlers(UserProcedures, handlers, "user.")
 
     const mockOptions = {
       clientId: 1,
@@ -291,26 +294,33 @@ describe("Middleware Application", () => {
     }
 
     const result = await Effect.runPromise(
-      asRunnable(rpcHandlers["user.me"]!(undefined, mockOptions as any)),
+      Effect.provide(
+        asRunnable(
+          rpcHandlers["user.me"]!(
+            undefined,
+            mockOptions as unknown as { readonly clientId: number; readonly headers: unknown },
+          ),
+        ),
+        authMiddlewareLive,
+      ),
     )
 
     expect(result).toEqual({ id: "user-1", name: "Test User" })
   })
 
   it("middleware errors are propagated", async () => {
-    const TestError = Schema.Struct({
-      _tag: Schema.Literal("TestError"),
+    const TestError = Schema.TaggedStruct("TestError", {
       message: Schema.String,
     })
     type TestError = typeof TestError.Type
 
-    const failingMiddleware = Middleware.make<BaseContext, BaseContext, TestError>(
-      "failing",
-      (_ctx, _next) => Effect.fail({ _tag: "TestError" as const, message: "Middleware failed" }),
+    const failingMiddleware = Middleware("failing")
+    const failingMiddlewareLive = failingMiddleware.toLayer((_ctx) =>
+      Effect.fail({ _tag: "TestError" as const, message: "Middleware failed" }),
     )
 
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .use(failingMiddleware)
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
@@ -321,7 +331,7 @@ describe("Middleware Application", () => {
       get: (_ctx: BaseContext, { id }: { id: string }) => Effect.succeed({ id, name: "Test User" }),
     }
 
-    const rpcHandlers = convertHandlers(UserProcedures, handlers)
+    const rpcHandlers = convertHandlers(UserProcedures, handlers, "user.")
 
     const mockOptions = {
       clientId: 1,
@@ -330,7 +340,15 @@ describe("Middleware Application", () => {
 
     // Use Effect.runPromiseExit to inspect the failure
     const exit = await Effect.runPromiseExit(
-      asRunnable(rpcHandlers["user.get"]!({ id: "1" }, mockOptions as any)),
+      Effect.provide(
+        asRunnable(
+          rpcHandlers["user.get"]!(
+            { id: "1" },
+            mockOptions as unknown as { readonly clientId: number; readonly headers: unknown },
+          ),
+        ),
+        failingMiddlewareLive,
+      ),
     )
 
     // Should be a failure with our TestError
@@ -350,8 +368,8 @@ describe("Middleware Application", () => {
 
 describe("createRpcComponents", () => {
   it("creates rpcGroup and createHandlersLayer", () => {
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),
@@ -364,8 +382,8 @@ describe("createRpcComponents", () => {
   })
 
   it("createHandlersLayer returns a Layer", () => {
-    const UserProcedures = procedures("user", {
-      get: procedure
+    const UserProcedures = Procedures.make({
+      get: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),

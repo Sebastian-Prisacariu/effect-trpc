@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { createHandler as createNodeHandler } from "../node/index.js"
 import { createRouteHandler as createNextHandler } from "../next/index.js"
 import { createFetchHandler as createBunHandler } from "../bun/index.js"
@@ -15,13 +15,13 @@ class MyError extends Schema.TaggedError<MyError>()("MyError", {
   message: Schema.String
 }) {}
 
-const TestProcedures = procedures("test", {
-  hello: procedure
+const TestProcedures = Procedures.make({
+  hello: Procedure
     .input(Schema.Struct({ name: Schema.String }))
     .output(Schema.String)
     .query(),
 
-  fail: procedure
+  fail: Procedure
     .output(Schema.Never)
     .error(MyError)
     .mutation(),

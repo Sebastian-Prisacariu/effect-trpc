@@ -23,7 +23,7 @@ import * as Layer from "effect/Layer"
 import * as HttpClient from "@effect/platform/HttpClient"
 import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { createTRPCReact, Result } from "../react/index.js"
 import { useNetworkStatus } from "../react/hooks/index.js"
 
@@ -56,9 +56,9 @@ type User = typeof UserSchema.Type
 
 const UserListOutput = Schema.Array(UserSchema)
 
-const testProcedures = procedures("user", {
-  list: procedure.output(UserListOutput).query(),
-  byId: procedure.input(Schema.Number).output(UserSchema).query(),
+const testProcedures = Procedures.make({
+  list: Procedure.output(UserListOutput).query(),
+  byId: Procedure.input(Schema.Number).output(UserSchema).query(),
 })
 
 const testRouter = Router.make({

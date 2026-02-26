@@ -24,9 +24,9 @@ import * as Layer from "effect/Layer"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
-import type { BaseContext } from "../core/middleware.js"
+import type { BaseContext } from "../core/server/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures - Schemas
@@ -35,20 +35,17 @@ import type { BaseContext } from "../core/middleware.js"
 const NumberChunkSchema = Schema.Number
 
 const ChatPartSchema = Schema.Union(
-  Schema.Struct({
-    _tag: Schema.Literal("text-delta"),
+  Schema.TaggedStruct("text-delta", {
     delta: Schema.String,
   }),
-  Schema.Struct({
-    _tag: Schema.Literal("finish"),
+  Schema.TaggedStruct("finish", {
     reason: Schema.String,
   }),
 )
 
 type ChatPart = typeof ChatPartSchema.Type
 
-const StreamErrorSchema = Schema.Struct({
-  _tag: Schema.Literal("StreamError"),
+const StreamErrorSchema = Schema.TaggedStruct("StreamError", {
   message: Schema.String,
 })
 
@@ -58,42 +55,42 @@ type StreamError = typeof StreamErrorSchema.Type
 // Test Fixtures - Procedures
 // ─────────────────────────────────────────────────────────────────────────────
 
-const StreamProcedures = procedures("stream", {
+const StreamProcedures = Procedures.make({
   // Basic stream that yields count numbers
-  numbers: procedure
+  numbers: Procedure
     .input(Schema.Struct({ count: Schema.Number }))
     .output(NumberChunkSchema)
     .stream(),
 
   // Stream that completes after a delay
-  delayed: procedure
+  delayed: Procedure
     .input(Schema.Struct({ delayMs: Schema.Number, count: Schema.Number }))
     .output(NumberChunkSchema)
     .stream(),
 
   // Stream that fails after yielding some values
-  failing: procedure
+  failing: Procedure
     .input(Schema.Struct({ failAfter: Schema.Number }))
     .output(NumberChunkSchema)
     .error(StreamErrorSchema)
     .stream(),
 
   // Stream that runs indefinitely (for cancellation testing)
-  infinite: procedure.output(NumberChunkSchema).stream(),
+  infinite: Procedure.output(NumberChunkSchema).stream(),
 
   // Empty stream that completes immediately
-  empty: procedure.output(NumberChunkSchema).stream(),
+  empty: Procedure.output(NumberChunkSchema).stream(),
 })
 
-const ChatProcedures = procedures("chat", {
+const ChatProcedures = Procedures.make({
   // Chat procedure with typed parts
-  generate: procedure
+  generate: Procedure
     .input(Schema.Struct({ prompt: Schema.String }))
     .output(ChatPartSchema)
     .chat(),
 
   // Chat that fails mid-stream
-  failingChat: procedure
+  failingChat: Procedure
     .input(Schema.Struct({ prompt: Schema.String }))
     .output(ChatPartSchema)
     .error(StreamErrorSchema)

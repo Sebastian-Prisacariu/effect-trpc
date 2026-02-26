@@ -7,7 +7,7 @@
  * - Schemas for validation
  */
 import * as Schema from "effect/Schema"
-import { procedures, procedure, Router } from "effect-trpc"
+import { Procedures, Procedure, Router } from "effect-trpc"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -53,39 +53,39 @@ export const HealthStatus = Schema.Struct({
 // Procedures
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const todosProcedures = procedures("todos", {
-  list: procedure
+export const todosProcedures = Procedures.make({
+  list: Procedure
     .output(Schema.Array(Todo))
     .query(),
 
-  get: procedure
+  get: Procedure
     .input(GetTodoInput)
     .output(Schema.NullOr(Todo))
     .query(),
 
-  create: procedure
+  create: Procedure
     .input(CreateTodoInput)
     .output(Todo)
     .mutation(),
 
-  update: procedure
+  update: Procedure
     .input(UpdateTodoInput)
     .output(Todo)
     .mutation(),
 
-  toggle: procedure
+  toggle: Procedure
     .input(ToggleTodoInput)
     .output(Todo)
     .mutation(),
 
-  delete: procedure
+  delete: Procedure
     .input(DeleteTodoInput)
     .output(Schema.Boolean)
     .mutation(),
 })
 
-export const healthProcedures = procedures("health", {
-  check: procedure
+export const healthProcedures = Procedures.make({
+  check: Procedure
     .output(HealthStatus)
     .query(),
 })

@@ -229,8 +229,8 @@ export type ProcedureRecord = Record<string, any>
  * 
  * @example
  * ```ts
- * const UserProcedures = procedures("user", {
- *   getUser: procedure
+ * const UserProcedures = Procedures.make({
+ *   getUser: Procedure
  *     .use(authMiddleware)  // Context becomes AuthenticatedContext<User>
  *     .input(IdSchema)
  *     .query()
@@ -268,9 +268,9 @@ export type InferHandler<P> =
  * 
  * @example
  * ```ts
- * const UserProcedures = procedures("user", {
- *   getUser: procedure.use(authMiddleware).input(IdSchema).query(),
- *   listUsers: procedure.output(UsersSchema).query(),
+ * const UserProcedures = Procedures.make({
+ *   getUser: Procedure.use(authMiddleware).input(IdSchema).query(),
+ *   listUsers: Procedure.output(UsersSchema).query(),
  * })
  * 
  * // InferHandlers produces:
@@ -295,7 +295,7 @@ export type InferHandlers<P extends Record<string, any>> = {
  * 
  * @example
  * ```ts
- * const myProc = procedure.use(authMiddleware).query()
+ * const myProc = Procedure.use(authMiddleware).query()
  * type MyContext = InferHandlerContext<typeof myProc>
  * // AuthenticatedContext<User>
  * ```
@@ -392,9 +392,9 @@ export type HandlersRequirements<H extends Record<string, AnyHandlerFunction>> =
  * 
  * @example
  * ```ts
- * const UserProcedures = procedures("user", {
- *   getUser: procedure.use(authMiddleware).query(),  // authMiddleware needs TokenService
- *   list: procedure.use(rateLimitMiddleware).query(),  // rateLimitMiddleware needs nothing
+ * const UserProcedures = Procedures.make({
+ *   getUser: Procedure.use(authMiddleware).query(),  // authMiddleware needs TokenService
+ *   list: Procedure.use(rateLimitMiddleware).query(),  // rateLimitMiddleware needs nothing
  * })
  * type R = ProceduresMiddlewareR<typeof UserProcedures["procedures"]>
  * // TokenService
@@ -420,9 +420,9 @@ export type ProceduresMiddlewareR<Procs extends ProcedureRecord> = {
  * 
  * @example
  * ```ts
- * const UserProcedures = procedures("user", {
- *   getUser: procedure.use(authMiddleware).query(),  // AuthError
- *   update: procedure.use(rateLimitMiddleware).mutation(),  // RateLimitError
+ * const UserProcedures = Procedures.make({
+ *   getUser: Procedure.use(authMiddleware).query(),  // AuthError
+ *   update: Procedure.use(rateLimitMiddleware).mutation(),  // RateLimitError
  * })
  * type E = ProceduresError<typeof UserProcedures["procedures"]>
  * // AuthError | RateLimitError
@@ -448,9 +448,9 @@ export type ProceduresError<Procs extends ProcedureRecord> = {
  * 
  * @example
  * ```ts
- * const UserProcedures = procedures("user", {
- *   getUser: procedure.use(dbMiddleware).query(),  // Provides Database
- *   update: procedure.use(cacheMiddleware).mutation(),  // Provides Cache
+ * const UserProcedures = Procedures.make({
+ *   getUser: Procedure.use(dbMiddleware).query(),  // Provides Database
+ *   update: Procedure.use(cacheMiddleware).mutation(),  // Provides Cache
  * })
  * type Provided = ProceduresProvides<typeof UserProcedures["procedures"]>
  * // Database | Cache
@@ -483,14 +483,14 @@ export type EffectiveHandlerRequirements<
 /**
  * A group of related procedures under a namespace.
  *
- * Created by the `procedures` function. Provides `.toLayer()` to create
+ * Created by the `Procedures.make` function. Provides `.toLayer()` to create
  * the implementation layer with type-safe handlers.
  *
  * @example
  * ```ts
- * const UserProcedures = procedures('user', {
- *   list: procedure.output(Schema.Array(UserSchema)).query(),
- *   byId: procedure.input(IdSchema).output(UserSchema).query(),
+ * const UserProcedures = Procedures.make({
+ *   list: Procedure.output(Schema.Array(UserSchema)).query(),
+ *   byId: Procedure.input(IdSchema).output(UserSchema).query(),
  * })
  *
  * // UserProcedures.name === 'user'
@@ -518,7 +518,7 @@ export interface ProceduresGroup<
    * - `EffectiveHandlerRequirements`: Requirements from handlers, minus services provided by middleware
    * - `ProceduresMiddlewareR`: Requirements from middleware attached to procedures
    * 
-   * Services provided by middleware (via `middlewareWithProvides`) are automatically
+   * Services provided by middleware (via `middleware.provides<T>()`) are automatically
    * excluded from handler requirements.
    * 
    * @example
@@ -536,7 +536,7 @@ export interface ProceduresGroup<
    * // Layer requires: Database
    * 
    * // Middleware provides services
-   * const myProc = procedure.use(dbMiddleware).query()  // dbMiddleware provides Database
+   * const myProc = Procedure.use(dbMiddleware).query()  // dbMiddleware provides Database
    * const handlers = {
    *   myProc: (ctx, input) => Effect.flatMap(Database, db => db.find(input.id))
    * }
@@ -603,6 +603,13 @@ function unsafeAssertLayerRequirements<A, R>(
   return layer as Layer.Layer<A, never, R>
 }
 
+let proceduresGroupId = 0
+
+const nextProceduresServiceTagId = (): string => {
+  proceduresGroupId += 1
+  return `@effect-trpc/procedures/${proceduresGroupId}`
+}
+
 /**
  * Define a group of related procedures under a namespace.
  *
@@ -614,19 +621,19 @@ function unsafeAssertLayerRequirements<A, R>(
  *
  * @example
  * ```ts
- * import { procedures, procedure } from 'effect-trpc'
+ * import { Procedures, Procedure } from 'effect-trpc'
  *
- * export const UserProcedures = procedures('user', {
- *   list: procedure.output(Schema.Array(UserSchema)).query(),
- *   byId: procedure.input(IdSchema).output(UserSchema).query(),
- *   create: procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
+ * export const UserProcedures = Procedures.make({
+ *   list: Procedure.output(Schema.Array(UserSchema)).query(),
+ *   byId: Procedure.input(IdSchema).output(UserSchema).query(),
+ *   create: Procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
  * })
  * ```
  *
  * @since 0.1.0
  * @category constructors
  */
-export const procedures = <
+const makeProceduresGroup = <
   Name extends string,
   Procs extends ProcedureRecord,
 >(
@@ -634,9 +641,7 @@ export const procedures = <
   defs: Procs,
 ): ProceduresGroup<Name, Procs> => {
   // Create a unique tag for this procedures group
-  const ServiceTag = Context.GenericTag<ProceduresService<Name, Procs>>(
-    `@effect-trpc/${name}`,
-  )
+  const ServiceTag = Context.GenericTag<ProceduresService<Name, Procs>>(nextProceduresServiceTagId())
 
   return {
     _tag: "ProceduresGroup",
@@ -650,13 +655,29 @@ export const procedures = <
         ? implementation
         : Effect.succeed(implementation)
 
-      const layer = Layer.effect(
+      const serviceLayer = Layer.effect(
         ServiceTag,
-        Effect.map(effect, (handlers) => ({
+        Effect.map(effect, (handlers: Handlers) => ({
           _tag: name,
           handlers,
         })),
       )
+
+      const procedureImplementationLayers = Layer.unwrap(
+        Effect.map(effect, (handlers: Handlers) => {
+          let merged = Layer.empty
+          for (const [procedureName, definition] of Object.entries(defs)) {
+            const handler = handlers[procedureName as keyof Handlers]
+            merged = Layer.mergeAll(
+              merged,
+              (definition as ProcedureDefinition).toLayer(handler as never),
+            )
+          }
+          return merged
+        }),
+      )
+
+      const layer = Layer.mergeAll(serviceLayer, procedureImplementationLayers)
 
       // Widen the layer type to include handler and middleware requirements.
       // See unsafeAssertLayerRequirements documentation for why this is intentional.
@@ -666,4 +687,15 @@ export const procedures = <
       >(layer)
     },
   }
+}
+
+/**
+ * v2 procedures namespace.
+ *
+ * Procedures are now grouped without an explicit name; the router key
+ * determines the final path segment.
+ */
+export const Procedures = {
+  make: <Procs extends ProcedureRecord>(defs: Procs): ProceduresGroup<"", Procs> =>
+    makeProceduresGroup("", defs),
 }

@@ -16,17 +16,15 @@ import type * as Brand from "effect/Brand"
 import type { RpcSchema } from "@effect/rpc"
 import { Rpc, RpcGroup } from "@effect/rpc"
 import type { Headers } from "@effect/platform/Headers"
-import type { ProcedureDefinition } from "./procedure.js"
+import type { ProcedureDefinition } from "./server/procedure.js"
 import type {
   ProceduresGroup,
   ProcedureRecord,
   InferHandlers,
   EffectiveHandlerRequirements,
   ProceduresMiddlewareR,
-} from "./procedures.js"
-import type { BaseContext, Middleware, ServiceMiddleware } from "./middleware.js"
-import { MiddlewareContextRef, isServiceMiddleware } from "./middleware.js"
-import * as FiberRef from "effect/FiberRef"
+} from "./server/procedures.js"
+import type { BaseContext, Middleware } from "./server/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RPC Bridge Errors
@@ -73,7 +71,7 @@ export class RpcBridgeValidationError extends Data.TaggedError("RpcBridgeValidat
 export type AnyRpc = Rpc.Any
 
 /**
- * Any ProcedureDefinition - used for type constraints that accept any procedure.
+ * Any ProcedureDefinition - used for type constraints that accept any Procedure.
  * This uses `any` consistently to avoid variance issues with `never` types
  * when using `exactOptionalPropertyTypes`.
  */
@@ -89,7 +87,7 @@ type AnyProcedure = ProcedureDefinition<any, any, any, any, any, any, any>
  *
  * Uses Effect's Brand pattern to ensure type safety when building RpcGroups.
  * The brand carries the procedure type information, enabling TypeScript to
- * verify that each Rpc correctly corresponds to its source procedure.
+ * verify that each Rpc correctly corresponds to its source Procedure.
  *
  * @example
  * ```ts
@@ -117,7 +115,7 @@ export const VerifiedRpc = {
    * Create a VerifiedRpc from a procedure definition.
    *
    * This wraps `Rpc.make` and adds the verification brand, providing
-   * type-safe proof that the Rpc was created from the given procedure.
+   * type-safe proof that the Rpc was created from the given Procedure.
    *
    * @param name - The full procedure name (e.g., "user.create")
    * @param def - The procedure definition with schemas
@@ -202,7 +200,7 @@ type IsStreamingProcedure<P> =
  * @example
  * ```ts
  * // Given:
- * const myProc = procedure
+ * const myProc = Procedure
  *   .input(Schema.Struct({ id: Schema.String }))
  *   .output(Schema.Struct({ name: Schema.String }))
  *   .error(NotFoundError)
@@ -233,9 +231,9 @@ export type ProcedureToRpc<
  *
  * @example
  * ```ts
- * const UserProcs = procedures("user", {
- *   get: procedure.input(IdSchema).output(UserSchema).query(),
- *   list: procedure.output(UsersSchema).query(),
+ * const UserProcs = Procedures.make({
+ *   get: Procedure.input(IdSchema).output(UserSchema).query(),
+ *   list: Procedure.output(UsersSchema).query(),
  * })
  *
  * // ProceduresToRpcs<"user", typeof UserProcs["procedures"]> produces:
@@ -273,8 +271,8 @@ export type InferRpcHandler<R extends Rpc.Any> = Rpc.ToHandlerFn<R, any>
  * - Input schema (payload)
  * - Output schema (success)
  * - Error schema (error)
- * - Whether it's a streaming procedure
- * - The source procedure (via brand)
+ * - Whether it's a streaming Procedure
+ * - The source Procedure (via brand)
  *
  * @param name - The full procedure name (e.g., "user.create")
  * @param def - The procedure definition with schemas
@@ -311,16 +309,18 @@ export const proceduresGroupToRpcGroup = <
 >(
   group: ProceduresGroup<Name, Procs>,
   pathPrefix: Prefix = "" as Prefix,
+  groupNameOverride?: string,
 ): RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>> => {
   // Convert each procedure to an Rpc with full path using functional map
   const rpcs = Object.entries(group.procedures).map(([key, def]) => {
     // Full path: prefix + group name + procedure name
     // e.g., "user." + "posts" + "." + "list" = "user.posts.list"
-    const fullName = `${pathPrefix}${group.name}.${key}`
+    const groupName = groupNameOverride ?? group.name
+    const fullName = `${pathPrefix}${groupName}.${key}`
     return procedureToRpc(fullName, def)
   })
 
-  // Validation: ProceduresGroup must have at least one procedure.
+  // Validation: ProceduresGroup must have at least one Procedure.
   //
   // Why throw instead of Effect.fail?
   // 1. This is a DEFECT (programmer error), not a recoverable runtime error
@@ -413,7 +413,7 @@ const toWebHeaders = (platformHeaders: Headers): globalThis.Headers => {
  *   compile-time errors
  *
  * **Best Practices:**
- * 1. Use `composeMiddleware` to create type-safe middleware compositions
+ * 1. Chain middleware with `.use(...)` in the desired order
  *    that are validated at compile time
  * 2. Test middleware chains thoroughly to catch context mismatches
  * 3. Use descriptive middleware names to aid debugging
@@ -489,11 +489,9 @@ type Handler = (ctx: any, input: any) => Effect.Effect<any, any, any>
  * @overload Effect procedures return Effect.Effect
  */
 /**
- * Type alias for any middleware (regular or service-providing).
+ * Type alias for middleware in runtime chains.
  */
-type AnyMiddleware =
-  | Middleware<any, any, any, any, any>
-  | ServiceMiddleware<any, any, any, any, any>
+type AnyMiddleware = Middleware<any, any, any, any, any>
 
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   middlewares: ReadonlyArray<AnyMiddleware>,
@@ -523,37 +521,15 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
 ): MiddlewareResult<A, E, R>
 
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
-  middlewares: ReadonlyArray<
-    Middleware<any, any, any, any, any> | ServiceMiddleware<any, any, any, any, any>
-  >,
+  middlewares: ReadonlyArray<Middleware<any, any, any, any, any>>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
   options: RpcHandlerOptions,
   payload: I,
   isStream: boolean,
 ): MiddlewareResult<A, E, R> {
-  // Internal implementation uses `any` for the dynamic middleware chain,
-  // but the generic signature ensures type safety at call sites.
-  // The runtime correctly:
-  // 1. Starts with BaseContext
-  // 2. Each middleware transforms context → Ctx
-  // 3. Handler receives Ctx and returns Effect<A, E, R>
-
-  // Separate service middleware from regular middleware
-  // Service middleware needs special handling for streams
-  const serviceMiddlewares: ServiceMiddleware<any, any, any, any, any>[] = []
-  const regularMiddlewares: Middleware<any, any, any, any, any>[] = []
-
-  for (const m of middlewares) {
-    if (isServiceMiddleware(m)) {
-      serviceMiddlewares.push(m)
-    } else {
-      regularMiddlewares.push(m)
-    }
-  }
-
-  type AnyHandler = (ctx: any, input: any) => any
-  const anyHandler = handler as AnyHandler
+  type AnyHandler = (ctx: unknown, input: I) => unknown
+  const anyHandler = handler as unknown as AnyHandler
 
   const setupContext = Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({
@@ -574,117 +550,51 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
     return { baseContext, abortController }
   })
 
-  // Helper to create services and transform context
-  // Returns Effect<{ ctx: transformedContext, services: Map<Tag, service> }>
-  const prepareServicesAndContext = (baseCtx: any, input: I) =>
-    Effect.gen(function* () {
-      let ctx = baseCtx
-      const services: Array<{ tag: any; value: any }> = []
-
-      // Process service middleware in order (passes input to make)
-      for (const sm of serviceMiddlewares) {
-        const service = yield* sm.make(ctx, input)
-        services.push({ tag: sm.provides, value: service })
-
-        // Transform context if the middleware defines it
-        if (sm.transformContext) {
-          ctx = sm.transformContext(ctx, service)
-        }
-      }
-
-      return { ctx, services }
-    })
-
   if (isStream) {
-    // For streams, we need to:
-    // 1. Prepare services (evaluate make functions)
-    // 2. Transform context
-    // 3. Run regular middleware chain
-    // 4. Apply services using Stream.provideService (NOT Effect.provideService)
     const stream = Stream.unwrap(
-      Effect.flatMap(setupContext, ({ baseContext, abortController }) =>
-        Effect.map(prepareServicesAndContext(baseContext, payload), ({ ctx, services }) => {
-          // Build the regular middleware chain
-          type ChainFn = (ctx: any) => any
+      Effect.map(setupContext, ({ baseContext, abortController }) => {
+        type ChainFn = (ctx: unknown) => Effect.Effect<unknown, unknown, unknown>
 
-          const finalStep: ChainFn = (finalCtx) =>
-            FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-              Effect.map(() => anyHandler(finalCtx, payload)),
-            )
+        const finalStep: ChainFn = (finalCtx) => Effect.succeed(anyHandler(finalCtx, payload))
 
-          let resultStream: Stream.Stream<unknown, unknown, unknown>
+        if (middlewares.length === 0) {
+          return anyHandler(baseContext, payload) as Stream.Stream<unknown, unknown, unknown>
+        }
 
-          if (regularMiddlewares.length === 0) {
-            // No regular middleware - just run the handler
-            resultStream = Stream.unwrap(
-              FiberRef.set(MiddlewareContextRef, ctx).pipe(
-                Effect.map(() => anyHandler(ctx, payload)),
-              ),
-            )
-          } else {
-            // Build chain with regular middleware (passes input to each)
-            const chain = Array.reduceRight(
-              regularMiddlewares,
-              finalStep,
-              (nextFn, middleware): ChainFn =>
-                (c) =>
-                  middleware.fn(c, payload, nextFn),
-            )
+        const chain = Array.reduceRight(
+          middlewares,
+          finalStep,
+          (nextFn, middleware): ChainFn => (ctx) => middleware.fn(ctx, payload, nextFn),
+        )
 
-            const chainEffect = Effect.onInterrupt(chain(ctx), () =>
-              Effect.sync(() => abortController.abort()),
-            ) as unknown as Effect.Effect<
-              Stream.Stream<unknown, unknown, unknown>,
-              unknown,
-              unknown
-            >
+        const chainEffect = Effect.onInterrupt(chain(baseContext), () =>
+          Effect.sync(() => abortController.abort()),
+        ) as Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown, unknown>
 
-            resultStream = Stream.unwrap(chainEffect)
-          }
-
-          // Apply services using Stream.provideService
-          // This ensures services are available to stream's internal effects
-          for (const { tag, value } of services) {
-            resultStream = Stream.provideService(resultStream, tag, value)
-          }
-
-          return resultStream
-        }),
-      ),
+        return Stream.unwrap(chainEffect)
+      }),
     ).pipe(Stream.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
     return stream as Stream.Stream<A, E, R>
   }
 
-  // Effect (Mutation/Query) logic
   const effect = Effect.gen(function* () {
     const { baseContext, abortController } = yield* setupContext
-    const { ctx, services } = yield* prepareServicesAndContext(baseContext, payload)
-
     let result: Effect.Effect<unknown, unknown, unknown>
 
-    if (regularMiddlewares.length === 0) {
-      yield* FiberRef.set(MiddlewareContextRef, ctx)
-      result = anyHandler(ctx, payload)
+    if (middlewares.length === 0) {
+      result = anyHandler(baseContext, payload) as Effect.Effect<unknown, unknown, unknown>
     } else {
-      const finalStep = (finalCtx: any) =>
-        FiberRef.set(MiddlewareContextRef, finalCtx).pipe(
-          Effect.flatMap(() => anyHandler(finalCtx, payload)),
-        )
+      const finalStep = (finalCtx: unknown) =>
+        anyHandler(finalCtx, payload) as Effect.Effect<unknown, unknown, unknown>
 
-      // Build chain with regular middleware (passes input to each)
       const chain = Array.reduceRight(
-        regularMiddlewares,
+        middlewares,
         finalStep,
-        (nextFn, middleware) => (c: any) => middleware.fn(c, payload, nextFn),
+        (nextFn, middleware) => (ctx: unknown) => middleware.fn(ctx, payload, nextFn),
       )
 
-      result = Effect.onInterrupt(chain(ctx), () => Effect.sync(() => abortController.abort()))
-    }
-
-    // Apply services using Effect.provideService
-    for (const { tag, value } of services) {
-      result = Effect.provideService(result, tag, value)
+      result = Effect.onInterrupt(chain(baseContext), () => Effect.sync(() => abortController.abort()))
     }
 
     return yield* result
@@ -715,6 +625,7 @@ export const convertHandlers = <Name extends string, Procs extends ProcedureReco
   handlers: InferHandlers<Procs>,
   pathPrefix: string = "",
   routerMiddlewares: ReadonlyArray<AnyMiddleware> = [],
+  groupNameOverride?: string,
 ): Record<string, (payload: unknown, options: RpcHandlerOptions) => MiddlewareResult> => {
   // First, validate that all procedures have handlers
   // This is a programmer error that should fail fast during setup
@@ -736,7 +647,11 @@ export const convertHandlers = <Name extends string, Procs extends ProcedureReco
   return Object.keys(group.procedures).reduce(
     (rpcHandlers, key) => {
       // Full path: prefix + group name + procedure name
-      const fullName = `${pathPrefix}${group.name}.${key}`
+      const groupName = groupNameOverride ?? group.name
+      const normalizedPrefix =
+        pathPrefix.length === 0 || pathPrefix.endsWith(".") ? pathPrefix : `${pathPrefix}.`
+      const groupPath = groupName.length === 0 ? "" : `${groupName}.`
+      const fullName = `${normalizedPrefix}${groupPath}${key}`
       const procedureDef = group.procedures[key] as ProcedureDefinition
       // Get the user handler - signature: (ctx, input) => Effect
       // Cast through unknown because InferHandlers allows any R in handler return types

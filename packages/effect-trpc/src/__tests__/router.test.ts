@@ -1,18 +1,18 @@
 import { describe, it, expect } from "vitest"
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
-import { procedure } from "../core/procedure.js"
-import { procedures } from "../core/procedures.js"
-import { Router, extractMetadata } from "../core/router.js"
-import { procedureToRpc, proceduresGroupToRpcGroup, convertHandlers } from "../core/rpc-bridge.js"
-import { Middleware, type BaseContext } from "../core/middleware.js"
+import { Procedure } from "../core/index.js"
+import { Procedures } from "../core/index.js"
+import { Router, extractMetadata } from "../core/server/router.js"
+import { procedureToRpc, proceduresGroupToRpcGroup, convertHandlers } from "../core/rpc/index.js"
+import { Middleware, type BaseContext } from "../core/server/middleware.js"
 
 /**
  * Helper to cast MiddlewareResult (Effect | Stream) to runnable Effect for tests.
- * Uses `any` because MiddlewareResult is a union of Effect | Stream.
  */
 
-const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
+const asRunnable = <A, E>(effect: unknown): Effect.Effect<A, E, never> =>
   effect as Effect.Effect<A, E, never>
 
 /**
@@ -20,7 +20,8 @@ const asRunnable = <A, E>(effect: any): Effect.Effect<A, E, never> =>
  * Needed due to exactOptionalPropertyTypes making never not assignable to any.
  */
 
-const asProcedure = <T>(proc: T): any => proc
+const asProcedure = <T>(proc: T): Parameters<typeof procedureToRpc>[1] =>
+  proc as unknown as Parameters<typeof procedureToRpc>[1]
 
 describe("router", () => {
   const UserSchema = Schema.Struct({
@@ -28,17 +29,17 @@ describe("router", () => {
     name: Schema.String,
   })
 
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    byId: procedure
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    byId: Procedure
       .input(Schema.Struct({ id: Schema.String }))
       .output(UserSchema)
       .query(),
   })
 
-  const PostProcedures = procedures("post", {
-    list: procedure.output(Schema.Array(Schema.String)).query(),
-    create: procedure
+  const PostProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(Schema.String)).query(),
+    create: Procedure
       .input(Schema.Struct({ title: Schema.String }))
       .output(Schema.String)
       .mutation(),
@@ -78,7 +79,7 @@ describe("router", () => {
 
 describe("rpc-bridge", () => {
   it("converts a procedure to an Rpc", () => {
-    const def = procedure
+    const def = Procedure
       .input(Schema.Struct({ id: Schema.String }))
       .output(Schema.String)
       .query()
@@ -89,7 +90,7 @@ describe("rpc-bridge", () => {
   })
 
   it("converts a stream procedure with stream flag", () => {
-    const def = procedure.output(Schema.String).stream()
+    const def = Procedure.output(Schema.String).stream()
 
     const rpc = procedureToRpc("test.stream", asProcedure(def))
 
@@ -97,12 +98,12 @@ describe("rpc-bridge", () => {
   })
 
   it("converts a procedures group to RpcGroup", () => {
-    const TestProcedures = procedures("test", {
-      one: procedure.output(Schema.String).query(),
-      two: procedure.input(Schema.String).output(Schema.Number).mutation(),
+    const TestProcedures = Procedures.make({
+      one: Procedure.output(Schema.String).query(),
+      two: Procedure.input(Schema.String).output(Schema.Number).mutation(),
     })
 
-    const rpcGroup = proceduresGroupToRpcGroup(TestProcedures)
+    const rpcGroup = proceduresGroupToRpcGroup(TestProcedures, "test.")
 
     expect(rpcGroup.requests.size).toBe(2)
     expect(rpcGroup.requests.has("test.one")).toBe(true)
@@ -121,32 +122,32 @@ describe("nested routers", () => {
     text: Schema.String,
   })
 
-  const PostsProcedures = procedures("posts", {
-    list: procedure.output(Schema.Array(PostsSchema)).query(),
-    create: procedure
+  const PostsProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(PostsSchema)).query(),
+    create: Procedure
       .input(Schema.Struct({ title: Schema.String }))
       .output(PostsSchema)
       .invalidates(["user.posts.list"])
       .mutation(),
   })
 
-  const CommentsProcedures = procedures("comments", {
-    list: procedure
+  const CommentsProcedures = Procedures.make({
+    list: Procedure
       .input(Schema.Struct({ postId: Schema.String }))
       .output(Schema.Array(CommentSchema))
       .query(),
-    create: procedure
+    create: Procedure
       .input(Schema.Struct({ postId: Schema.String, text: Schema.String }))
       .output(CommentSchema)
       .mutation(),
   })
 
-  const ProfileProcedures = procedures("profile", {
-    get: procedure.output(Schema.Struct({ name: Schema.String })).query(),
+  const ProfileProcedures = Procedures.make({
+    get: Procedure.output(Schema.Struct({ name: Schema.String })).query(),
   })
 
-  const HealthProcedures = procedures("health", {
-    check: procedure.output(Schema.Struct({ status: Schema.String })).query(),
+  const HealthProcedures = Procedures.make({
+    check: Procedure.output(Schema.Struct({ status: Schema.String })).query(),
   })
 
   it("creates router with nested routers", () => {
@@ -205,8 +206,8 @@ describe("nested routers", () => {
   })
 
   it("supports deeply nested routers (3+ levels)", () => {
-    const detailsProcedures = procedures("details", {
-      get: procedure.output(Schema.String).query(),
+    const detailsProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).query(),
     })
 
     const usersRouter = Router.make({
@@ -261,9 +262,9 @@ describe("nested routers", () => {
 
 describe("nested router metadata extraction", () => {
   it("extracts metadata with full nested paths", () => {
-    const PostsProcedures = procedures("posts", {
-      list: procedure.output(Schema.Array(Schema.String)).tags(["posts"]).query(),
-      create: procedure
+    const PostsProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(Schema.String)).tags(["posts"]).query(),
+      create: Procedure
         .input(Schema.Struct({ title: Schema.String }))
         .output(Schema.String)
         .invalidates(["user.posts.list"])
@@ -286,16 +287,16 @@ describe("nested router metadata extraction", () => {
   })
 
   it("works with deeply nested routers", () => {
-    const ActionsProcedures = procedures("actions", {
-      run: procedure
+    const ActionsProcedures = Procedures.make({
+      run: Procedure
         .input(Schema.Struct({ action: Schema.String }))
         .invalidates(["admin.users.details.get"])
         .invalidatesTags(["admin-actions"])
         .mutation(),
     })
 
-    const detailsProcedures = procedures("details", {
-      get: procedure.output(Schema.String).tags(["user-details"]).query(),
+    const detailsProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).tags(["user-details"]).query(),
     })
 
     const usersRouter = Router.make({
@@ -323,14 +324,14 @@ describe("nested router metadata extraction", () => {
 
 describe("extractMetadata", () => {
   it("extracts invalidation metadata from procedures", () => {
-    const UserProcedures = procedures("user", {
-      list: procedure.output(Schema.Array(Schema.String)).tags(["users"]).query(),
-      create: procedure
+    const UserProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(Schema.String)).tags(["users"]).query(),
+      create: Procedure
         .input(Schema.Struct({ name: Schema.String }))
         .output(Schema.String)
         .invalidates(["user.list"])
         .mutation(),
-      delete: procedure
+      delete: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .invalidates(["user.list"])
         .invalidatesTags(["users"])
@@ -354,8 +355,8 @@ describe("extractMetadata", () => {
   })
 
   it("extracts OpenAPI metadata from procedures", () => {
-    const ApiProcedures = procedures("api", {
-      getUser: procedure
+    const ApiProcedures = Procedures.make({
+      getUser: Procedure
         .summary("Get user by ID")
         .description("Retrieves a user by their unique identifier")
         .externalDocs("https://docs.example.com/api/users")
@@ -363,7 +364,7 @@ describe("extractMetadata", () => {
         .deprecated()
         .output(Schema.String)
         .query(),
-      simpleGet: procedure.summary("Simple endpoint").output(Schema.String).query(),
+      simpleGet: Procedure.summary("Simple endpoint").output(Schema.String).query(),
     })
 
     const router = Router.make({ api: ApiProcedures })
@@ -385,9 +386,9 @@ describe("extractMetadata", () => {
   })
 
   it("excludes procedures without metadata", () => {
-    const SimpleProcedures = procedures("simple", {
-      get: procedure.output(Schema.String).query(),
-      set: procedure.input(Schema.String).mutation(),
+    const SimpleProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).query(),
+      set: Procedure.input(Schema.String).mutation(),
     })
 
     const router = Router.make({ simple: SimpleProcedures })
@@ -397,12 +398,12 @@ describe("extractMetadata", () => {
   })
 
   it("works with multiple procedure groups", () => {
-    const UserProcedures = procedures("user", {
-      create: procedure.input(Schema.String).invalidates(["user.list"]).mutation(),
+    const UserProcedures = Procedures.make({
+      create: Procedure.input(Schema.String).invalidates(["user.list"]).mutation(),
     })
 
-    const PostProcedures = procedures("post", {
-      create: procedure.input(Schema.String).invalidates(["post.list", "user.stats"]).mutation(),
+    const PostProcedures = Procedures.make({
+      create: Procedure.input(Schema.String).invalidates(["post.list", "user.stats"]).mutation(),
     })
 
     const router = Router.make({
@@ -422,10 +423,10 @@ describe("extractMetadata", () => {
 
 describe("router-level middleware", () => {
   it("stores middleware on the router", () => {
-    const loggingMiddleware = Middleware.make("logging", (ctx, _input, next) => next(ctx))
+    const loggingMiddleware = Middleware("logging")
 
-    const TestProcedures = procedures("test", {
-      get: procedure.output(Schema.String).query(),
+    const TestProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).query(),
     })
 
     const testRouter = Router.make({ test: TestProcedures }, { middlewares: [loggingMiddleware] })
@@ -436,11 +437,11 @@ describe("router-level middleware", () => {
   })
 
   it("adds middleware via .use() method", () => {
-    const firstMiddleware = Middleware.make("first", (ctx, _input, next) => next(ctx))
-    const secondMiddleware = Middleware.make("second", (ctx, _input, next) => next(ctx))
+    const firstMiddleware = Middleware("first")
+    const secondMiddleware = Middleware("second")
 
-    const TestProcedures = procedures("test", {
-      get: procedure.output(Schema.String).query(),
+    const TestProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).query(),
     })
 
     const testRouter = Router.make({ test: TestProcedures })
@@ -456,26 +457,25 @@ describe("router-level middleware", () => {
   it("applies router middleware to all procedures via convertHandlers", async () => {
     const executionOrder: string[] = []
 
-    // Create a router-level middleware that tracks execution
-    const routerMiddleware = Middleware.make("router", (ctx, _input, next) => {
-      executionOrder.push("router-before")
-      return Effect.map(next(ctx), (result) => {
-        executionOrder.push("router-after")
-        return result
-      })
-    })
+    const routerMiddleware = Middleware("router")
+    const procedureMiddleware = Middleware("procedure")
 
-    // Create a procedure-level middleware
-    const procedureMiddleware = Middleware.make("procedure", (ctx, _input, next) => {
-      executionOrder.push("procedure-before")
-      return Effect.map(next(ctx), (result) => {
-        executionOrder.push("procedure-after")
-        return result
-      })
-    })
+    const routerMiddlewareLive = routerMiddleware.toLayer((ctx) =>
+      Effect.sync(() => {
+        executionOrder.push("router")
+        return ctx
+      }),
+    )
 
-    const TestProcedures = procedures("test", {
-      action: procedure.use(procedureMiddleware).output(Schema.String).query(),
+    const procedureMiddlewareLive = procedureMiddleware.toLayer((ctx) =>
+      Effect.sync(() => {
+        executionOrder.push("procedure")
+        return ctx
+      }),
+    )
+
+    const TestProcedures = Procedures.make({
+      action: Procedure.use(procedureMiddleware).output(Schema.String).query(),
     })
 
     // Convert handlers with router middleware
@@ -487,55 +487,34 @@ describe("router-level middleware", () => {
           return Effect.succeed("done")
         },
       },
-      "",
+      "test.",
       [routerMiddleware],
     )
 
     // Call the handler
     const handler = rpcHandlers["test.action"]!
     await Effect.runPromise(
-      asRunnable(handler(undefined, { clientId: 1, headers: new Headers() as any })),
+      Effect.provide(
+        asRunnable(
+          handler(
+            undefined,
+            { clientId: 1, headers: new Headers() as unknown as { readonly [k: string]: string } },
+          ),
+        ),
+        Layer.mergeAll(routerMiddlewareLive, procedureMiddlewareLive),
+      ),
     )
 
-    // Router middleware should run first, then procedure middleware
-    expect(executionOrder).toEqual([
-      "router-before",
-      "procedure-before",
-      "handler",
-      "procedure-after",
-      "router-after",
-    ])
+    expect(executionOrder).toEqual(["router", "procedure", "handler"])
   })
 
-  it("applies middleware from nested routers in correct order", async () => {
-    const executionOrder: string[] = []
+  it("applies middleware from nested routers in correct order", () => {
+    const rootMiddleware = Middleware("root")
+    const nestedMiddleware = Middleware("nested")
+    const procedureMiddleware = Middleware("procedure")
 
-    const rootMiddleware = Middleware.make("root", (ctx, _input, next) => {
-      executionOrder.push("root-before")
-      return Effect.map(next(ctx), (result) => {
-        executionOrder.push("root-after")
-        return result
-      })
-    })
-
-    const nestedMiddleware = Middleware.make("nested", (ctx, _input, next) => {
-      executionOrder.push("nested-before")
-      return Effect.map(next(ctx), (result) => {
-        executionOrder.push("nested-after")
-        return result
-      })
-    })
-
-    const procedureMiddleware = Middleware.make("procedure", (ctx, _input, next) => {
-      executionOrder.push("procedure-before")
-      return Effect.map(next(ctx), (result) => {
-        executionOrder.push("procedure-after")
-        return result
-      })
-    })
-
-    const ActionProcedures = procedures("action", {
-      run: procedure.use(procedureMiddleware).output(Schema.String).query(),
+    const ActionProcedures = Procedures.make({
+      run: Procedure.use(procedureMiddleware).output(Schema.String).query(),
     })
 
     const nestedRouter = Router.make(
@@ -556,8 +535,8 @@ describe("router-level middleware", () => {
   })
 
   it("router without middleware has undefined/empty middlewares", () => {
-    const TestProcedures = procedures("test", {
-      get: procedure.output(Schema.String).query(),
+    const TestProcedures = Procedures.make({
+      get: Procedure.output(Schema.String).query(),
     })
 
     const testRouter = Router.make({ test: TestProcedures })

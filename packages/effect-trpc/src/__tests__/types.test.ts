@@ -9,15 +9,8 @@ import { describe, it, expectTypeOf } from "vitest"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import type * as Layer from "effect/Layer"
-import {
-  procedure,
-  procedures,
-  Router,
-  extractMetadata,
-  type InferInput,
-  type InferOutput,
-} from "../index.js"
-import type { BaseContext } from "../core/middleware.js"
+import { Procedure, Procedures, Router, extractMetadata, type InferInput, type InferOutput } from "../index.js"
+import type { BaseContext } from "../core/server/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Schemas
@@ -47,7 +40,7 @@ type UserId = typeof UserIdSchema.Type
 
 describe("procedure builder types", () => {
   it("infers query type correctly", () => {
-    const def = procedure.output(UserSchema).query()
+    const def = Procedure.output(UserSchema).query()
 
     // Verify key properties rather than full interface (avoids exactOptionalPropertyTypes issues)
     expectTypeOf(def._tag).toEqualTypeOf<"ProcedureDefinition">()
@@ -55,7 +48,7 @@ describe("procedure builder types", () => {
   })
 
   it("infers mutation type correctly", () => {
-    const def = procedure
+    const def = Procedure
       .input(CreateUserSchema)
       .output(UserSchema)
       .mutation()
@@ -65,7 +58,7 @@ describe("procedure builder types", () => {
   })
 
   it("infers stream type correctly", () => {
-    const def = procedure.output(Schema.String).stream()
+    const def = Procedure.output(Schema.String).stream()
 
     expectTypeOf(def._tag).toEqualTypeOf<"ProcedureDefinition">()
     expectTypeOf(def.type).toEqualTypeOf<"stream">()
@@ -73,18 +66,18 @@ describe("procedure builder types", () => {
 
   it("infers chat type correctly", () => {
     const ChatPartSchema = Schema.Union(
-      Schema.Struct({ _tag: Schema.Literal("text"), content: Schema.String }),
-      Schema.Struct({ _tag: Schema.Literal("done") }),
+      Schema.TaggedStruct("text", { content: Schema.String }),
+      Schema.TaggedStruct("done", {}),
     )
 
-    const def = procedure.output(ChatPartSchema).chat()
+    const def = Procedure.output(ChatPartSchema).chat()
 
     expectTypeOf(def._tag).toEqualTypeOf<"ProcedureDefinition">()
     expectTypeOf(def.type).toEqualTypeOf<"chat">()
   })
 
   it("chains input and output correctly", () => {
-    const def = procedure
+    const def = Procedure
       .input(UserIdSchema)
       .output(UserSchema)
       .query()
@@ -94,7 +87,7 @@ describe("procedure builder types", () => {
   })
 
   it("preserves invalidates metadata", () => {
-    const def = procedure
+    const def = Procedure
       .input(CreateUserSchema)
       .invalidates(["user.list"])
       .mutation()
@@ -103,7 +96,7 @@ describe("procedure builder types", () => {
   })
 
   it("preserves tags metadata", () => {
-    const def = procedure
+    const def = Procedure
       .output(Schema.Array(UserSchema))
       .tags(["users", "list"])
       .query()
@@ -117,15 +110,15 @@ describe("procedure builder types", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("procedures group types", () => {
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    byId: procedure.input(UserIdSchema).output(UserSchema).query(),
-    create: procedure
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    byId: Procedure.input(UserIdSchema).output(UserSchema).query(),
+    create: Procedure
       .input(CreateUserSchema)
       .output(UserSchema)
       .invalidates(["user.list"])
       .mutation(),
-    stream: procedure.output(Schema.String).stream(),
+    stream: Procedure.output(Schema.String).stream(),
   })
 
   it("infers group name correctly", () => {
@@ -186,14 +179,14 @@ describe("procedures group types", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("router types", () => {
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    byId: procedure.input(UserIdSchema).output(UserSchema).query(),
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    byId: Procedure.input(UserIdSchema).output(UserSchema).query(),
   })
 
-  const PostProcedures = procedures("post", {
-    list: procedure.output(Schema.Array(Schema.String)).query(),
-    create: procedure.input(Schema.Struct({ title: Schema.String })).mutation(),
+  const PostProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(Schema.String)).query(),
+    create: Procedure.input(Schema.Struct({ title: Schema.String })).mutation(),
   })
 
   const appRouter = Router.make({
@@ -227,25 +220,25 @@ describe("router types", () => {
 
 describe("nested router types", () => {
   // Create nested procedure groups
-  const PostsProcedures = procedures("posts", {
-    list: procedure.output(Schema.Array(Schema.String)).query(),
-    create: procedure
+  const PostsProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(Schema.String)).query(),
+    create: Procedure
       .input(Schema.Struct({ title: Schema.String }))
       .output(Schema.String)
       .mutation(),
   })
 
-  const CommentsProcedures = procedures("comments", {
-    list: procedure.input(Schema.Struct({ postId: Schema.String })).output(Schema.Array(Schema.String)).query(),
+  const CommentsProcedures = Procedures.make({
+    list: Procedure.input(Schema.Struct({ postId: Schema.String })).output(Schema.Array(Schema.String)).query(),
   })
 
-  const ProfileProcedures = procedures("profile", {
-    get: procedure.output(UserSchema).query(),
-    update: procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
+  const ProfileProcedures = Procedures.make({
+    get: Procedure.output(UserSchema).query(),
+    update: Procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
   })
 
-  const HealthProcedures = procedures("health", {
-    check: procedure.output(Schema.Struct({ status: Schema.String })).query(),
+  const HealthProcedures = Procedures.make({
+    check: Procedure.output(Schema.Struct({ status: Schema.String })).query(),
   })
 
   // Create nested router structure
@@ -302,11 +295,11 @@ describe("nested router types", () => {
   it("supports deeply nested routers (3+ levels)", () => {
     // Create a deeply nested structure
     const adminUsersRouter = Router.make({
-      list: procedures("list", {
-        all: procedure.output(Schema.Array(UserSchema)).query(),
+      list: Procedures.make({
+        all: Procedure.output(Schema.Array(UserSchema)).query(),
       }),
-      details: procedures("details", {
-        get: procedure.input(UserIdSchema).output(UserSchema).query(),
+      details: Procedures.make({
+        get: Procedure.input(UserIdSchema).output(UserSchema).query(),
       }),
     })
 
@@ -327,9 +320,9 @@ describe("nested router types", () => {
   })
 
   it("extractMetadata works with nested routers", () => {
-    const postsWithMetadata = procedures("posts", {
-      list: procedure.output(Schema.Array(Schema.String)).tags(["posts"]).query(),
-      create: procedure
+    const postsWithMetadata = Procedures.make({
+      list: Procedure.output(Schema.Array(Schema.String)).tags(["posts"]).query(),
+      create: Procedure
         .input(Schema.Struct({ title: Schema.String }))
         .output(Schema.String)
         .invalidates(["user.posts.list"])
@@ -359,23 +352,23 @@ describe("nested router types", () => {
 
 describe("router flattening types", () => {
   // Test fixtures
-  const UserListProc = procedure.output(Schema.Array(UserSchema)).query()
-  const UserByIdProc = procedure.input(UserIdSchema).output(UserSchema).query()
-  const UserCreateProc = procedure.input(CreateUserSchema).output(UserSchema).mutation()
+  const UserListProc = Procedure.output(Schema.Array(UserSchema)).query()
+  const UserByIdProc = Procedure.input(UserIdSchema).output(UserSchema).query()
+  const UserCreateProc = Procedure.input(CreateUserSchema).output(UserSchema).mutation()
 
-  const UserProcedures = procedures("user", {
+  const UserProcedures = Procedures.make({
     list: UserListProc,
     byId: UserByIdProc,
     create: UserCreateProc,
   })
 
-  const PostProcedures = procedures("post", {
-    list: procedure.output(Schema.Array(Schema.String)).query(),
-    create: procedure.input(Schema.Struct({ title: Schema.String })).mutation(),
+  const PostProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(Schema.String)).query(),
+    create: Procedure.input(Schema.Struct({ title: Schema.String })).mutation(),
   })
 
-  const HealthProcedures = procedures("health", {
-    check: procedure.output(Schema.Struct({ status: Schema.String })).query(),
+  const HealthProcedures = Procedures.make({
+    check: Procedure.output(Schema.Struct({ status: Schema.String })).query(),
   })
 
   it("flat router preserves procedure group types", () => {
@@ -461,9 +454,9 @@ describe("router flattening types", () => {
   })
 
   it("extractMetadata preserves path structure", () => {
-    const TaggedUserProcedures = procedures("user", {
-      list: procedure.output(Schema.Array(UserSchema)).tags(["users"]).query(),
-      create: procedure
+    const TaggedUserProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(UserSchema)).tags(["users"]).query(),
+      create: Procedure
         .input(CreateUserSchema)
         .output(UserSchema)
         .invalidates(["user.list"])
@@ -487,10 +480,10 @@ describe("router flattening types", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("type inference helpers", () => {
-  const _UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    byId: procedure.input(UserIdSchema).output(UserSchema).query(),
-    create: procedure.input(CreateUserSchema).output(UserSchema).mutation(),
+  const _UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    byId: Procedure.input(UserIdSchema).output(UserSchema).query(),
+    create: Procedure.input(CreateUserSchema).output(UserSchema).mutation(),
   })
 
   it("InferInput extracts input types", () => {

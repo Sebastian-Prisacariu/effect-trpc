@@ -25,7 +25,7 @@ import { NodeHttpClient } from "@effect/platform-node"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 
-import { procedure, procedures, Router } from "../index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
 import { createTRPCReact } from "../react/create-client.js"
 
@@ -65,8 +65,7 @@ const DeleteItemInputSchema = Schema.Struct({
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Error schema for failing mutations
-const MutationErrorSchema = Schema.Struct({
-  _tag: Schema.Literal("MutationError"),
+const MutationErrorSchema = Schema.TaggedStruct("MutationError", {
   message: Schema.String,
 })
 
@@ -74,45 +73,45 @@ class MutationError extends Schema.TaggedError<MutationError>()("MutationError",
   message: Schema.String,
 }) {}
 
-const CounterProcedures = procedures("counter", {
-  get: procedure.output(CounterSchema).query(),
+const CounterProcedures = Procedures.make({
+  get: Procedure.output(CounterSchema).query(),
 
-  increment: procedure
+  increment: Procedure
     .input(IncrementInputSchema)
     .output(CounterSchema)
     .mutation(),
 
-  incrementSlow: procedure
+  incrementSlow: Procedure
     .input(IncrementInputSchema)
     .output(CounterSchema)
     .mutation(),
 
-  incrementFail: procedure
+  incrementFail: Procedure
     .input(IncrementInputSchema)
     .output(CounterSchema)
     .error(MutationErrorSchema)
     .mutation(),
 })
 
-const ItemProcedures = procedures("item", {
-  list: procedure.output(Schema.Array(ItemSchema)).query(),
+const ItemProcedures = Procedures.make({
+  list: Procedure.output(Schema.Array(ItemSchema)).query(),
 
-  create: procedure
+  create: Procedure
     .input(CreateItemInputSchema)
     .output(ItemSchema)
     .mutation(),
 
-  delete: procedure
+  delete: Procedure
     .input(DeleteItemInputSchema)
     .output(Schema.Struct({ success: Schema.Boolean }))
     .mutation(),
 
-  deleteSlow: procedure
+  deleteSlow: Procedure
     .input(DeleteItemInputSchema)
     .output(Schema.Struct({ success: Schema.Boolean }))
     .mutation(),
 
-  deleteFail: procedure
+  deleteFail: Procedure
     .input(DeleteItemInputSchema)
     .output(Schema.Struct({ success: Schema.Boolean }))
     .error(MutationErrorSchema)

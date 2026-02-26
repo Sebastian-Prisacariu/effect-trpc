@@ -9,8 +9,8 @@ import * as Layer from "effect/Layer"
 import * as HttpClient from "@effect/platform/HttpClient"
 import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
 import * as HttpClientError from "@effect/platform/HttpClientError"
-import type { Router } from "../core/router.js"
-import { Client, type TRPCClient } from "../core/client.js"
+import type { Router } from "../core/server/router.js"
+import { Client, type TRPCClient } from "../core/client/index.js"
 import { createRpcWebHandler } from "../shared/rpc-handler.js"
 
 export interface CreateServerClientOptions<TRouter extends Router, R> {

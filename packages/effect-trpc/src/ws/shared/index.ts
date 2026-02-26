@@ -14,13 +14,13 @@ import * as Ref from "effect/Ref"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
 
-import type { Router } from "../../core/router.js"
+import type { Router } from "../../core/server/router.js"
 import type {
   ProceduresGroup,
   ProcedureRecord,
   ProceduresService,
   SubscriptionHandler,
-} from "../../core/procedures.js"
+} from "../../core/server/procedures.js"
 import type { ClientId, SubscriptionId } from "../types.js"
 import {
   WebSocketCodec,

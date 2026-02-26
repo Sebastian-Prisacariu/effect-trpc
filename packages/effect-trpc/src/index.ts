@@ -5,14 +5,14 @@
  *
  * @example
  * ```ts
- * import { procedures, procedure, Router } from 'effect-trpc'
+ * import { Procedures, Procedure, Router } from 'effect-trpc'
  * import * as Schema from 'effect/Schema'
  *
  * // Define procedures
- * const UserProcedures = procedures('user', {
- *   list: procedure.output(Schema.Array(UserSchema)).query(),
- *   byId: procedure.input(IdSchema).output(UserSchema).query(),
- *   create: procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
+ * const UserProcedures = Procedures.make({
+ *   list: Procedure.output(Schema.Array(UserSchema)).query(),
+ *   byId: Procedure.input(IdSchema).output(UserSchema).query(),
+ *   create: Procedure.input(CreateSchema).invalidates(['user.list']).mutation(),
  * })
  *
  * // Create router

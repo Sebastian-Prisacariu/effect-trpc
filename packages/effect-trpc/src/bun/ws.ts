@@ -51,7 +51,7 @@ import * as DateTime from "effect/DateTime"
 import * as Duration from "effect/Duration"
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
-import type { Router } from "../core/router.js"
+import type { Router } from "../core/server/router.js"
 import type { ClientId, SubscriptionId } from "../ws/types.js"
 import {
   WebSocketCodec,

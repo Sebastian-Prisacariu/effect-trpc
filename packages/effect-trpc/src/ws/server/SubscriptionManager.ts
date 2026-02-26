@@ -40,8 +40,8 @@ import type {
   SubscriptionHandler,
   SubscriptionContext,
   UnsubscribeReason,
-} from "../../core/procedures.js"
-import { UnsubscribeReason as UnsubscribeReasonCtor } from "../../core/procedures.js"
+} from "../../core/server/procedures.js"
+import { UnsubscribeReason as UnsubscribeReasonCtor } from "../../core/server/procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Active Subscription

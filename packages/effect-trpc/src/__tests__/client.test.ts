@@ -9,8 +9,8 @@ import { describe, it, expect } from "vitest"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 
-import { Client, RpcClientError, RpcResponseError } from "../core/client.js"
-import { procedure, procedures, Router } from "../index.js"
+import { Client, RpcClientError, RpcResponseError } from "../core/client/index.js"
+import { Procedure, Procedures, Router } from "../index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures
@@ -21,10 +21,10 @@ const UserSchema = Schema.Struct({
   name: Schema.String,
 })
 
-const UserProcedures = procedures("user", {
-  get: procedure.input(Schema.Struct({ id: Schema.String })).output(UserSchema).query(),
-  create: procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
-  list: procedure.output(Schema.Array(UserSchema)).query(),
+const UserProcedures = Procedures.make({
+  get: Procedure.input(Schema.Struct({ id: Schema.String })).output(UserSchema).query(),
+  create: Procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
+  list: Procedure.output(Schema.Array(UserSchema)).query(),
 })
 
 const _testRouter = Router.make({
@@ -165,8 +165,8 @@ describe("Proxy Behavior", () => {
 
   it("handles different group names", () => {
     // Create a more complex router
-    const PostProcedures = procedures("post", {
-      get: procedure.input(Schema.Struct({ id: Schema.String })).output(Schema.String).query(),
+    const PostProcedures = Procedures.make({
+      get: Procedure.input(Schema.Struct({ id: Schema.String })).output(Schema.String).query(),
     })
 
     const _ComplexRouter = Router.make({
@@ -193,8 +193,7 @@ describe("Response Parsing", () => {
   // These test the schema definitions used in client.ts
 
   it("RpcExitSuccess schema validates correctly", () => {
-    const RpcExitSuccessSchema = Schema.Struct({
-      _tag: Schema.Literal("Success"),
+    const RpcExitSuccessSchema = Schema.TaggedStruct("Success", {
       value: Schema.Unknown,
     })
 
@@ -207,22 +206,18 @@ describe("Response Parsing", () => {
 
   it("RpcExitFailure schema validates correctly", () => {
     const RpcCauseSchema = Schema.Union(
-      Schema.Struct({
-        _tag: Schema.Literal("Fail"),
+      Schema.TaggedStruct("Fail", {
         error: Schema.Unknown,
       }),
-      Schema.Struct({
-        _tag: Schema.Literal("Die"),
+      Schema.TaggedStruct("Die", {
         defect: Schema.Unknown,
       }),
-      Schema.Struct({
-        _tag: Schema.Literal("Interrupt"),
+      Schema.TaggedStruct("Interrupt", {
         fiberId: Schema.optional(Schema.Unknown),
       })
     )
 
-    const RpcExitFailureSchema = Schema.Struct({
-      _tag: Schema.Literal("Failure"),
+    const RpcExitFailureSchema = Schema.TaggedStruct("Failure", {
       cause: Schema.optional(RpcCauseSchema),
     })
 
@@ -237,8 +232,7 @@ describe("Response Parsing", () => {
   })
 
   it("RpcDefectMessage schema validates correctly", () => {
-    const RpcDefectMessageSchema = Schema.Struct({
-      _tag: Schema.Literal("Defect"),
+    const RpcDefectMessageSchema = Schema.TaggedStruct("Defect", {
       defect: Schema.optional(Schema.String),
     })
 
@@ -250,10 +244,10 @@ describe("Response Parsing", () => {
   })
 
   it("StreamPart schema validates correctly", () => {
-    const RpcStreamPartSchema = Schema.Struct({
-      _tag: Schema.Union(Schema.Literal("StreamPart"), Schema.Literal("Part")),
-      value: Schema.Unknown,
-    })
+    const RpcStreamPartSchema = Schema.Union(
+      Schema.TaggedStruct("StreamPart", { value: Schema.Unknown }),
+      Schema.TaggedStruct("Part", { value: Schema.Unknown }),
+    )
 
     const validStreamPart = { _tag: "StreamPart", value: { data: "chunk1" } }
     const result1 = Schema.decodeUnknownSync(RpcStreamPartSchema)(validStreamPart)
@@ -265,9 +259,10 @@ describe("Response Parsing", () => {
   })
 
   it("StreamEnd schema validates correctly", () => {
-    const RpcStreamEndSchema = Schema.Struct({
-      _tag: Schema.Union(Schema.Literal("StreamEnd"), Schema.Literal("Complete")),
-    })
+    const RpcStreamEndSchema = Schema.Union(
+      Schema.TaggedStruct("StreamEnd", {}),
+      Schema.TaggedStruct("Complete", {}),
+    )
 
     const validStreamEnd = { _tag: "StreamEnd" }
     const result1 = Schema.decodeUnknownSync(RpcStreamEndSchema)(validStreamEnd)

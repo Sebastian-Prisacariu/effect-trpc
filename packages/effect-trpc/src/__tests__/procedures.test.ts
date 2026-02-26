@@ -16,9 +16,9 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Context from "effect/Context"
 import * as Schema from "effect/Schema"
-import { procedure } from "../core/procedure.js"
-import { procedures, type ProceduresService } from "../core/procedures.js"
-import type { BaseContext } from "../core/middleware.js"
+import { Procedure } from "../core/index.js"
+import { Procedures, type ProceduresService } from "../core/index.js"
+import type { BaseContext } from "../core/server/middleware.js"
 
 // Mock context for testing handlers directly
 const mockCtx: BaseContext = {
@@ -39,13 +39,13 @@ describe("procedures group", () => {
   })
 
   it("creates a procedures group with correct structure", () => {
-    const UserProcedures = procedures("user", {
-      list: procedure.output(Schema.Array(UserSchema)).query(),
-      byId: procedure
+    const UserProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(UserSchema)).query(),
+      byId: Procedure
         .input(Schema.Struct({ id: Schema.String }))
         .output(UserSchema)
         .query(),
-      create: procedure
+      create: Procedure
         .input(CreateUserSchema)
         .output(UserSchema)
         .invalidates(["user.list"])
@@ -53,15 +53,15 @@ describe("procedures group", () => {
     })
 
     expect(UserProcedures._tag).toBe("ProceduresGroup")
-    expect(UserProcedures.name).toBe("user")
+    expect(UserProcedures.name).toBe("")
     expect(UserProcedures.procedures["list"]?.type).toBe("query")
     expect(UserProcedures.procedures["byId"]?.type).toBe("query")
     expect(UserProcedures.procedures["create"]?.type).toBe("mutation")
   })
 
   it("creates a layer from static handlers", () => {
-    const UserProcedures = procedures("user", {
-      list: procedure.output(Schema.Array(UserSchema)).query(),
+    const UserProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(UserSchema)).query(),
     })
 
     const layer = UserProcedures.toLayer({
@@ -73,8 +73,8 @@ describe("procedures group", () => {
   })
 
   it("creates a layer from Effect with dependencies", () => {
-    const UserProcedures = procedures("user", {
-      list: procedure.output(Schema.Array(UserSchema)).query(),
+    const UserProcedures = Procedures.make({
+      list: Procedure.output(Schema.Array(UserSchema)).query(),
     })
 
     const layer = UserProcedures.toLayer(
@@ -108,19 +108,19 @@ describe("procedures layer execution", () => {
     email: Schema.String,
   })
 
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    byId: procedure
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    byId: Procedure
       .input(Schema.Struct({ id: Schema.String }))
       .output(Schema.NullOr(UserSchema))
       .query(),
-    create: procedure
+    create: Procedure
       .input(CreateUserSchema)
       .output(UserSchema)
       .mutation(),
   })
 
-  type UserServiceType = ProceduresService<"user", typeof UserProcedures.procedures>
+  type UserServiceType = ProceduresService<"", typeof UserProcedures.procedures>
   const UserService = Context.GenericTag<UserServiceType>("@effect-trpc/user")
 
   it("executes handlers through the layer", async () => {
@@ -221,15 +221,15 @@ describe("procedures with dependencies", () => {
     name: Schema.String,
   })
 
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
-    create: procedure
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
+    create: Procedure
       .input(Schema.Struct({ name: Schema.String }))
       .output(UserSchema)
       .mutation(),
   })
 
-  const UserService = Context.GenericTag<ProceduresService<"user", typeof UserProcedures.procedures>>(
+  const UserService = Context.GenericTag<ProceduresService<"", typeof UserProcedures.procedures>>(
     "@effect-trpc/user",
   )
 
@@ -284,23 +284,23 @@ describe("multiple procedure groups", () => {
   const UserSchema = Schema.Struct({ id: Schema.String, name: Schema.String })
   const PostSchema = Schema.Struct({ id: Schema.String, title: Schema.String, authorId: Schema.String })
 
-  const UserProcedures = procedures("user", {
-    list: procedure.output(Schema.Array(UserSchema)).query(),
+  const UserProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(UserSchema)).query(),
   })
 
-  const PostProcedures = procedures("post", {
-    list: procedure.output(Schema.Array(PostSchema)).query(),
-    byAuthor: procedure
+  const PostProcedures = Procedures.make({
+    list: Procedure.output(Schema.Array(PostSchema)).query(),
+    byAuthor: Procedure
       .input(Schema.Struct({ authorId: Schema.String }))
       .output(Schema.Array(PostSchema))
       .query(),
   })
 
-  const UserService = Context.GenericTag<ProceduresService<"user", typeof UserProcedures.procedures>>(
+  const UserService = Context.GenericTag<ProceduresService<"", typeof UserProcedures.procedures>>(
     "@effect-trpc/user",
   )
 
-  const PostService = Context.GenericTag<ProceduresService<"post", typeof PostProcedures.procedures>>(
+  const PostService = Context.GenericTag<ProceduresService<"", typeof PostProcedures.procedures>>(
     "@effect-trpc/post",
   )
 
