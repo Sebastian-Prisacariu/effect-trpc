@@ -5,7 +5,7 @@
  * Uses a fluent builder pattern: procedure.input(...).output(...).query()
  */
 
-import type * as Schema from "effect/Schema"
+import * as Schema from "effect/Schema"
 import type { MiddlewareDefinition, BaseContext } from "./middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -347,9 +347,11 @@ export interface ProcedureBuilder<
    * // Layer requires: TokenService (Database is provided by middleware)
    * ```
    */
-  use<CtxOut extends BaseContext, InputExt, E2>(
-    middleware: MiddlewareDefinition<Ctx, CtxOut, InputExt, E2>,
-  ): ProcedureBuilder<I & InputExt, A, E | E2, CtxOut, R, Provides>
+  use<CtxIn extends BaseContext, CtxOut extends BaseContext, InputExt, E2>(
+    middleware: Ctx extends CtxIn
+      ? MiddlewareDefinition<CtxIn, CtxOut, InputExt, E2>
+      : never,
+  ): ProcedureBuilder<I & InputExt, A, E | E2, Ctx & CtxOut, R, Provides>
 
   /**
    * Define the input schema for this procedure.
@@ -501,6 +503,49 @@ interface BuilderState {
  * TypeScript cannot verify the generic alignment without the cast because
  * BuilderState uses `unknown` for type-erased schema storage.
  */
+/**
+ * Merge middleware input schemas with the procedure's input schema.
+ * Returns the merged schema or undefined if no schemas exist.
+ *
+ * Uses Schema.extend which requires Struct schemas. At runtime, we cast
+ * but the type system ensures only compatible schemas are combined.
+ */
+const mergeInputSchemas = (
+  middlewares: ReadonlyArray<MiddlewareDefinition<any, any, any, any>>,
+  procedureInputSchema: unknown,
+): unknown => {
+  // Collect all middleware input schemas
+  const middlewareSchemas = middlewares
+    .map((m) => m.inputSchema)
+    .filter((s): s is Schema.Schema<any, any> => s !== undefined)
+
+  // Build list of all schemas to merge
+  const allSchemas: Schema.Schema<any, any>[] = [...middlewareSchemas]
+  if (procedureInputSchema !== undefined) {
+    allSchemas.push(procedureInputSchema as Schema.Schema<any, any>)
+  }
+
+  // If no schemas, return undefined
+  if (allSchemas.length === 0) {
+    return undefined
+  }
+
+  // If single schema, return it directly
+  if (allSchemas.length === 1) {
+    return allSchemas[0]
+  }
+
+  // Merge all schemas using Schema.extend
+  // Cast through unknown since Schema.extend expects Struct types
+  // but middleware/procedure input schemas should always be Structs
+  return allSchemas.reduce((merged, schema) =>
+    Schema.extend(
+      merged as unknown as Schema.Struct<any>,
+      schema as unknown as Schema.Struct<any>,
+    ) as unknown as Schema.Schema<any, any>,
+  )
+}
+
 const createDefinition = <
   I,
   A,
@@ -512,8 +557,11 @@ const createDefinition = <
 >(
   state: BuilderState,
   type: Type,
-): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> =>
-  ({
+): ProcedureDefinition<I, A, E, Ctx, Type, R, Provides> => {
+  // Merge middleware input schemas with procedure input schema
+  const mergedInputSchema = mergeInputSchemas(state.middlewares, state.inputSchema)
+
+  return {
     _tag: "ProcedureDefinition",
     type,
     description: state.description,
@@ -521,7 +569,7 @@ const createDefinition = <
     externalDocs: state.externalDocs,
     responseDescription: state.responseDescription,
     deprecated: state.deprecated,
-    inputSchema: state.inputSchema,
+    inputSchema: mergedInputSchema,
     outputSchema: state.outputSchema,
     errorSchema: state.errorSchema,
     tags: state.tags,
@@ -529,7 +577,8 @@ const createDefinition = <
     invalidatesTags: state.invalidatesTags,
     middlewares: state.middlewares,
     // _contextType, _middlewareR, and _provides are intentionally not set - they're phantom types
-  }) as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+  } as ProcedureDefinition<I, A, E, Ctx, Type, R, Provides>
+}
 
 const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = never>(
   state: BuilderState,
@@ -544,12 +593,14 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
     responseDescription: (text: string) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, responseDescription: text }),
     deprecated: () => createBuilder<I, A, E, Ctx, R, Provides>({ ...state, deprecated: true }),
-    use: <CtxOut extends BaseContext, InputExt, E2>(
-      middleware: MiddlewareDefinition<Ctx, CtxOut, InputExt, E2>,
+    use: <CtxIn extends BaseContext, CtxOut extends BaseContext, InputExt, E2>(
+      middleware: Ctx extends CtxIn
+        ? MiddlewareDefinition<CtxIn, CtxOut, InputExt, E2>
+        : never,
     ) =>
-      createBuilder<I & InputExt, A, E | E2, CtxOut, R, Provides>({
+      createBuilder<I & InputExt, A, E | E2, Ctx & CtxOut, R, Provides>({
         ...state,
-        middlewares: [...state.middlewares, middleware],
+        middlewares: [...state.middlewares, middleware as MiddlewareDefinition<any, any, any, any>],
       }),
     input: <I2>(schema: unknown) =>
       createBuilder<I & I2, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),

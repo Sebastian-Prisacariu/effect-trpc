@@ -103,10 +103,10 @@ export type MiddlewareDefinitionTypeId = typeof MiddlewareDefinitionTypeId
  * @since 0.5.0
  */
 export interface MiddlewareDefinition<
-  in out CtxIn extends BaseContext,
-  in out CtxOut extends BaseContext,
-  in out I,
-  in out E,
+  CtxIn extends BaseContext,
+  CtxOut extends BaseContext,
+  I,
+  E,
 > extends Pipeable {
   readonly [MiddlewareDefinitionTypeId]: MiddlewareDefinitionTypeId
   readonly _tag: "MiddlewareDefinition"
@@ -117,6 +117,13 @@ export interface MiddlewareDefinition<
 
   /** Error schemas (if any). @internal */
   readonly errorSchemas?: ReadonlyArray<Schema.Schema<any, any>>
+
+  /**
+   * Service tag for retrieving the middleware implementation at runtime.
+   * Used by rpc-bridge to get the middleware handler from Effect context.
+   * @internal
+   */
+  readonly serviceTag: Context.Tag<MiddlewareService<CtxIn, CtxOut, I, E>, MiddlewareService<CtxIn, CtxOut, I, E>>
 
   /**
    * Create a Layer that implements this middleware.
@@ -141,7 +148,7 @@ export interface MiddlewareDefinition<
 
 /**
  * Service type for a middleware implementation.
- * @internal
+ * Contains the handler function that transforms context.
  */
 export interface MiddlewareService<
   CtxIn extends BaseContext,
@@ -270,6 +277,7 @@ function createDefinition<CtxIn extends BaseContext, CtxOut extends BaseContext,
     name: state.name,
     inputSchema: state.inputSchema,
     errorSchemas: state.errorSchemas.length > 0 ? state.errorSchemas : undefined,
+    serviceTag: ServiceTag,
 
     toLayer: <R>(
       handler: (ctx: CtxIn, input: I) => Effect.Effect<CtxOut, E, R>,

@@ -533,27 +533,43 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
 ): MiddlewareResult<A, E, R>
 
 function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
-  _middlewares: ReadonlyArray<AnyMiddleware>,
+  middlewares: ReadonlyArray<AnyMiddleware>,
   procedureName: string,
   handler: GenericHandler<Ctx, I, A, E, R> | GenericStreamHandler<Ctx, I, A, E, R>,
   options: RpcHandlerOptions,
   payload: I,
   isStream: boolean,
 ): MiddlewareResult<A, E, R> {
-  // TODO: Middleware execution needs to be redesigned for the new MiddlewareDefinition pattern.
-  // The old pattern used middleware.fn(ctx, input, next) callbacks.
-  // The new pattern separates definition from implementation via Layers.
-  // For now, we skip middleware execution and call the handler directly with BaseContext.
-  // Middleware will be addressed in a follow-up PR.
-
   type AnyHandler = (ctx: any, input: any) => any
   const anyHandler = handler as AnyHandler
+
+  /**
+   * Execute the middleware chain by sequentially getting each middleware's
+   * service from the Effect context and running its handler.
+   *
+   * Each middleware handler receives the current context and input, and returns
+   * the transformed context. The final context is passed to the procedure handler.
+   */
+  const executeMiddlewareChain = (baseContext: BaseContext): Effect.Effect<any, any, any> =>
+    Effect.gen(function* () {
+      let ctx: any = baseContext
+
+      // Execute each middleware in sequence
+      for (const middleware of middlewares) {
+        // Get the middleware service from Effect context using its serviceTag
+        const service = yield* middleware.serviceTag
+        // Execute the middleware handler, passing current context and input
+        ctx = yield* service.handler(ctx, payload)
+      }
+
+      return ctx
+    })
 
   const setupContext = Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({
       "trpc.procedure": procedureName,
       "trpc.clientId": options.clientId,
-      "trpc.hasMiddleware": _middlewares.length > 0,
+      "trpc.hasMiddleware": middlewares.length > 0,
     })
 
     const abortController = new AbortController()
@@ -569,23 +585,31 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
   })
 
   if (isStream) {
-    // Stream handler - create base context and call handler directly
+    // Stream handler - execute middleware chain then call handler
     const stream = Stream.unwrap(
-      Effect.flatMap(setupContext, ({ baseContext }) =>
-        FiberRef.set(MiddlewareContextRef, baseContext).pipe(
-          Effect.map(() => anyHandler(baseContext, payload)),
-        ),
-      ),
+      Effect.gen(function* () {
+        const { baseContext } = yield* setupContext
+        // Execute middleware chain to get final context
+        const finalCtx = middlewares.length > 0
+          ? yield* executeMiddlewareChain(baseContext)
+          : baseContext
+        yield* FiberRef.set(MiddlewareContextRef, finalCtx)
+        return anyHandler(finalCtx, payload)
+      }),
     ).pipe(Stream.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
     return stream as Stream.Stream<A, E, R>
   }
 
-  // Effect (Mutation/Query) logic - create base context and call handler directly
+  // Effect (Mutation/Query) logic - execute middleware chain then call handler
   const effect = Effect.gen(function* () {
     const { baseContext } = yield* setupContext
-    yield* FiberRef.set(MiddlewareContextRef, baseContext)
-    return yield* anyHandler(baseContext, payload)
+    // Execute middleware chain to get final context
+    const finalCtx = middlewares.length > 0
+      ? yield* executeMiddlewareChain(baseContext)
+      : baseContext
+    yield* FiberRef.set(MiddlewareContextRef, finalCtx)
+    return yield* anyHandler(finalCtx, payload)
   }).pipe(Effect.withSpan(`trpc.procedure.${procedureName}`, { captureStackTrace: false }))
 
   return effect as Effect.Effect<A, E, R>
