@@ -18,6 +18,7 @@ export class MiddlewareError extends Schema.TaggedError<MiddlewareError>()(
 
 export interface MiddlewareExecutionResult {
   readonly context: BaseContext
+  readonly services: ReadonlyArray<{ readonly tag: Context.Tag<any, any>; readonly value: any }>
 }
 
 export interface MiddlewareShape {
@@ -56,6 +57,7 @@ export class Middleware extends Context.Tag("@effect-trpc/Middleware")<
 
         return {
           context,
+          services: [],
         } satisfies MiddlewareExecutionResult
       }),
   })
