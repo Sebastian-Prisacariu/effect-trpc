@@ -193,9 +193,7 @@ export { keepPreviousData, queryPresets } from "./presets.js"
 
 export {
   useNetworkStatus,
-  useGate,
   type UseNetworkStatusReturn,
-  type UseGateReturn,
 } from "./hooks/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────

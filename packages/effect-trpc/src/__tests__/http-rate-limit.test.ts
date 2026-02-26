@@ -4,7 +4,7 @@
  * Tests for HTTP-level rate limiting with Retry-After header.
  */
 
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, expect, it } from "vitest"
 import { createHttpRateLimiter } from "../shared/http-rate-limit.js"
 
 describe("HTTP Rate Limiter", () => {

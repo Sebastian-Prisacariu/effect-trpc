@@ -6,14 +6,22 @@
 
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as HttpClient from "@effect/platform/HttpClient"
-import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
-import * as HttpClientError from "@effect/platform/HttpClientError"
-import type { Router } from "../core/router.js"
-import { Client, type TRPCClient } from "../core/client.js"
-import { createRpcWebHandler } from "../shared/rpc-handler.js"
+import * as Match from "effect/Match"
+import * as Predicate from "effect/Predicate"
+import { Client } from "../core/client/index.js"
+import { type RouterClient, Proxy } from "../core/client/proxy.js"
+import { Transport, TransportError, type TransportShape } from "../core/client/transports.js"
+import type { BaseContext } from "../core/server/middleware.js"
+import { Middleware as MiddlewareEngine } from "../core/server/internal/middleware/pipeline.js"
+import { Procedure as ProcedureEngine } from "../core/server/internal/procedure/base/builder.js"
+import type { ProcedureDefinition, ProcedureType } from "../core/server/procedure.js"
+import type { ProcedureRecord, ProceduresGroup } from "../core/server/procedures.js"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 
-export interface CreateServerClientOptions<TRouter extends Router, R> {
+export interface CreateServerClientOptions<
+  TRouter extends RouterShape<RouterRecord>,
+  R,
+> {
   /**
    * The router instance.
    */
@@ -22,7 +30,12 @@ export interface CreateServerClientOptions<TRouter extends Router, R> {
   /**
    * The layer providing all procedure implementations.
    */
-  readonly handlers: Layer.Layer<any, never, R>
+  readonly handlers: Layer.Layer<R, never, never>
+}
+
+export interface ServerTRPCClient<TRouter extends RouterShape<RouterRecord>> {
+  readonly procedures: RouterClient<TRouter["routes"]>
+  readonly dispose: () => Promise<void>
 }
 
 /**
@@ -34,7 +47,7 @@ export interface CreateServerClientOptions<TRouter extends Router, R> {
  *
  * @example
  * ```ts
- * // src/trpc/server.ts
+ * // src/trpc/server.js
  * import { createServerClient } from "effect-trpc/react"
  * import { appRouter } from "./router"
  * import { AppHandlersLive } from "./handlers"
@@ -46,7 +59,7 @@ export interface CreateServerClientOptions<TRouter extends Router, R> {
  * ```
  * 
  * ```tsx
- * // src/app/page.tsx (Server Component)
+ * // src/app/page.jsx (Server Component)
  * import { Effect } from "effect"
  * import { serverClient } from "~/trpc/server"
  * 
@@ -60,53 +73,139 @@ export interface CreateServerClientOptions<TRouter extends Router, R> {
  * }
  * ```
  */
-export function createServerClient<TRouter extends Router, R>(
-  options: CreateServerClientOptions<TRouter, R>
-): TRPCClient<TRouter> {
+export function createServerClient<
+  TRouter extends RouterShape<RouterRecord>,
+  R,
+>(
+  options: CreateServerClientOptions<TRouter, R>,
+): ServerTRPCClient<TRouter> {
   const { router, handlers } = options
 
-  // Create the web handler which contains our RPC routing logic
-  const webHandler = createRpcWebHandler({ router, handlers })
+  type AnyProcedureDefinition = ProcedureDefinition<
+    unknown,
+    unknown,
+    unknown,
+    BaseContext,
+    ProcedureType,
+    unknown,
+    unknown
+  >
 
-  // Create a mock HttpClient that routes requests directly to the web handler,
-  // bypassing the network entirely.
-  const mockHttpClient = HttpClient.make((request) =>
-    Effect.tryPromise({
-      try: async () => {
-        // The core client sends NdJson string body, but platform HttpClientRequest
-        // serializes it to a Uint8Array body for transport.
-        const requestBody = request.body._tag === "Uint8Array" ? request.body.body : undefined
-        
-        // We use a dummy local URL since this doesn't go over the network
-        const init: RequestInit = {
-          method: request.method,
-          headers: request.headers as Record<string, string>,
-        }
-        if (requestBody) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          init.body = requestBody as any
-        }
+  const flattenRoutes = (
+    routes: Record<string, unknown>,
+    prefix = "",
+  ): Record<string, AnyProcedureDefinition> => {
+    let flat: Record<string, AnyProcedureDefinition> = {}
+    for (const [key, value] of Object.entries(routes)) {
+      const newPrefix = prefix ? `${prefix}.${key}` : key
+      Match.value(value).pipe(
+        Match.when(
+          (candidate: unknown): candidate is AnyProcedureDefinition =>
+            Predicate.isTagged(candidate, "ProcedureDefinition"),
+          (definition) => {
+            flat[newPrefix] = definition
+          },
+        ),
+        Match.when(
+          (candidate: unknown): candidate is RouterShape<RouterRecord> =>
+            Predicate.isTagged(candidate, "Router"),
+          (nestedRouter) => {
+            flat = { ...flat, ...flattenRoutes(nestedRouter.routes, newPrefix) }
+          },
+        ),
+        Match.when(
+          (candidate: unknown): candidate is ProceduresGroup<string, ProcedureRecord> =>
+            Predicate.isTagged(candidate, "ProceduresGroup"),
+          (group) => {
+            flat = { ...flat, ...flattenRoutes(group.procedures, newPrefix) }
+          },
+        ),
+        Match.when(Predicate.isRecord, (record) => {
+          flat = { ...flat, ...flattenRoutes(record, newPrefix) }
+        }),
+        Match.orElse(() => undefined),
+      )
+    }
+    return flat
+  }
 
-        const webRequest = new Request(`http://localhost${request.url}`, init)
-        
-        // Invoke the handler directly
-        const webResponse = await webHandler.handler(webRequest)
-        
-        return HttpClientResponse.fromWeb(request, webResponse)
-      },
-      catch: (e) => new HttpClientError.RequestError({
-        request,
-        reason: "Transport",
-        cause: e
-      }) as HttpClientError.HttpClientError
-    })
+  const makeInMemoryTransportLive = (
+    appRouter: RouterShape<RouterRecord>,
+    handlersLayer: Layer.Layer<R, never, never>,
+  ): Layer.Layer<Transport, never, ProcedureEngine> => {
+    const flatProcedures = flattenRoutes(appRouter.routes)
+
+    return Layer.effect(Transport, Effect.gen(function* () {
+      const procedureEngine = yield* ProcedureEngine
+
+      const service: TransportShape = {
+        call: (rpcName, input, descriptor) => {
+          if (descriptor.stream) {
+            return Effect.fail(
+              new TransportError({
+                message: "Stream transport is not supported in createServerClient",
+              }),
+            )
+          }
+
+          const definition = flatProcedures[rpcName]
+          if (definition === undefined) {
+            return Effect.fail(
+              new TransportError({
+                message: `Unknown procedure path: ${rpcName}`,
+              }),
+            )
+          }
+
+          const initialContext: BaseContext = {
+            procedure: rpcName,
+            headers: new Headers(),
+            signal: new AbortController().signal,
+            clientId: 1,
+          }
+
+          return Effect.provide(
+            procedureEngine.execute(definition, initialContext, input),
+            handlersLayer,
+          )
+        },
+      }
+
+      return service
+    }))
+  }
+
+  const procedureEngineLive = ProcedureEngine.Live.pipe(
+    Layer.provide(MiddlewareEngine.Live),
+  )
+  const transportLive = makeInMemoryTransportLive(router, handlers).pipe(
+    Layer.provide(procedureEngineLive),
+  )
+  const proxyLive = Proxy.Live.pipe(
+    Layer.provide(transportLive),
+  )
+  const clientLive = Client.Live.pipe(
+    Layer.provide(proxyLive),
   )
 
-  const httpClientLayer = Layer.succeed(HttpClient.HttpClient, mockHttpClient)
+  const runtimeLayer = Layer.mergeAll(
+    handlers,
+    transportLive,
+    proxyLive,
+    clientLive,
+  )
 
-  // Return the vanilla client configured to use our mock HTTP client
-  return Client.make<TRouter>({
-    url: "/api/trpc", // Dummy URL, used by the mock client
-    httpClient: httpClientLayer,
+  const program = Effect.gen(function* () {
+    const client = yield* Client
+    return client.create(router)
   })
+
+  const procedures = Effect.runSync(
+    Effect.provide(program, runtimeLayer),
+  )
+
+  return {
+    procedures,
+    dispose: () => Promise.resolve(),
+  }
 }

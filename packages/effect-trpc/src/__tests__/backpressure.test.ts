@@ -4,19 +4,19 @@
  * Tests for WebSocket backpressure signaling.
  */
 
-import { describe, it, expect } from "vitest"
+import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
-import * as DateTime from "effect/DateTime"
+import { describe, expect, it } from "vitest"
 
 import {
   BackpressureController,
-  BackpressureControllerLive,
   BackpressureControllerDisabled,
+  BackpressureControllerLive,
   makeBackpressureControllerLayer,
 } from "../ws/server/BackpressureController.js"
 import type { Connection } from "../ws/server/ConnectionRegistry.js"
-import type { SubscriptionId, ClientId } from "../ws/types.js"
+import type { ClientId, SubscriptionId } from "../ws/types.js"
 
 // Mock connection for testing
 const createMockConnection = (): { connection: Connection; sentMessages: unknown[] } => {

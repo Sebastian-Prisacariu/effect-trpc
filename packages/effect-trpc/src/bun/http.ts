@@ -30,24 +30,28 @@
  * ```
  */
 
-import * as Layer from "effect/Layer"
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
-import type { Router } from "../core/router.js"
+import * as Layer from "effect/Layer"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-  type CorsOptions,
-  type SecurityHeadersOptions,
-  buildCorsHeaders,
-  buildSecurityHeaders,
-  addSecurityHeaders,
-  createRpcWebHandler,
+    type CorsOptions,
+    type SecurityHeadersOptions,
+    addSecurityHeaders,
+    buildCorsHeaders,
+    buildSecurityHeaders,
+    createRpcWebHandler,
 } from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CreateServerOptions<TRouter extends Router, R> {
+export interface CreateServerOptions<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+> {
   /**
    * The router instance.
    */
@@ -56,7 +60,7 @@ export interface CreateServerOptions<TRouter extends Router, R> {
   /**
    * The layer providing all procedure implementations.
    */
-  readonly handlers: Layer.Layer<any, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, R>
 
   /**
    * Port to listen on.
@@ -184,8 +188,12 @@ declare const Bun: {
  * })
  * ```
  */
-export function createFetchHandler<TRouter extends Router, R>(
-  options: Omit<CreateServerOptions<TRouter, R>, "port" | "host">,
+export function createFetchHandler<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+>(
+  options: Omit<CreateServerOptions<TRouter, HandlersOut, R>, "port" | "host">,
 ): FetchHandler {
   const {
     router,
@@ -289,8 +297,12 @@ export function createFetchHandler<TRouter extends Router, R>(
  * console.log(`Server running on http://localhost:${server.port}`)
  * ```
  */
-export function createServer<TRouter extends Router, R>(
-  options: CreateServerOptions<TRouter, R>,
+export function createServer<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+>(
+  options: CreateServerOptions<TRouter, HandlersOut, R>,
 ): BunServerInstance {
   const { port = 3000, host = "0.0.0.0", ...handlerOptions } = options
 

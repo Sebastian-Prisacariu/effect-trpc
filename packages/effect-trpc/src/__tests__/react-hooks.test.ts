@@ -204,11 +204,12 @@ describe("Result (effect-atom)", () => {
     it("value returns Option with data", () => {
       const initial = Result.initial()
       const success = Result.success("data")
+      const value = Result.value(success)
 
       expect(Result.value(initial)._tag).toBe("None")
-      expect(Result.value(success)._tag).toBe("Some")
-      if (Result.value(success)._tag === "Some") {
-        expect(Result.value(success).value).toBe("data")
+      expect(value._tag).toBe("Some")
+      if (value._tag === "Some") {
+        expect(value.value).toBe("data")
       }
     })
 
@@ -223,11 +224,12 @@ describe("Result (effect-atom)", () => {
     it("error returns Option with error", () => {
       const success = Result.success("data")
       const failure = Result.fail("my-error")
+      const error = Result.error(failure)
 
       expect(Result.error(success)._tag).toBe("None")
-      expect(Result.error(failure)._tag).toBe("Some")
-      if (Result.error(failure)._tag === "Some") {
-        expect(Result.error(failure).value).toBe("my-error")
+      expect(error._tag).toBe("Some")
+      if (error._tag === "Some") {
+        expect(error.value).toBe("my-error")
       }
     })
   })
@@ -344,32 +346,26 @@ describe("Query Deduplication", () => {
 
 describe("Result builder pattern", () => {
   it("matches initial state", () => {
-    const result = Result.initial()
+    const result: Result.Result<string, string> = Result.initial()
     const output = Result.builder(result)
       .onInitial(() => "loading")
-      .onSuccess(() => "success")
-      .onError(() => "error")
       .orNull()
 
     expect(output).toBe("loading")
   })
 
   it("matches success state", () => {
-    const result = Result.success("data")
+    const result: Result.Result<string, string> = Result.success("data")
     const output = Result.builder(result)
-      .onInitial(() => "loading")
       .onSuccess((value: string) => `got: ${value}`)
-      .onError(() => "error")
       .orNull()
 
     expect(output).toBe("got: data")
   })
 
   it("matches failure state", () => {
-    const result = Result.fail<string>("oops")
+    const result: Result.Result<string, string> = Result.fail("oops")
     const output = Result.builder(result)
-      .onInitial(() => "loading")
-      .onSuccess(() => "success")
       .onError((err: string) => `error: ${err}`)
       .orNull()
 
@@ -377,10 +373,7 @@ describe("Result builder pattern", () => {
   })
 
   it("uses orNull for unhandled cases", () => {
-    const result = Result.initial()
-    const output = Result.builder(result)
-      .onSuccess(() => "success")
-      .orNull()
+    const output = Result.builder(Result.initial()).orNull()
 
     expect(output).toBeNull()
   })

@@ -7,41 +7,42 @@
  * @since 0.1.0
  */
 
-import * as Effect from "effect/Effect"
 import * as Context from "effect/Context"
-import * as Layer from "effect/Layer"
-import * as Ref from "effect/Ref"
-import * as HashMap from "effect/HashMap"
-import * as Queue from "effect/Queue"
-import * as Stream from "effect/Stream"
-import * as Fiber from "effect/Fiber"
-import * as Option from "effect/Option"
-import * as Schema from "effect/Schema"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
 import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as HashMap from "effect/HashMap"
+import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
+import * as Queue from "effect/Queue"
+import * as Ref from "effect/Ref"
+import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
 
-import type { ClientId, SubscriptionId } from "../types.js"
-import { generateSubscriptionId } from "../types.js"
+import type {
+  SubscriptionContext,
+  SubscriptionHandler,
+  UnsubscribeReason,
+} from "../../core/server/procedures.js"
+import { UnsubscribeReason as UnsubscribeReasonCtor } from "../../core/server/procedures.js"
 import {
+  InvalidPathError,
   SubscriptionError,
   SubscriptionNotFoundError,
-  InvalidPathError,
+  WebSocketSubscriptionError,
 } from "../errors.js"
 import {
+  CompleteMessage,
   DataMessage,
   ErrorMessage,
-  CompleteMessage,
 } from "../protocol.js"
+import type { ClientId, SubscriptionId } from "../types.js"
+import { generateSubscriptionId } from "../types.js"
+import { BackpressureController } from "./BackpressureController.js"
 import type { Connection } from "./ConnectionRegistry.js"
 import { ConnectionRegistry } from "./ConnectionRegistry.js"
-import { BackpressureController } from "./BackpressureController.js"
-import type {
-  SubscriptionHandler,
-  SubscriptionContext,
-  UnsubscribeReason,
-} from "../../core/procedures.js"
-import { UnsubscribeReason as UnsubscribeReasonCtor } from "../../core/procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Active Subscription
@@ -81,21 +82,13 @@ export interface ActiveSubscription {
 /**
  * Registered subscription handler with metadata.
  *
- * @remarks
- * Uses `Schema.Schema<any, any, never>` for schema fields because handlers
- * are registered dynamically from procedure definitions. The actual type
- * parameters are erased at this level, but the schemas are still used
- * correctly at runtime for validation. Using `any` for the first two
- * parameters avoids the need for type casts at each registration site,
- * while `never` for requirements ensures no unexpected dependencies.
- *
  * @since 0.1.0
  * @category Models
  */
 export interface RegisteredHandler {
   readonly path: string
-  readonly inputSchema: Schema.Schema<any, any, any> | undefined
-  readonly outputSchema: Schema.Schema<any, any, any> | undefined
+  readonly inputSchema: Schema.Schema<unknown, unknown, never> | undefined
+  readonly outputSchema: Schema.Schema<unknown, unknown, never> | undefined
   readonly handler: SubscriptionHandler<unknown, unknown, unknown, never>
 }
 
@@ -172,41 +165,41 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
   Effect.gen(function* () {
     // Check for empty path
     if (!path || path.length === 0) {
-      return yield* Effect.fail(new InvalidPathError({ 
-        path, 
-        reason: "Path cannot be empty" 
+      return yield* Effect.fail(new InvalidPathError({
+        path,
+        reason: "Path cannot be empty"
       }))
     }
 
     // Check path length
     if (path.length > MAX_PATH_LENGTH) {
-      return yield* Effect.fail(new InvalidPathError({ 
-        path, 
-        reason: `Path too long (max ${MAX_PATH_LENGTH} characters)` 
+      return yield* Effect.fail(new InvalidPathError({
+        path,
+        reason: `Path too long (max ${MAX_PATH_LENGTH} characters)`
       }))
     }
 
     // Check for leading/trailing dots (slashes in path notation)
     if (path.startsWith(".") || path.endsWith(".")) {
-      return yield* Effect.fail(new InvalidPathError({ 
-        path, 
-        reason: "Path cannot have leading or trailing dots" 
+      return yield* Effect.fail(new InvalidPathError({
+        path,
+        reason: "Path cannot have leading or trailing dots"
       }))
     }
 
     // Check for consecutive dots (empty segments)
     if (path.includes("..")) {
-      return yield* Effect.fail(new InvalidPathError({ 
-        path, 
-        reason: "Path cannot have consecutive dots (empty segments)" 
+      return yield* Effect.fail(new InvalidPathError({
+        path,
+        reason: "Path cannot have consecutive dots (empty segments)"
       }))
     }
 
     // Check format with regex
     if (!PATH_REGEX.test(path)) {
-      return yield* Effect.fail(new InvalidPathError({ 
-        path, 
-        reason: "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter." 
+      return yield* Effect.fail(new InvalidPathError({
+        path,
+        reason: "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter."
       }))
     }
 
@@ -364,7 +357,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
     handler: RegisteredHandler,
     input: unknown,
     clientMessages: Queue.Queue<unknown>,
-  ): Effect.Effect<void, SubscriptionError, any> =>
+  ): Effect.Effect<void, unknown, any> =>
     Effect.gen(function* () {
       // Create subscription context
       const ctx: SubscriptionContext = {
@@ -378,17 +371,17 @@ const makeSubscriptionManager = Effect.gen(function* () {
       // Validate input if schema provided
       const validatedInput = handler.inputSchema
         ? yield* Schema.decodeUnknown(handler.inputSchema)(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new SubscriptionError({
-                  subscriptionId,
-                  path: handler.path,
-                  reason: "InputValidation",
-                  description: "Invalid subscription input",
-                  cause,
-                }),
-            ),
-          )
+          Effect.mapError(
+            (cause) =>
+              new SubscriptionError({
+                subscriptionId,
+                path: handler.path,
+                reason: "InputValidation",
+                description: "Invalid subscription input",
+                cause,
+              }),
+          ),
+        )
         : input
 
       // Call onSubscribe to get the stream (with timeout to prevent indefinite blocking)
@@ -396,7 +389,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
         Effect.timeoutFail({
           duration: DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT,
           onTimeout: () =>
-            new SubscriptionError({
+            new WebSocketSubscriptionError({
               subscriptionId,
               path: handler.path,
               reason: "SetupTimeout",
@@ -407,22 +400,22 @@ const makeSubscriptionManager = Effect.gen(function* () {
           (cause) =>
             cause instanceof SubscriptionError
               ? cause
-              : new SubscriptionError({
-                  subscriptionId,
-                  path: handler.path,
-                  reason: "HandlerError",
-                  description: "Handler setup failed",
-                  cause,
-                }),
+              : new WebSocketSubscriptionError({
+                subscriptionId,
+                path: handler.path,
+                reason: "HandlerError",
+                description: "Handler setup failed",
+                cause,
+              }),
         ),
         Effect.catchAllDefect((defect) => Effect.logError("Subscription handler defect", { subscriptionId, path: handler.path, defect }).pipe(Effect.flatMap(() => Effect.fail(
-            new SubscriptionError({
-              subscriptionId,
-              path: handler.path,
-              reason: "HandlerError",
-              description: "Handler setup failed",
-              cause: defect,
-            })))))
+          new WebSocketSubscriptionError({
+            subscriptionId,
+            path: handler.path,
+            reason: "HandlerError",
+            description: "Handler setup failed",
+            cause: defect,
+          })))))
       )
 
       // Set up client message handler if provided
@@ -551,7 +544,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
         const currentSubscriptions = yield* Ref.get(subscriptions)
         const clientSubCount = Array.from(HashMap.values(currentSubscriptions))
           .filter((s) => s.clientId === clientId).length
-        
+
         if (clientSubCount >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
           return yield* Effect.fail(
             new SubscriptionError({
@@ -641,9 +634,9 @@ const makeSubscriptionManager = Effect.gen(function* () {
                 new ErrorMessage({
                   id: subscriptionId,
                   error: {
-                    _tag: error._tag,
-                    message: error.message,
-                    cause: error.cause,
+                    _tag: "SubscriptionError",
+                    message: error instanceof Error ? error.message : "Subscription failed",
+                    cause: error,
                   },
                 }),
               ),

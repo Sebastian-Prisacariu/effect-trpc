@@ -165,12 +165,10 @@ describe("Result pattern matching", () => {
   })
 
   it("builder pattern works correctly", () => {
-    const result = Result.success("data")
+    const result: Result.Result<string, string> = Result.success("data")
 
     const output = Result.builder(result)
-      .onInitial(() => "initial")
       .onSuccess((value: string) => `got: ${value}`)
-      .onError(() => "error")
       .orNull()
 
     expect(output).toBe("got: data")

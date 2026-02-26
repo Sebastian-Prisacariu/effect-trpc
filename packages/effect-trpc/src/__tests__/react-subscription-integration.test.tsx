@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest"
 import * as React from "react"
 import { renderHook, act, waitFor } from "@testing-library/react"
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
 import { WebSocketServer, WebSocket as NodeWebSocket } from "ws"
@@ -91,7 +92,7 @@ const TestHandlersLive = testProcedures.toLayer({
       Stream.concat(Stream.never)
     ))
   }
-})
+}) as Layer.Layer<unknown, never, never>
 
 let wss: WebSocketServer
 let wsHandler: ReturnType<typeof createWebSocketHandler>

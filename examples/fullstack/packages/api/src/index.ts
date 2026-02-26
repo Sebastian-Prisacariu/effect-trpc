@@ -50,6 +50,28 @@ export const HealthStatus = Schema.Struct({
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Error when a todo is not found.
+ *
+ * Uses Schema.TaggedError for wire serializability.
+ * Use Effect.fail(new TodoNotFoundError(...)) for expected errors,
+ * NOT Effect.die() which is for unrecoverable defects.
+ */
+export class TodoNotFoundError extends Schema.TaggedError<TodoNotFoundError>()(
+  "TodoNotFoundError",
+  {
+    id: Schema.String,
+  }
+) {
+  get message(): string {
+    return `Todo ${this.id} not found`
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Procedures
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,11 +93,13 @@ export const todosProcedures = procedures("todos", {
   update: procedure
     .input(UpdateTodoInput)
     .output(Todo)
+    .error(TodoNotFoundError)
     .mutation(),
 
   toggle: procedure
     .input(ToggleTodoInput)
     .output(Todo)
+    .error(TodoNotFoundError)
     .mutation(),
 
   delete: procedure

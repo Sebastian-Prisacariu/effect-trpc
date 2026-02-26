@@ -42,37 +42,37 @@
  * ```
  */
 
-import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
-import * as Fiber from "effect/Fiber"
-import * as Ref from "effect/Ref"
-import * as ManagedRuntime from "effect/ManagedRuntime"
-import * as DateTime from "effect/DateTime"
-import * as Duration from "effect/Duration"
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
-import type { Router } from "../core/router.js"
-import type { ClientId, SubscriptionId } from "../ws/types.js"
+import * as DateTime from "effect/DateTime"
+import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as Layer from "effect/Layer"
+import * as ManagedRuntime from "effect/ManagedRuntime"
+import * as Ref from "effect/Ref"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-  WebSocketCodec,
-  WebSocketAuth,
-  ConnectionRegistry,
-  SubscriptionManager,
-  type WebSocketAuthHandler,
-  type AuthResult,
-  type Connection,
-  createWebSocketLayerWithHandlers,
-  extractSubscriptionHandlersFromLayer,
-  registerHandlers,
-} from "../ws/shared/index.js"
+    AuthResultMessage,
+    ErrorMessage,
+    PongMessage,
+    SubscribedMessage,
+    type FromServerMessage,
+} from "../ws/protocol.js"
 import { makeAdapterRuntimeState, type ConnectionAdmission } from "../ws/shared/adapter-runtime-state.js"
 import {
-  AuthResultMessage,
-  SubscribedMessage,
-  PongMessage,
-  ErrorMessage,
-  type FromServerMessage,
-} from "../ws/protocol.js"
+    ConnectionRegistry,
+    createWebSocketLayerWithHandlers,
+    extractSubscriptionHandlersFromLayer,
+    registerHandlers,
+    SubscriptionManager,
+    WebSocketAuth,
+    WebSocketCodec,
+    type AuthResult,
+    type Connection,
+    type WebSocketAuthHandler,
+} from "../ws/shared/index.js"
+import type { ClientId, SubscriptionId } from "../ws/types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -125,7 +125,7 @@ export interface BunWebSocketHandler<T = unknown> {
 /**
  * Options for creating a WebSocket handler.
  */
-export interface CreateWebSocketHandlerOptions<TRouter extends Router> {
+export interface CreateWebSocketHandlerOptions<TRouter extends RouterShape<RouterRecord>> {
   /**
    * The router instance (used to extract subscription procedures).
    */
@@ -204,7 +204,7 @@ export interface BunWebSocketHandlerResult {
 }
 
 // Re-export types for convenience
-export type { WebSocketAuthHandler, FromServerMessage }
+export type { FromServerMessage, WebSocketAuthHandler }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Handler Creation
@@ -257,7 +257,7 @@ export type { WebSocketAuthHandler, FromServerMessage }
  * })
  * ```
  */
-export function createWebSocketHandler<TRouter extends Router>(
+export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>>(
   options: CreateWebSocketHandlerOptions<TRouter>,
 ): BunWebSocketHandlerResult {
   const {

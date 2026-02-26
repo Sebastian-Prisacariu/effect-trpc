@@ -16,5 +16,8 @@
   "workspaces": [
     "packages/*",
     "examples/*"
-  ]
+  ],
+  "dependencies": {
+    "@effect/platform": "0.94.2"
+  }
 }

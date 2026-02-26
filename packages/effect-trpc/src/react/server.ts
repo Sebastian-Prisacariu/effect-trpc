@@ -8,7 +8,7 @@
  *
  * @example
  * ```ts
- * // src/trpc/server.ts
+ * // src/trpc/server.js
  * import { createServerClient } from "effect-trpc/react/server"
  * import { appRouter } from "./router"
  * import { AppHandlersLive } from "./handlers"
@@ -22,5 +22,6 @@
  * @since 0.1.0
  */
 
-export type { CreateServerClientOptions } from "./server-client.js"
 export { createServerClient } from "./server-client.js"
+export type { CreateServerClientOptions } from "./server-client.js"
+

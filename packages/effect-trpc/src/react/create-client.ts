@@ -12,33 +12,54 @@ import * as React from "react"
 
 import { useEvent } from "./internal/hooks.js"
 
+import { useAtomMount, useAtomSet, useAtomValue } from "@effect-atom/atom-react"
+import * as AtomResult from "@effect-atom/atom/Result"
+import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
+import type * as HttpClient from "@effect/platform/HttpClient"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
-import * as Cause from "effect/Cause"
-import { pipe } from "effect/Function"
-import * as Stream from "effect/Stream"
-import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Fiber from "effect/Fiber"
-import * as Option from "effect/Option"
+import { pipe } from "effect/Function"
 import type * as Layer from "effect/Layer"
-import type * as HttpClient from "@effect/platform/HttpClient"
-import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
-import * as AtomResult from "@effect-atom/atom/Result"
-import { useAtomValue, useAtomSet, useAtomMount } from "@effect-atom/atom-react"
+import * as ManagedRuntime from "effect/ManagedRuntime"
+import * as Option from "effect/Option"
+import * as Stream from "effect/Stream"
+import type { ProcedureDefinition } from "../core/server/procedure.js"
+import type { AnyProceduresGroup, ProcedureRecord, ProceduresGroup } from "../core/server/procedures.js"
 import type {
-  Router,
-  RouterRecord,
-  RouterEntry,
   AnyRouter,
-  AnyProceduresGroup,
-} from "../core/router.js"
-import type { ProceduresGroup, ProcedureRecord } from "../core/procedures.js"
-import type { ProcedureDefinition } from "../core/procedure.js"
+  RouterShape as Router,
+  RouterEntry,
+  RouterRecord,
+} from "../core/server/router.js"
 import {
-  type UseSubscriptionOptions,
-  type UseSubscriptionReturn,
-  useSubscription,
-} from "./subscription.js"
+  RegistryProvider,
+  callerAtomFamily,
+  chatAtomFamily,
+  createAtomCacheUtils,
+  generateCallerKey,
+  generateMutationKey,
+  generateQueryKey,
+  initialCallerState,
+  initialChatState,
+  initialMutationMainState,
+  invalidateAllQueries,
+  invalidateQueriesByPrefix,
+  invalidateQueryByKey,
+  mutationAtomFamily,
+  queryAtomFamily,
+  registerCallerAtom,
+  registerQueryKey,
+  streamAtomFamily,
+  unregisterCallerAtom,
+  useRegistry,
+  writableMutationAtomFamily,
+  type AtomCacheUtils,
+  type MutationCallerState,
+  type MutationMainState,
+  type QueryAtomState
+} from "./atoms.js"
 import {
   createRpcEffect,
   createStreamEffect,
@@ -46,40 +67,12 @@ import {
   type TracingConfig,
 } from "./internal/rpc.js"
 import {
-  RegistryProvider,
-  useRegistry,
-  queryAtomFamily,
-  callerAtomFamily,
-  mutationAtomFamily,
-  writableMutationAtomFamily,
-  streamAtomFamily,
-  chatAtomFamily,
-  generateQueryKey,
-  generateCallerKey,
-  generateMutationKey,
-  registerQueryKey,
-  registerCallerAtom,
-  unregisterCallerAtom,
-  invalidateQueryByKey,
-  invalidateQueriesByPrefix,
-  invalidateAllQueries,
-  getQueryData as _getQueryDataFromAtom,
-  setQueryData as _setQueryDataToAtom,
-  createAtomCacheUtils,
-  type AtomCacheUtils,
-  type QueryAtomState,
-  type MutationCallerState,
-  type MutationMainState,
-  type StreamAtomState as _StreamAtomState,
-  type ChatAtomState as _ChatAtomState,
-  initialQueryState as _initialQueryState,
-  initialCallerState,
-  initialMutationMainState,
-  initialStreamState as _initialStreamState,
-  initialChatState,
-} from "./atoms.js"
+  useSubscription,
+  type UseSubscriptionOptions,
+  type UseSubscriptionReturn,
+} from "./subscription.js"
 
-import { Result, type QueryResult, type MutationResult } from "./result.js"
+import { Result, type MutationResult, type QueryResult } from "./result.js"
 
 /**
  * Return type for useQuery hook.
@@ -92,10 +85,10 @@ export type UseQueryReturn<A, E = unknown> = QueryResult<A, E>
 
 import { useNetworkStatus } from "./hooks/index.js"
 import {
-  isStale,
-  subscribeToWindowFocus,
-  subscribeToNetworkReconnect,
   isDocumentVisible,
+  isStale,
+  subscribeToNetworkReconnect,
+  subscribeToWindowFocus,
 } from "./signals.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -543,7 +536,7 @@ type RouterClient<R extends RouterRecord> = {
       : never
 }
 
-// TracingConfig is re-exported from internal/rpc.ts for public API
+// TracingConfig is re-exported from internal/rpc.js for public API
 export type { TracingConfig } from "./internal/rpc.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -744,7 +737,7 @@ export interface TRPCReactClient<TRouter extends Router> {
    *   await trpc.dispose()
    * })
    *
-   * // In Vite/webpack HMR (vite.config.ts or module.hot)
+   * // In Vite/webpack HMR (vite.config.js or module.hot)
    * if (import.meta.hot) {
    *   import.meta.hot.dispose(() => trpc.dispose())
    * }
@@ -2003,7 +1996,7 @@ export function createTRPCReact<TRouter extends Router>(
       // useSubscription
       // ─────────────────────────────────────────────────────────────────
       useSubscription: (input: unknown, subscriptionOptions?: UseSubscriptionOptions<unknown>) => {
-        // Delegate to the useSubscription hook from subscription.ts
+        // Delegate to the useSubscription hook from subscription.js
         // The hook needs WebSocketProvider context, so users must wrap with that provider
         return useSubscription(path, input, subscriptionOptions)
       },

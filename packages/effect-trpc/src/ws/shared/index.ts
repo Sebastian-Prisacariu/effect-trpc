@@ -4,53 +4,55 @@
  * Shared WebSocket handler logic for Node.js and Bun adapters.
  */
 
-import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
-import * as Stream from "effect/Stream"
 import * as Context from "effect/Context"
-import * as ManagedRuntime from "effect/ManagedRuntime"
-import * as HashMap from "effect/HashMap"
-import * as Ref from "effect/Ref"
 import type * as DateTimeType from "effect/DateTime"
 import * as DateTime from "effect/DateTime"
+import * as Effect from "effect/Effect"
+import * as HashMap from "effect/HashMap"
+import * as Layer from "effect/Layer"
+import * as ManagedRuntime from "effect/ManagedRuntime"
+import * as Predicate from "effect/Predicate"
+import * as Ref from "effect/Ref"
+import type * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
 
-import type { Router } from "../../core/router.js"
 import type {
-  ProceduresGroup,
   ProcedureRecord,
+  ProceduresGroup,
   ProceduresService,
   SubscriptionHandler,
-} from "../../core/procedures.js"
-import type { ClientId, SubscriptionId } from "../types.js"
+} from "../../core/server/procedures.js"
+import type { RouterRecord, RouterShape } from "../../core/server/router.js"
 import {
-  WebSocketCodec,
-  WebSocketCodecLive,
-  WebSocketAuth,
-  WebSocketAuthTest,
-  ConnectionRegistry,
-  ConnectionRegistryLive,
-  SubscriptionManager,
-  SubscriptionManagerLive,
-  MessageRateLimiter,
-  MessageRateLimiterLive,
-  MessageRateLimiterDisabled,
-  type WebSocketAuthHandler,
-  type AuthResult,
-  type Connection,
-  type RegisteredHandler,
-  type RateLimitConfig,
-  makeWebSocketAuth,
-  makeMessageRateLimiterLayer,
-} from "../server/index.js"
-import {
-  AuthResultMessage,
-  SubscribedMessage,
-  PongMessage,
-  ErrorMessage,
-  type FromServerMessage,
+    AuthResultMessage,
+    ErrorMessage,
+    type FromServerMessage,
+    PongMessage,
+    SubscribedMessage,
 } from "../protocol.js"
+import {
+    type AuthResult,
+    type Connection,
+    ConnectionRegistry,
+    ConnectionRegistryLive,
+    MessageRateLimiter,
+    MessageRateLimiterDisabled,
+    MessageRateLimiterLive,
+    type RateLimitConfig,
+    type RegisteredHandler,
+    SubscriptionManager,
+    SubscriptionManagerLive,
+    WebSocketAuth,
+    type WebSocketAuthHandler,
+    WebSocketAuthTest,
+    WebSocketCodec,
+    WebSocketCodecLive,
+    makeMessageRateLimiterLayer,
+    makeWebSocketAuth,
+} from "../server/index.js"
+import type { ClientId, SubscriptionId } from "../types.js"
 export { makeAdapterRuntimeState } from "./adapter-runtime-state.js"
-export type { AdapterLifecycle, ConnectionAdmission, AdapterRuntimeState } from "./adapter-runtime-state.js"
+export type { AdapterLifecycle, AdapterRuntimeState, ConnectionAdmission } from "./adapter-runtime-state.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared Types
@@ -179,6 +181,16 @@ export const createWebSocketRuntimeWithHandlers = (
   rateLimit?: RateLimitConfig | false,
 ) => ManagedRuntime.make(createWebSocketLayerWithHandlers(auth, handlers, rateLimit))
 
+type ProcedureDefinitionRuntime = {
+  readonly _tag: "ProcedureDefinition"
+  readonly type: string
+  readonly inputSchema: Schema.Schema<unknown, unknown, never> | undefined
+  readonly outputSchema: Schema.Schema<unknown, unknown, never> | undefined
+}
+
+const isProcedureDefinitionRuntime = (value: unknown): value is ProcedureDefinitionRuntime =>
+  Predicate.isTagged(value, "ProcedureDefinition")
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handler Extraction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,7 +203,7 @@ export const createWebSocketRuntimeWithHandlers = (
  * @param router - The router containing subscription procedures
  * @returns Effect that produces a Map of path to RegisteredHandler
  */
-export const extractSubscriptionHandlersFromLayer = <TRouter extends Router>(
+export const extractSubscriptionHandlersFromLayer = <TRouter extends RouterShape<RouterRecord>>(
   router: TRouter,
 ): Effect.Effect<HashMap.HashMap<string, RegisteredHandler>, never, any> =>
   Effect.gen(function* () {
@@ -209,8 +221,7 @@ export const extractSubscriptionHandlersFromLayer = <TRouter extends Router>(
       const maybeService = yield* Effect.serviceOption(serviceTag)
 
       for (const [procKey, proc] of Object.entries(proceduresGroup.procedures)) {
-         
-        if (proc.type === "subscription") {
+        if (isProcedureDefinitionRuntime(proc) && proc.type === "subscription") {
           const path = `${groupKey}.${procKey}`
 
           // Try to get real handler from service if available
@@ -555,18 +566,8 @@ export const cleanupConnection = (options: CleanupConnectionOptions) =>
 // ─────────────────────────────────────────────────────────────────────────────
 
 export {
-  WebSocketCodec,
-  WebSocketAuth,
-  ConnectionRegistry,
-  SubscriptionManager,
-  MessageRateLimiter,
-  MessageRateLimiterLive,
-  MessageRateLimiterDisabled,
-  makeWebSocketAuth,
-  makeMessageRateLimiterLayer,
-  type AuthResult,
-  type Connection,
-  type RegisteredHandler,
-  type WebSocketAuthHandler,
-  type RateLimitConfig,
+    ConnectionRegistry, MessageRateLimiter, MessageRateLimiterDisabled, MessageRateLimiterLive, SubscriptionManager, WebSocketAuth, WebSocketCodec, makeMessageRateLimiterLayer, makeWebSocketAuth, type AuthResult,
+    type Connection, type RateLimitConfig, type RegisteredHandler,
+    type WebSocketAuthHandler
 }
+

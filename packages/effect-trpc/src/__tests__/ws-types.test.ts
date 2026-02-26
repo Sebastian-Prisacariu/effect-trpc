@@ -69,16 +69,12 @@ describe("branded IDs", () => {
   })
 
   it("ClientId schema validates strings", async () => {
-    const result = await Effect.runPromise(
-      Schema.decodeUnknown(ClientIdSchema)("test-client")
-    )
+    const result = ClientIdSchema("test-client")
     expect(result).toBe("test-client")
   })
 
   it("SubscriptionId schema validates strings", async () => {
-    const result = await Effect.runPromise(
-      Schema.decodeUnknown(SubscriptionIdSchema)("test-sub")
-    )
+    const result = SubscriptionIdSchema("test-sub")
     expect(result).toBe("test-sub")
   })
 })

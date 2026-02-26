@@ -6,17 +6,17 @@
  * Contains RPC request/response handling, schemas, and streaming logic.
  */
 
-import * as Effect from "effect/Effect"
-import * as Stream from "effect/Stream"
-import * as Data from "effect/Data"
-import * as Schema from "effect/Schema"
-import * as Option from "effect/Option"
-import * as Clock from "effect/Clock"
-import * as Random from "effect/Random"
 import * as HttpClient from "@effect/platform/HttpClient"
-import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
 import type * as HttpClientError from "@effect/platform/HttpClientError"
-import { RpcClientError, RpcResponseError } from "../../core/client.js"
+import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
+import * as Clock from "effect/Clock"
+import * as Data from "effect/Data"
+import * as Effect from "effect/Effect"
+import * as Option from "effect/Option"
+import * as Random from "effect/Random"
+import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
+import { RpcClientError, RpcResponseError } from "../../core/rpc/errors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request ID

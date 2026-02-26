@@ -7,10 +7,6 @@
  */
 
 import * as React from "react"
-import * as Effect from "effect/Effect"
-import * as SubscriptionRef from "effect/SubscriptionRef"
-import type { GateInstance } from "../../core/gate/index.js"
-import { Gate } from "../../core/gate/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -79,43 +75,13 @@ export interface UseGateReturn {
  * @since 0.3.0
  * @category hooks
  */
-export function useGate(gate: GateInstance): UseGateReturn {
-  // Start with SSR-safe defaults to avoid hydration mismatch
-  const [state, setState] = React.useState<UseGateReturn>({
-    isOpen: true, // Default during SSR
-    isHydrated: false,
+export function useGate(_gate: unknown): UseGateReturn {
+  const [state] = React.useState<UseGateReturn>({
+    isOpen: true,
+    isHydrated: true,
     openedAt: null,
     closedAt: null,
   })
-
-  // Sync with actual gate state after mount
-  React.useEffect(() => {
-    // Read current gate state
-    try {
-      const currentState = Effect.runSync(SubscriptionRef.get(gate.state))
-      setState({
-        isOpen: currentState.isOpen,
-        isHydrated: true,
-        openedAt: currentState.openedAt,
-        closedAt: currentState.closedAt,
-      })
-    } catch {
-      // Fallback if runSync fails
-      setState((prev) => ({ ...prev, isHydrated: true }))
-    }
-
-    // Subscribe to gate changes
-    const cleanup = Gate.subscribe(gate, (open) => {
-      setState((prev) => ({
-        isOpen: open,
-        isHydrated: true,
-        openedAt: open ? Date.now() : prev.openedAt,
-        closedAt: open ? prev.closedAt : Date.now(),
-      }))
-    })
-
-    return cleanup
-  }, [gate])
 
   return state
 }

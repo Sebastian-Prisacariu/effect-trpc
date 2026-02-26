@@ -30,11 +30,12 @@
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core exports - re-export everything from core
-// This preserves type+value pairs like Router, Middleware
+// Core exports
 // ─────────────────────────────────────────────────────────────────────────────
 
 export * from "./core/index.js"
+export { procedure } from "./core/server/procedure.js"
+export { procedures, Procedures } from "./core/server/procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors
@@ -43,18 +44,8 @@ export * from "./core/index.js"
 export type { TRPCError } from "./errors/index.js"
 
 export {
-  TypeId as TRPCErrorTypeId,
-  isTRPCError,
-  InputValidationError,
-  OutputValidationError,
-  NotFoundError,
-  UnauthorizedError,
-  ForbiddenError,
-  RateLimitError,
-  TimeoutError,
-  InternalError,
-  NetworkError,
-  TRPCErrorSchema,
+    ForbiddenError, InputValidationError, InternalError,
+    NetworkError, NotFoundError, OutputValidationError, RateLimitError, TRPCErrorSchema, TypeId as TRPCErrorTypeId, TimeoutError, UnauthorizedError, isTRPCError
 } from "./errors/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,28 +53,20 @@ export {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export {
-  // Types
-  type LogCategory,
-  type TrpcLoggerConfig,
-  type TrpcLogEvent,
-  type TrpcLoggerService,
-  // Service Tag
-  TrpcLogger,
-  // Configuration
-  defaultConfig as defaultLoggerConfig,
-  // Layers
-  makeTrpcLoggerLayer,
-  TrpcLoggerLive,
-  TrpcLoggerDev,
-  TrpcLoggerProd,
-  TrpcLoggerSilent,
-  // Utilities
-  redactSensitiveData,
-  generateRequestId,
-  // Convenience functions
-  logQuery,
-  logMutation,
-  logTrpcEvent,
-  // Re-export Logger from Effect
-  Logger,
+    // Re-export Logger from Effect
+    Logger,
+    // Service Tag
+    TrpcLogger, TrpcLoggerDev, TrpcLoggerLive, TrpcLoggerProd,
+    TrpcLoggerSilent,
+    // Configuration
+    defaultConfig as defaultLoggerConfig, generateRequestId, logMutation,
+    // Convenience functions
+    logQuery, logTrpcEvent,
+    // Layers
+    makeTrpcLoggerLayer,
+    // Utilities
+    redactSensitiveData,
+    // Types
+    type LogCategory, type TrpcLogEvent, type TrpcLoggerConfig, type TrpcLoggerService
 } from "./shared/logging.js"
+

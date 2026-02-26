@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { procedure, procedures, Router } from "../index.js"
-import { createHandler as createNodeHandler } from "../node/index.js"
-import { createRouteHandler as createNextHandler } from "../next/index.js"
 import { createFetchHandler as createBunHandler } from "../bun/index.js"
+import { procedure, procedures, Router } from "../index.js"
+import { createRouteHandler as createNextHandler } from "../next/index.js"
+import { createHandler as createNodeHandler } from "../node/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures

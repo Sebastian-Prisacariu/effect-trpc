@@ -77,20 +77,20 @@ Procedure types:
 benchmark/
 ├── vanilla-trpc/
 │   ├── generated/
-│   │   └── routes.ts      # Generated route definitions
-│   ├── client.ts          # Client usage (test targets)
+│   │   └── routes.js      # Generated route definitions
+│   ├── client.js          # Client usage (test targets)
 │   └── tsconfig.json
 ├── effect-trpc/
 │   ├── generated/
-│   │   └── routes.ts      # Generated route definitions
-│   ├── client.ts          # Client usage (test targets)
+│   │   └── routes.js      # Generated route definitions
+│   ├── client.js          # Client usage (test targets)
 │   └── tsconfig.json
 ├── scripts/
-│   ├── generate-routes.ts # Route generator
-│   ├── measure-tsc.ts     # TSC benchmark
-│   ├── measure-tsserver.ts # TSServer benchmark
-│   ├── run-benchmark.ts   # Main benchmark runner
-│   └── analyze-results.ts # Results analyzer
+│   ├── generate-routes.js # Route generator
+│   ├── measure-tsc.js     # TSC benchmark
+│   ├── measure-tsserver.js # TSServer benchmark
+│   ├── run-benchmark.js   # Main benchmark runner
+│   └── analyze-results.js # Results analyzer
 ├── results/               # Benchmark results (JSON + Markdown)
 ├── package.json
 ├── tsconfig.base.json
@@ -125,7 +125,7 @@ benchmark/
 For subjective "feel" testing in your IDE:
 
 1. Generate routes: `npm run generate:800`
-2. Open `vanilla-trpc/client.ts` or `effect-trpc/client.ts`
+2. Open `vanilla-trpc/client.js` or `effect-trpc/client.js`
 3. Try:
    - Typing `trpc.` and waiting for autocomplete
    - Hovering over `result` variables
@@ -137,8 +137,8 @@ For subjective "feel" testing in your IDE:
 When adding new benchmarks:
 
 1. Add measurement code to the appropriate script
-2. Update the results interface in `run-benchmark.ts`
-3. Update the analysis in `analyze-results.ts`
+2. Update the results interface in `run-benchmark.js`
+3. Update the analysis in `analyze-results.js`
 4. Document in this README
 
 ## Caveats

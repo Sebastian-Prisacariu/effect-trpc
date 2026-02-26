@@ -1,23 +1,17 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
 import * as Logger from "effect/Logger"
 import * as LogLevel from "effect/LogLevel"
-import * as Fiber from "effect/Fiber"
-import * as FiberRef from "effect/FiberRef"
+import { describe, expect, it } from "vitest"
 import {
   TrpcLogger,
-  TrpcLoggerLive,
   TrpcLoggerDev,
-  TrpcLoggerProd,
+  TrpcLoggerLive,
   TrpcLoggerSilent,
-  makeTrpcLoggerLayer,
-  redactSensitiveData,
   generateRequestId,
-  logQuery,
   logMutation,
-  logTrpcEvent,
-  type TrpcLogEvent,
+  logQuery,
+  makeTrpcLoggerLayer,
+  redactSensitiveData
 } from "../shared/logging.js"
 
 describe("TrpcLogger", () => {

@@ -14,16 +14,16 @@
  * - Tier 3: Caller Atom (isolated per hook instance)
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest"
-import * as React from "react"
-import { renderHook, act, waitFor } from "@testing-library/react"
+import { NodeHttpClient } from "@effect/platform-node"
+import { act, renderHook, waitFor } from "@testing-library/react"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
-import * as Exit from "effect/Exit"
-import { NodeHttpClient } from "@effect/platform-node"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
+import * as React from "react"
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { procedure, procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"

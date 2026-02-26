@@ -4,36 +4,34 @@
  * Branded IDs and state types for WebSocket subscriptions.
  */
 
-import * as CoreTypes from "../core/types.js"
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Branded IDs (re-exported from core)
+// Branded IDs
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Re-export branded IDs from core to maintain backward compatibility
-// while keeping the dependency direction clean (ws depends on core, not vice versa)
+declare const ClientIdBrand: unique symbol
+declare const SubscriptionIdBrand: unique symbol
 
 /**
  * Unique identifier for a WebSocket client connection.
- * Re-exported from core/types.
+ * Branded string identifier for a WebSocket client connection.
  */
-export const ClientId = CoreTypes.ClientId
+export const ClientId = (value: string): ClientId => value as ClientId
 
 /**
  * Type for ClientId branded string.
  */
-export type ClientId = CoreTypes.ClientId
+export type ClientId = string & { readonly [ClientIdBrand]: true }
 
 /**
  * Unique identifier for an active subscription.
- * Re-exported from core/types.
+ * Branded string identifier for an active subscription.
  */
-export const SubscriptionId = CoreTypes.SubscriptionId
+export const SubscriptionId = (value: string): SubscriptionId => value as SubscriptionId
 
 /**
  * Type for SubscriptionId branded string.
  */
-export type SubscriptionId = CoreTypes.SubscriptionId
+export type SubscriptionId = string & { readonly [SubscriptionIdBrand]: true }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Connection State

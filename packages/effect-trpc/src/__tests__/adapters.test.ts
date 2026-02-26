@@ -10,12 +10,12 @@
  * - WebSocket handler configuration
  */
 
-import { describe, it, expect } from "vitest"
 import * as Effect from "effect/Effect"
-import * as Schema from "effect/Schema"
 import * as Layer from "effect/Layer"
-import { Readable } from "node:stream"
+import * as Schema from "effect/Schema"
 import type { IncomingMessage, ServerResponse } from "node:http"
+import { Readable } from "node:stream"
+import { describe, expect, it } from "vitest"
 
 import { procedure, procedures, Router } from "../index.js"
 import { buildCorsHeaders } from "../shared/cors.js"

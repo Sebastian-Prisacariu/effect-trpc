@@ -81,7 +81,7 @@ pnpm typecheck
 Define your router once, share types between server and client:
 
 ```typescript
-import { procedures, procedure, createRouter } from "effect-trpc"
+import { procedures, procedure, Router } from "effect-trpc"
 import * as Schema from "effect/Schema"
 
 export const todosProcedures = procedures("todos", {
@@ -89,7 +89,7 @@ export const todosProcedures = procedures("todos", {
   create: procedure.input(CreateTodoInput).output(Todo).mutation(),
 })
 
-export const appRouter = createRouter({
+export const appRouter = Router.make({
   todos: todosProcedures,
 })
 

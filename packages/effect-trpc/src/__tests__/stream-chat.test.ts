@@ -12,21 +12,20 @@
  * - Stream cancellation via fiber interruption
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest"
-import * as Effect from "effect/Effect"
-import * as Stream from "effect/Stream"
 import * as Chunk from "effect/Chunk"
+import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
-import * as Schema from "effect/Schema"
-import * as Duration from "effect/Duration"
 import * as Layer from "effect/Layer"
+import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { procedure, procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
-import type { BaseContext } from "../core/middleware.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures - Schemas

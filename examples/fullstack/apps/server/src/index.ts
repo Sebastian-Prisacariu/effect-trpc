@@ -5,7 +5,7 @@ import * as http from "node:http"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "effect-trpc/node"
-import { appRouter, todosProcedures, healthProcedures, type Todo } from "@example/api"
+import { appRouter, todosProcedures, healthProcedures, TodoNotFoundError, type Todo } from "@example/api"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-Memory Database
@@ -31,13 +31,13 @@ let nextId = 4
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TodosHandlersLive = todosProcedures.toLayer({
-  list: () =>
+  list: (_ctx) =>
     Effect.sync(() => Array.from(todos.values())),
 
-  get: ({ id }) =>
+  get: (_ctx, { id }) =>
     Effect.sync(() => todos.get(id) ?? null),
 
-  create: ({ title }) =>
+  create: (_ctx, { title }) =>
     Effect.sync(() => {
       const todo: Todo = {
         id: String(nextId++),
@@ -49,11 +49,13 @@ const TodosHandlersLive = todosProcedures.toLayer({
       return todo
     }),
 
-  update: ({ id, title, completed }) =>
+  update: (_ctx, { id, title, completed }) =>
     Effect.gen(function* () {
       const existing = todos.get(id)
       if (!existing) {
-        return yield* Effect.die(new Error(`Todo ${id} not found`))
+        // Use Effect.fail for expected errors (not found is recoverable)
+        // NOT Effect.die which is for unrecoverable defects
+        return yield* Effect.fail(new TodoNotFoundError({ id }))
       }
       const updated: Todo = {
         ...existing,
@@ -64,23 +66,25 @@ const TodosHandlersLive = todosProcedures.toLayer({
       return updated
     }),
 
-  toggle: ({ id }) =>
+  toggle: (_ctx, { id }) =>
     Effect.gen(function* () {
       const existing = todos.get(id)
       if (!existing) {
-        return yield* Effect.die(new Error(`Todo ${id} not found`))
+        // Use Effect.fail for expected errors (not found is recoverable)
+        // NOT Effect.die which is for unrecoverable defects
+        return yield* Effect.fail(new TodoNotFoundError({ id }))
       }
       const updated: Todo = { ...existing, completed: !existing.completed }
       todos.set(id, updated)
       return updated
     }),
 
-  delete: ({ id }) =>
+  delete: (_ctx, { id }) =>
     Effect.sync(() => todos.delete(id)),
 })
 
 const HealthHandlersLive = healthProcedures.toLayer({
-  check: () =>
+  check: (_ctx) =>
     Effect.succeed({
       status: "ok" as const,
       timestamp: new Date(),

@@ -7,4 +7,3 @@
  */
 
 export { useNetworkStatus, type UseNetworkStatusReturn } from "./useNetworkStatus.js"
-export { useGate, type UseGateReturn } from "./useGate.js"

@@ -35,36 +35,36 @@
  * ```
  */
 
-import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
-import * as Fiber from "effect/Fiber"
-import * as Ref from "effect/Ref"
-import type * as DateTime from "effect/DateTime"
-import * as Clock from "effect/Clock"
-import * as Schedule from "effect/Schedule"
-import * as Duration from "effect/Duration"
 import * as NodeContext from "@effect/platform-node/NodeContext"
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform"
-import type { Router } from "../core/router.js"
+import * as Clock from "effect/Clock"
+import type * as DateTime from "effect/DateTime"
+import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as Layer from "effect/Layer"
+import * as Ref from "effect/Ref"
+import * as Schedule from "effect/Schedule"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-  createWebSocketRuntimeWithHandlers,
-  extractSubscriptionHandlersFromLayer,
-  registerHandlers,
-  handleMessage,
-  cleanupConnection,
-  initialConnectionState,
-  makeCleanupGuard,
-  WebSocketCodec,
-  ConnectionRegistry,
-  type ConnectionStateData,
-  type AuthResult,
-  type Connection,
-  type WebSocketAuthHandler,
-} from "../ws/shared/index.js"
+    type FromServerMessage,
+} from "../ws/protocol.js"
 import { makeAdapterRuntimeState, type ConnectionAdmission } from "../ws/shared/adapter-runtime-state.js"
 import {
-  type FromServerMessage,
-} from "../ws/protocol.js"
+    cleanupConnection,
+    ConnectionRegistry,
+    createWebSocketRuntimeWithHandlers,
+    extractSubscriptionHandlersFromLayer,
+    handleMessage,
+    initialConnectionState,
+    makeCleanupGuard,
+    registerHandlers,
+    WebSocketCodec,
+    type AuthResult,
+    type Connection,
+    type ConnectionStateData,
+    type WebSocketAuthHandler,
+} from "../ws/shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Handler Types
@@ -73,7 +73,7 @@ import {
 /**
  * Options for creating a WebSocket handler.
  */
-export interface CreateWebSocketHandlerOptions<TRouter extends Router> {
+export interface CreateWebSocketHandlerOptions<TRouter extends RouterShape<RouterRecord>> {
   /**
    * The router instance (used to extract subscription procedures).
    */
@@ -182,7 +182,7 @@ export interface WebSocketLike {
 }
 
 // Re-export types for convenience
-export type { WebSocketAuthHandler, FromServerMessage }
+export type { FromServerMessage, WebSocketAuthHandler }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Handler Creation
@@ -221,7 +221,7 @@ export type { WebSocketAuthHandler, FromServerMessage }
  * })
  * ```
  */
-export function createWebSocketHandler<TRouter extends Router>(
+export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>>(
   options: CreateWebSocketHandlerOptions<TRouter>,
 ): WebSocketHandler {
   const {

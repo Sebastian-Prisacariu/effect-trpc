@@ -6,7 +6,7 @@
  *
  * @example
  * ```ts
- * // src/app/api/trpc/[...trpc]/route.ts
+ * // src/app/api/trpc/[...trpc]/route.js
  * import { createRouteHandler } from 'effect-trpc/next'
  * import { appRouter, AppRouterLive } from '~/server/trpc'
  *
@@ -20,7 +20,7 @@
  */
 
 import type * as Layer from "effect/Layer"
-import type { Router } from "../core/router.js"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
   type CorsOptions,
   buildCorsHeaders,
@@ -31,7 +31,11 @@ import {
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CreateRouteHandlerOptions<TRouter extends Router, R> {
+export interface CreateRouteHandlerOptions<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+> {
   /**
    * The router instance.
    */
@@ -52,7 +56,7 @@ export interface CreateRouteHandlerOptions<TRouter extends Router, R> {
    * 2. The handlers implementation is type-checked when created
    * 3. Only the `R` (requirements) type matters for composition
    */
-  readonly handlers: Layer.Layer<any, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, R>
 
   /**
    * Disable OpenTelemetry tracing.
@@ -115,7 +119,7 @@ export interface RouteHandlers {
  *
  * @example
  * ```ts
- * // src/app/api/trpc/[...trpc]/route.ts
+ * // src/app/api/trpc/[...trpc]/route.js
  * import { createRouteHandler } from 'effect-trpc/next'
  * import { appRouter } from '~/server/trpc/router'
  * import { AppHandlersLive } from '~/server/trpc/handlers'
@@ -131,8 +135,12 @@ export interface RouteHandlers {
  * // export const runtime = "edge"
  * ```
  */
-export function createRouteHandler<TRouter extends Router, R>(
-  options: CreateRouteHandlerOptions<TRouter, R>,
+export function createRouteHandler<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+>(
+  options: CreateRouteHandlerOptions<TRouter, HandlersOut, R>,
 ): RouteHandlers {
   const { router, handlers, disableTracing, spanPrefix, cors } = options
 
@@ -188,7 +196,7 @@ export function createRouteHandler<TRouter extends Router, R>(
  *
  * @example
  * ```ts
- * // src/trpc/server.ts
+ * // src/trpc/server.js
  * import { createServerClient } from "effect-trpc/react"
  * import { appRouter } from "./router"
  * import { AppHandlersLive } from "./handlers"
@@ -200,7 +208,7 @@ export function createRouteHandler<TRouter extends Router, R>(
  * ```
  *
  * ```tsx
- * // src/app/page.tsx
+ * // src/app/page.jsx
  * import { Effect } from "effect"
  * import { serverClient } from "~/trpc/server"
  *

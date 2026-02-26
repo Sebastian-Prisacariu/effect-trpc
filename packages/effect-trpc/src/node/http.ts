@@ -26,21 +26,21 @@
  * ```
  */
 
-import * as Effect from "effect/Effect"
-import * as Either from "effect/Either"
-import * as Layer from "effect/Layer"
 import * as NodeContext from "@effect/platform-node/NodeContext"
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform"
 import * as NodeStream from "@effect/platform-node/NodeStream"
+import * as Effect from "effect/Effect"
+import * as Either from "effect/Either"
+import * as Layer from "effect/Layer"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import type { Router } from "../core/router.js"
+import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-  type CorsOptions,
-  type SecurityHeadersOptions,
-  buildCorsHeaders,
-  buildSecurityHeaders,
-  addSecurityHeaders,
-  createRpcWebHandler,
+    type CorsOptions,
+    type SecurityHeadersOptions,
+    addSecurityHeaders,
+    buildCorsHeaders,
+    buildSecurityHeaders,
+    createRpcWebHandler,
 } from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,7 +85,11 @@ export interface NodeToWebRequestOptions {
   readonly maxBodySize?: number
 }
 
-export interface CreateHandlerOptions<TRouter extends Router, R> {
+export interface CreateHandlerOptions<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+> {
   /**
    * The router instance.
    */
@@ -94,7 +98,7 @@ export interface CreateHandlerOptions<TRouter extends Router, R> {
   /**
    * The layer providing all procedure implementations.
    */
-  readonly handlers: Layer.Layer<any, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, R>
 
   /**
    * Path for the RPC endpoint.
@@ -185,8 +189,12 @@ export interface FetchHandler {
  * })
  * ```
  */
-export function createHandler<TRouter extends Router, R>(
-  options: CreateHandlerOptions<TRouter, R>,
+export function createHandler<
+  TRouter extends RouterShape<RouterRecord>,
+  HandlersOut,
+  R,
+>(
+  options: CreateHandlerOptions<TRouter, HandlersOut, R>,
 ): FetchHandler {
   const {
     router,

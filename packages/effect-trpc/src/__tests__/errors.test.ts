@@ -1,14 +1,14 @@
-import { describe, it, expect } from "vitest"
+import { describe, expect, it } from "vitest"
 import {
-  isTRPCError,
-  InputValidationError,
-  NotFoundError,
-  UnauthorizedError,
   ForbiddenError,
+  InputValidationError,
+  InternalError,
+  isTRPCError,
+  NetworkError,
+  NotFoundError,
   RateLimitError,
   TimeoutError,
-  InternalError,
-  NetworkError,
+  UnauthorizedError,
 } from "../errors/index.js"
 
 describe("TRPCError types", () => {
