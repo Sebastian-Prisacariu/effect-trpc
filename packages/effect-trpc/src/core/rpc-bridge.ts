@@ -400,27 +400,11 @@ const toWebHeaders = (platformHeaders: Headers): globalThis.Headers => {
  * Each procedure call creates a span with metadata about the request.
  *
  * @remarks
- * **Context Type Safety Limitation:**
+ * **Middleware Execution:**
  *
- * Middleware context types are erased at runtime because TypeScript cannot
- * statically track how middleware transform context through a dynamically-built
- * array. The `middlewares` parameter uses `Middleware<any, any, any, any>`.
- *
- * This means:
- * - The compiler cannot verify that middleware A's output context matches
- *   middleware B's expected input context
- * - Context transformation errors will manifest as runtime errors, not
- *   compile-time errors
- *
- * **Best Practices:**
- * 1. Use `composeMiddleware` to create type-safe middleware compositions
- *    that are validated at compile time
- * 2. Test middleware chains thoroughly to catch context mismatches
- * 3. Use descriptive middleware names to aid debugging
- *
- * **Future Improvement:**
- * A v2 API could use a builder pattern with phantom types to track context
- * transformations, but this would require a significant API redesign.
+ * Middleware is executed in the order they are applied via `.use()` on the procedure.
+ * Each middleware's implementation is retrieved via its `serviceTag` and executed
+ * sequentially, with context flowing through the chain.
  *
  * **Context Construction:**
  * The middleware context is constructed from @effect/rpc's handler options:

@@ -57,6 +57,7 @@ export {
   extractMetadata,
   isRouter,
   isProceduresGroup,
+  isProvidedRouter,
 } from "./router.js"
 
 export type {
@@ -64,6 +65,8 @@ export type {
   RouterRecord,
   Router as RouterType,
   ToHttpLayerOptions,
+  ToHttpHandlerOptions,
+  ProvidedRouter,
   ProcedureMetadata,
   MetadataRegistry,
   ExtractProcedures,

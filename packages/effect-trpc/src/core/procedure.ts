@@ -53,12 +53,13 @@ export type ProcedureType = "query" | "mutation" | "stream" | "chat" | "subscrip
  *
  * @example
  * ```ts
- * // Type-safe composition
- * const authAndRateLimit = composeMiddleware(authMiddleware, rateLimitMiddleware)
+ * // Middleware applied via .use()
+ * const AuthMiddleware = Middleware("auth")
+ *   .error(AuthError)
+ *   .provides<{ user: User }>()
  *
- * // Use composed middleware
  * const UserProcedures = procedures('user', {
- *   update: procedure.use(authAndRateLimit).input(UpdateSchema).mutation(),
+ *   update: procedure.use(AuthMiddleware).input(UpdateSchema).mutation(),
  * })
  * ```
  *
@@ -357,7 +358,7 @@ export interface ProcedureBuilder<
    * Define the input schema for this procedure.
    * Input is validated before the handler is called.
    *
-   * **Note:** If middleware with `withInput` has been applied, the final input
+   * **Note:** If middleware with `.input()` has been applied, the final input
    * type will be the intersection of the middleware's input requirements and
    * the schema defined here: `MiddlewareInput & I2`
    */
@@ -374,34 +375,36 @@ export interface ProcedureBuilder<
   ): ProcedureBuilder<I, A2, E, Ctx, R, Provides>
 
   /**
-   * Define the typed error schema for this procedure.
+   * Define the typed error schema(s) for this procedure.
+   *
+   * Accepts varargs - pass multiple error classes directly without wrapping in Schema.Union.
+   * Each error class must extend Schema.TaggedError.
    *
    * @remarks
    * **Middleware Error Types:**
    *
    * When using middleware that can fail (e.g., `authMiddleware`, `rateLimitMiddleware`),
-   * their error types are accumulated at the type level via `.use()`. However, for
-   * proper wire serialization, you should include middleware error schemas in the
-   * procedure's error schema using `Schema.Union`.
+   * their error types are accumulated at the type level via `.use()`. For proper
+   * wire serialization, include middleware error schemas in the procedure's error call.
    *
    * @example
    * ```ts
-   * // Include middleware errors in error schema for full type safety
+   * // Single error
+   * const getUser = procedure
+   *   .error(NotFoundError)
+   *   .query()
+   *
+   * // Multiple errors (varargs - no Schema.Union needed)
    * const updateUser = procedure
    *   .use(authMiddleware)  // Adds AuthError to type
-   *   .use(rateLimitMiddleware)  // Adds RateLimitError to type
    *   .input(UpdateUserSchema)
-   *   .error(Schema.Union(
-   *     MyCustomError,
-   *     AuthError,  // From middleware
-   *     RateLimitError,  // From middleware
-   *   ))
+   *   .error(NotFoundError, ValidationError, AuthError)
    *   .mutation()
    * ```
    */
-  error<E2, EFrom = E2>(
-    schema: Schema.Schema<E2, EFrom>,
-  ): ProcedureBuilder<I, A, E2, Ctx, R, Provides>
+  error<Errors extends ReadonlyArray<Schema.Schema<any, any>>>(
+    ...errors: Errors
+  ): ProcedureBuilder<I, A, E | Schema.Schema.Type<Errors[number]>, Ctx, R, Provides>
 
   /**
    * Add tags to this procedure for tag-based cache invalidation.
@@ -606,8 +609,14 @@ const createBuilder = <I, A, E, Ctx extends BaseContext, R = never, Provides = n
       createBuilder<I & I2, A, E, Ctx, R, Provides>({ ...state, inputSchema: schema }),
     output: (schema: unknown) =>
       createBuilder<I, unknown, E, Ctx, R, Provides>({ ...state, outputSchema: schema }),
-    error: (schema: unknown) =>
-      createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema: schema }),
+    error: (...errors: unknown[]) => {
+      // Merge multiple error schemas into a union if needed
+      const errorSchema =
+        errors.length === 1
+          ? errors[0]
+          : Schema.Union(...(errors as [Schema.Schema<any, any>, ...Schema.Schema<any, any>[]]))
+      return createBuilder<I, A, unknown, Ctx, R, Provides>({ ...state, errorSchema })
+    },
     tags: (tags: ReadonlyArray<string>) =>
       createBuilder<I, A, E, Ctx, R, Provides>({ ...state, tags }),
     invalidates: (paths: ReadonlyArray<string>) =>

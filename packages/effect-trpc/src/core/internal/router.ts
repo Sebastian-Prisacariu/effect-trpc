@@ -224,10 +224,27 @@ export interface Router<Routes extends RouterRecord = RouterRecord> {
   use(middleware: MiddlewareDefinition<any, any, any, any>): Router<Routes>
 
   /**
+   * @deprecated Use `Router.provide()` then `Router.toHttpHandler()` instead.
    * Create a Layer that serves this router over HTTP.
-   * Uses NDJSON serialization for streaming support.
    */
   toHttpLayer<R>(options: ToHttpLayerOptions<R>): Layer.Layer<never, never, R>
+}
+
+/**
+ * A Router with all dependencies provided, ready to be converted to an HTTP handler.
+ *
+ * Created via `Router.provide(router, layer)`. Use `Router.toHttpHandler()` to
+ * create the final HTTP layer.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface ProvidedRouter<Routes extends RouterRecord = RouterRecord> {
+  readonly [TypeId]: TypeId
+  readonly _tag: "ProvidedRouter"
+  readonly router: Router<Routes>
+  readonly layer: Layer.Layer<any, never, any>
+  readonly path?: `/${string}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -740,7 +757,7 @@ export const extractMetadata = <Routes extends RouterRecord>(
  *
  * This extracts the `I` type parameter from `ProcedureDefinition`, which
  * includes both:
- * - Input from middleware `withInput` extensions
+ * - Input from middleware `.input()` extensions
  * - Input from the procedure's `.input()` schema
  *
  * @since 0.1.0
@@ -832,3 +849,86 @@ export type InferProvides<T> =
           : never
       }
     : never
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router.provide() and Router.toHttpHandler()
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Options for creating an HTTP handler from a router.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface ToHttpHandlerOptions {
+  /**
+   * Path prefix for the RPC endpoint.
+   * Must start with '/'.
+   * @default '/rpc'
+   */
+  readonly path?: `/${string}`
+}
+
+/**
+ * Provide dependencies to a router, preparing it for HTTP handler creation.
+ *
+ * Use this with `Router.toHttpHandler()` to create the final HTTP layer.
+ * The layer must provide all procedure implementations and middleware services.
+ *
+ * @example
+ * ```ts
+ * const handler = router.pipe(
+ *   Router.provide(AppLive),
+ *   Router.toHttpHandler()
+ * )
+ * ```
+ *
+ * @since 0.5.0
+ * @category constructors
+ */
+export const provide =
+  <RIn, ROut>(layer: Layer.Layer<ROut, never, RIn>) =>
+  <Routes extends RouterRecord>(router: Router<Routes>): ProvidedRouter<Routes> => ({
+    [TypeId]: TypeId,
+    _tag: "ProvidedRouter",
+    router,
+    layer: layer as Layer.Layer<any, never, any>,
+  })
+
+/**
+ * Convert a provided router to an HTTP layer.
+ *
+ * The router must have all dependencies provided via `Router.provide()`.
+ * Uses NDJSON serialization for streaming support.
+ *
+ * @example
+ * ```ts
+ * const httpLayer = router.pipe(
+ *   Router.provide(AppLive),
+ *   Router.toHttpHandler({ path: '/api/rpc' })
+ * )
+ * ```
+ *
+ * @since 0.5.0
+ * @category constructors
+ */
+export const toHttpHandler =
+  (options: ToHttpHandlerOptions = {}) =>
+  <Routes extends RouterRecord>(provided: ProvidedRouter<Routes>): Layer.Layer<never, never, any> => {
+    const path = options.path ?? "/rpc"
+
+    return RpcServer.layerHttpRouter({
+      group: provided.router.rpcGroup,
+      path,
+      protocol: "http",
+    }).pipe(Layer.provide(RpcSerialization.layerNdjson), Layer.provide(provided.layer))
+  }
+
+/**
+ * Check if a value is a ProvidedRouter.
+ *
+ * @since 0.5.0
+ * @category guards
+ */
+export const isProvidedRouter = (value: unknown): value is ProvidedRouter<any> =>
+  typeof value === "object" && value !== null && "_tag" in value && value._tag === "ProvidedRouter"
