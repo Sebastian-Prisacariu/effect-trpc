@@ -112,16 +112,19 @@ export function createRpcWebHandler<TRouter extends Router, R>(
           handlerEntries.push(...nestedHandlers)
         } else if (isProceduresGroup(entry)) {
           // Procedure group - convert handlers with accumulated middleware
+          // Use namespace for service tag (internal), key for user-visible tags
           const proceduresGroup = entry as ProceduresGroup<string, ProcedureRecord>
           const serviceTag = Context.GenericTag<ProceduresService<string, ProcedureRecord>>(
-            `@effect-trpc/${proceduresGroup.name}`,
+            `@effect-trpc/${proceduresGroup.namespace}`,
           )
 
           const service = yield* serviceTag
            
+          // Pass key (router key) for tag naming, pathPrefix for nesting
           const converted = convertHandlers(
             proceduresGroup,
             service.handlers,
+            key, // Router key determines user-visible tags
             pathPrefix,
             accumulatedMiddlewares,
           )

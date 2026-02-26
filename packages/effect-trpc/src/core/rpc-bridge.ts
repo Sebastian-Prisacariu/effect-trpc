@@ -55,10 +55,17 @@ export class RpcBridgeValidationError extends Data.TaggedError("RpcBridgeValidat
   readonly module: string
   readonly method: string
   readonly reason: string
-  readonly groupName?: string
+  /** Internal namespace for service identification */
+  readonly groupNamespace?: string
+  /** Router key that determines user-visible tags */
+  readonly routerKey?: string
 }> {
   override get message(): string {
-    const context = this.groupName ? ` (group: ${this.groupName})` : ""
+    const context = this.routerKey
+      ? ` (routerKey: ${this.routerKey}, namespace: ${this.groupNamespace})`
+      : this.groupNamespace
+        ? ` (namespace: ${this.groupNamespace})`
+        : ""
     return `[${this.module}.${this.method}]${context} ${this.reason}`
   }
 }
@@ -299,24 +306,33 @@ export const procedureToRpc = <Name extends string, P extends AnyProcedure>(
  * The returned RpcGroup preserves full type information from the procedures.
  * This enables type-safe handler implementations and proper R/E/A channel tracking.
  *
+ * **Tag Naming:**
+ *
+ * User-visible tags come from the `routerKey` parameter (from Router.make keys),
+ * not from the procedures group's internal namespace.
+ *
  * @param group - The procedures group to convert
- * @param pathPrefix - Optional path prefix for nested routers (e.g., "user.posts.")
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Optional path prefix for nested routers (e.g., "admin.")
  *
  * @throws RpcBridgeValidationError - If the group has no procedures (programmer error)
  */
 export const proceduresGroupToRpcGroup = <
-  Name extends string,
+  Namespace extends string,
+  RouterKey extends string,
   Procs extends ProcedureRecord,
   Prefix extends string = "",
 >(
-  group: ProceduresGroup<Name, Procs>,
+  group: ProceduresGroup<Namespace, Procs>,
+  routerKey: RouterKey,
   pathPrefix: Prefix = "" as Prefix,
-): RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>> => {
+): RpcGroup.RpcGroup<ProceduresToRpcs<RouterKey, Procs, Prefix>> => {
   // Convert each procedure to an Rpc with full path using functional map
   const rpcs = Object.entries(group.procedures).map(([key, def]) => {
-    // Full path: prefix + group name + procedure name
-    // e.g., "user." + "posts" + "." + "list" = "user.posts.list"
-    const fullName = `${pathPrefix}${group.name}.${key}`
+    // Full path: prefix + router key + procedure name
+    // e.g., "admin." + "users" + "." + "list" = "admin.users.list"
+    // Tags come from Router.make keys, not from group namespace
+    const fullName = `${pathPrefix}${routerKey}.${key}`
     return procedureToRpc(fullName, def)
   })
 
@@ -334,7 +350,8 @@ export const proceduresGroupToRpcGroup = <
       module: "RpcBridge",
       method: "proceduresGroupToRpcGroup",
       reason: "ProceduresGroup has no procedures",
-      groupName: group.name,
+      groupNamespace: group.namespace,
+      routerKey,
     })
   }
 
@@ -346,7 +363,7 @@ export const proceduresGroupToRpcGroup = <
   // but the runtime builds the array dynamically from Object.entries().
   // The assertion is sound because our type-level computation matches
   // exactly what RpcGroup.make produces from the procedure definitions.
-  return RpcGroup.make(...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<Name, Procs, Prefix>>))
+  return RpcGroup.make(...(rpcs as unknown as ReadonlyArray<ProceduresToRpcs<RouterKey, Procs, Prefix>>))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -609,16 +626,21 @@ function applyMiddleware<I, A, E, Ctx extends BaseContext, R>(
  * The context is automatically passed to handlers based on the middleware chain.
  * This enables compile-time type safety for middleware context.
  *
+ * **Tag Naming:**
+ * User-visible tags come from `routerKey` (Router.make keys), not from the group's namespace.
+ *
  * @param group - The procedures group
  * @param handlers - The handler implementations (v2 signature: `(ctx, input) => Effect`)
- * @param pathPrefix - Optional path prefix for nested routers (e.g., "user.posts.")
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Optional path prefix for nested routers (e.g., "admin.")
  * @param routerMiddlewares - Optional router-level middlewares to prepend to each procedure's chain
  *
  * @throws RpcBridgeValidationError - If a procedure is missing its handler implementation
  */
-export const convertHandlers = <Name extends string, Procs extends ProcedureRecord>(
-  group: ProceduresGroup<Name, Procs>,
+export const convertHandlers = <Namespace extends string, Procs extends ProcedureRecord>(
+  group: ProceduresGroup<Namespace, Procs>,
   handlers: InferHandlers<Procs>,
+  routerKey: string,
   pathPrefix: string = "",
   routerMiddlewares: ReadonlyArray<AnyMiddleware> = [],
 ): Record<string, (payload: unknown, options: RpcHandlerOptions) => MiddlewareResult> => {
@@ -634,15 +656,17 @@ export const convertHandlers = <Name extends string, Procs extends ProcedureReco
       module: "RpcBridge",
       method: "convertHandlers",
       reason: `Missing handler implementation(s) for procedure(s): ${missingHandlers.join(", ")}`,
-      groupName: group.name,
+      groupNamespace: group.namespace,
+      routerKey,
     })
   }
 
   // Use reduce for functional pattern instead of imperative mutation
   return Object.keys(group.procedures).reduce(
     (rpcHandlers, key) => {
-      // Full path: prefix + group name + procedure name
-      const fullName = `${pathPrefix}${group.name}.${key}`
+      // Full path: prefix + router key + procedure name
+      // Tags come from Router.make keys, not from group namespace
+      const fullName = `${pathPrefix}${routerKey}.${key}`
       const procedureDef = group.procedures[key] as ProcedureDefinition
       // Get the user handler - signature: (ctx, input) => Effect
       // Cast through unknown because InferHandlers allows any R in handler return types
@@ -749,20 +773,32 @@ export type GroupHandlers<
  * - Handler requirements → Layer requirements
  * - Middleware requirements → Layer requirements
  * - Middleware provides → Excluded from Layer requirements
+ *
+ * **Tag Naming:**
+ *
+ * For the full Router flow, tags come from Router.make keys. This function
+ * is for advanced usage where you want to use RPC components directly.
+ * If `routerKey` is not provided, it defaults to the group's namespace.
+ *
+ * @param group - The procedures group
+ * @param routerKey - Optional key for tag naming (defaults to group namespace)
  */
-export const createRpcComponents = <Name extends string, Procs extends ProcedureRecord>(
-  group: ProceduresGroup<Name, Procs>,
+export const createRpcComponents = <Namespace extends string, RouterKey extends string, Procs extends ProcedureRecord>(
+  group: ProceduresGroup<Namespace, Procs>,
+  routerKey?: RouterKey,
 ): {
-  rpcGroup: RpcGroup.RpcGroup<GroupRpcs<Name, Procs>>
+  rpcGroup: RpcGroup.RpcGroup<GroupRpcs<RouterKey, Procs>>
   createHandlersLayer: <Handlers extends InferHandlers<Procs>, REffect = never>(
     handlersOrEffect: Handlers | Effect.Effect<Handlers, never, REffect>,
   ) => Layer.Layer<
-    RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
+    RpcGroup.Rpcs<GroupRpcs<RouterKey, Procs>>,
     never,
     REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
   >
 } => {
-  const rpcGroup = proceduresGroupToRpcGroup(group)
+  // Use routerKey if provided, otherwise fall back to group namespace
+  const effectiveRouterKey = (routerKey ?? group.namespace) as RouterKey
+  const rpcGroup = proceduresGroupToRpcGroup(group, effectiveRouterKey)
 
   return {
     rpcGroup,
@@ -779,12 +815,12 @@ export const createRpcComponents = <Name extends string, Procs extends Procedure
       // The runtime conversion is correct; we use unknown as an intermediate step
       // to bridge between our handler format and @effect/rpc's HandlersFrom format
       const adaptedHandlers = Effect.map(handlersEffect, (handlers) =>
-        convertHandlers(group, handlers),
-      ) as unknown as Effect.Effect<GroupHandlers<Name, Procs>, never, REffect>
+        convertHandlers(group, handlers, effectiveRouterKey),
+      ) as unknown as Effect.Effect<GroupHandlers<RouterKey, Procs>, never, REffect>
 
       // Create the layer - the type flows through from the RpcGroup
       return rpcGroup.toLayer(adaptedHandlers) as Layer.Layer<
-        RpcGroup.Rpcs<GroupRpcs<Name, Procs>>,
+        RpcGroup.Rpcs<GroupRpcs<RouterKey, Procs>>,
         never,
         REffect | EffectiveHandlerRequirements<Handlers, Procs> | ProceduresMiddlewareR<Procs>
       >

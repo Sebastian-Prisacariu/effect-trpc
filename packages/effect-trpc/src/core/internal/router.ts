@@ -129,27 +129,37 @@ export type RouterRecord = {
  * Recursively extract all procedure definitions from a router record.
  * Returns a flattened record with full path keys.
  *
+ * **Tag Naming:**
+ * Tags are derived from the router key (`K`), not from the procedures group's namespace.
+ * This ensures tags match the Router.make() structure.
+ *
  * @since 0.1.0
  * @category type-level
  */
 export type ExtractProcedures<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractProcedures<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? { [PK in keyof Procs as `${Prefix}${Name}.${PK & string}`]: Procs[PK] }
+    : Routes[K] extends ProceduresGroup<infer _Namespace, infer Procs>
+      // Use K (router key) for tag naming, not _Namespace (internal)
+      ? { [PK in keyof Procs as `${Prefix}${K & string}.${PK & string}`]: Procs[PK] }
       : never
 }[keyof Routes]
 
 /**
  * Recursively extract all RpcGroup types from a router record.
  * Returns a union of RpcGroup types.
+ *
+ * **Tag Naming:**
+ * Tags are derived from the router key (`K`), not from the procedures group's namespace.
+ *
  * @internal
  */
 export type ExtractRpcGroups<Routes extends RouterRecord, Prefix extends string = ""> = {
   [K in keyof Routes]: Routes[K] extends Router<infer R>
     ? ExtractRpcGroups<R, `${Prefix}${K & string}.`>
-    : Routes[K] extends ProceduresGroup<infer Name, infer Procs>
-      ? RpcGroup.RpcGroup<ProceduresToRpcs<Name, Procs, Prefix>>
+    : Routes[K] extends ProceduresGroup<infer _Namespace, infer Procs>
+      // Use K (router key) for RpcGroup type, not _Namespace (internal)
+      ? RpcGroup.RpcGroup<ProceduresToRpcs<K & string, Procs, Prefix>>
       : never
 }[keyof Routes]
 
@@ -468,13 +478,18 @@ function unsafeAssertProcedureDefinition(procValue: unknown): ProcedureDefinitio
  * This matches Effect's pattern in RpcGroup.toHandlersContext where handlers
  * are stored in Map<string, unknown> but retrieved with proper types.
  *
+ * @param group - The procedures group
+ * @param routerKey - The key from Router.make() that determines user-visible tags
+ * @param pathPrefix - Prefix from nested routers (e.g., "admin." for admin.users.list)
+ *
  * @internal
  */
 function unsafeWidenRpcGroup(
   group: AnyProceduresGroup,
+  routerKey: string,
   pathPrefix: string,
 ): RpcGroup.RpcGroup<AnyRpc> {
-  return proceduresGroupToRpcGroup(group, pathPrefix) as unknown as RpcGroup.RpcGroup<AnyRpc>
+  return proceduresGroupToRpcGroup(group, routerKey, pathPrefix) as unknown as RpcGroup.RpcGroup<AnyRpc>
 }
 
 /**
@@ -544,6 +559,7 @@ function flattenRoutes<Routes extends RouterRecord>(
       } else if (isProceduresGroup(entry)) {
         // Procedure group - flatten procedures with full path
         // Use Record.reduce for inner iteration too
+        // Tags come from router keys (key), not from group namespace
         Record.reduce(
           entry.procedures as globalThis.Record<string, unknown>,
           undefined as void,
@@ -552,7 +568,8 @@ function flattenRoutes<Routes extends RouterRecord>(
             acc.procedures[fullPath] = unsafeAssertProcedureDefinition(procValue)
           },
         )
-        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, pathPrefix))
+        // Pass the router key for tag naming
+        acc.rpcGroups.push(unsafeWidenRpcGroup(entry, key, pathPrefix))
       }
       return acc
     },

@@ -45,7 +45,11 @@ export type {
   UnsubscribeReason,
 } from "./procedures.js"
 
-export { procedures, UnsubscribeReason as UnsubscribeReasonCtor } from "./procedures.js"
+export {
+  Procedures,
+  procedures, // Deprecated - use Procedures.make()
+  UnsubscribeReason as UnsubscribeReasonCtor,
+} from "./procedures.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Router

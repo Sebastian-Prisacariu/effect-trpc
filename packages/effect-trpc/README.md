@@ -47,7 +47,7 @@ pnpm add effect-trpc effect @effect/rpc @effect/platform @effect/schema
 
 ```typescript
 // src/server/procedures/user.ts
-import { procedures, procedure } from 'effect-trpc'
+import { Procedures, procedure } from 'effect-trpc'
 import * as Schema from 'effect/Schema'
 import * as Effect from 'effect/Effect'
 
@@ -64,7 +64,9 @@ const CreateUserSchema = Schema.Struct({
 })
 
 // Define procedures
-export const UserProcedures = procedures('user', {
+// The first argument is the internal namespace (for service identification)
+// User-visible tags come from Router.make keys (see step 2)
+export const UserProcedures = Procedures.make('user', {
   list: procedure
     .output(Schema.Array(UserSchema))
     .query(),
@@ -77,21 +79,22 @@ export const UserProcedures = procedures('user', {
   create: procedure
     .input(CreateUserSchema)
     .output(UserSchema)
-    .invalidates(['user.list'])  // Automatic cache invalidation
+    .invalidates(['users.list'])  // Tags match Router.make keys
     .mutation(),
 })
 
 // Implement handlers
+// Handlers receive (ctx, input) - ctx contains BaseContext + middleware additions
 export const UserProceduresLive = UserProcedures.toLayer({
-  list: () => 
+  list: (_ctx, _input) => 
     Effect.succeed([
       { id: '1', name: 'Alice', email: 'alice@example.com' }
     ]),
     
-  byId: ({ id }) => 
+  byId: (_ctx, { id }) => 
     Effect.succeed({ id, name: 'Test User', email: 'test@example.com' }),
     
-  create: ({ name, email }) =>
+  create: (_ctx, { name, email }) =>
     Effect.succeed({ id: crypto.randomUUID(), name, email }),
 })
 ```
@@ -104,9 +107,12 @@ import { Router } from 'effect-trpc'
 import { UserProcedures, UserProceduresLive } from './procedures/user'
 import { PostProcedures, PostProceduresLive } from './procedures/post'
 
+// Router keys determine user-visible tags:
+// - "users" key → tags: "users.list", "users.byId", "users.create"
+// - "posts" key → tags: "posts.list", "posts.byId", etc.
 export const appRouter = Router.make({
-  user: UserProcedures,
-  post: PostProcedures,
+  users: UserProcedures,  // Not "user" - the key IS the tag prefix
+  posts: PostProcedures,
 })
 
 // Export type for client
@@ -206,7 +212,7 @@ export function UserList() {
 For data fetching. Cached by default.
 
 ```typescript
-const UserProcedures = procedures('user', {
+const UserProcedures = Procedures.make('user', {
   list: procedure
     .output(Schema.Array(UserSchema))
     .query(),
@@ -217,9 +223,9 @@ const UserProcedures = procedures('user', {
     .query(),
 })
 
-// Client usage
-const users = api.user.list.useQuery()
-const user = api.user.byId.useQuery({ id: '123' })
+// Client usage (tags come from Router.make keys)
+const users = api.users.list.useQuery()
+const user = api.users.byId.useQuery({ id: '123' })
 ```
 
 ### Mutation
@@ -227,11 +233,11 @@ const user = api.user.byId.useQuery({ id: '123' })
 For data modifications. Not cached.
 
 ```typescript
-const UserProcedures = procedures('user', {
+const UserProcedures = Procedures.make('user', {
   create: procedure
     .input(CreateUserSchema)
     .output(UserSchema)
-    .invalidates(['user.list'])
+    .invalidates(['users.list'])  // Tag matches Router.make key
     .mutation(),
     
   delete: procedure
@@ -578,74 +584,124 @@ chat.isStreaming // Whether currently streaming
 
 Add cross-cutting concerns like authentication, logging, and rate limiting.
 
-### Creating Middleware
+### Middleware Builder Pattern
+
+Middleware uses a builder pattern that separates **definition** (interface) from **implementation** (layer):
 
 ```typescript
 import { Middleware } from 'effect-trpc'
-import type { BaseContext, AuthenticatedContext } from 'effect-trpc'
+import * as Schema from 'effect/Schema'
 
-const authMiddleware = Middleware.make<BaseContext, AuthenticatedContext<User>, AuthError, never>(
-  'auth',
-  (ctx, next) =>
-    Effect.gen(function* () {
-      const token = ctx.headers.get('authorization')
-      if (!token) {
-        return yield* Effect.fail(new AuthError({
-          procedure: ctx.procedure,
-          reason: 'No authorization header',
-        }))
-      }
+// 1. DEFINE the middleware interface
+const AuthMiddleware = Middleware("Auth")
+  .error(AuthError)  // Errors it can produce (must extend Schema.TaggedError)
+  .provides<{ user: User }>()  // What it adds to handler context
 
-      const user = yield* verifyToken(token.replace('Bearer ', ''))
-      
-      // Call next with enhanced context
-      return yield* next({ ...ctx, user })
-    })
+// 2. IMPLEMENT the middleware
+const AuthMiddlewareLive = AuthMiddleware.toLayer((ctx, _input) =>
+  Effect.gen(function* () {
+    const token = ctx.headers.get('authorization')
+    if (!token) {
+      yield* new AuthError({ reason: 'No authorization header' })
+    }
+
+    const user = yield* verifyToken(token.replace('Bearer ', ''))
+    
+    // Return FULL context (spread ctx + additions)
+    return { ...ctx, user }
+  })
 )
 ```
 
-### Applying to Procedures
+### Middleware with Input Requirements
+
+Middleware can require specific input fields:
 
 ```typescript
-const UserProcedures = procedures('user', {
+// Middleware that needs organizationSlug in the input
+const OrgMiddleware = Middleware("Org")
+  .input(Schema.Struct({ organizationSlug: Schema.String }))
+  .error(NotOrgMember)
+  .provides<{ orgMembership: OrgMembership }>()
+
+const OrgMiddlewareLive = OrgMiddleware.toLayer((ctx, input) =>
+  Effect.gen(function* () {
+    // input.organizationSlug is typed!
+    const membership = yield* OrgMembershipService.load(
+      ctx.userId,
+      input.organizationSlug
+    )
+    
+    if (!membership) {
+      yield* new NotOrgMember({ organizationSlug: input.organizationSlug })
+    }
+    
+    return { ...ctx, orgMembership: membership }
+  })
+)
+```
+
+When applied to a procedure, the middleware's input requirements are **merged** with the procedure's input:
+
+```typescript
+const updateFile = procedure
+  .input(Schema.Struct({ fileId: FileId, name: Schema.String }))
+  .use(OrgMiddleware)  // Adds organizationSlug to required input
+  .mutation()
+
+// Client must provide BOTH:
+// { fileId: "...", name: "...", organizationSlug: "..." }
+```
+
+### Applying Middleware to Procedures
+
+```typescript
+const UserProcedures = Procedures.make('user', {
   // Public endpoint
   byId: procedure
     .input(IdSchema)
     .output(UserSchema)
     .query(),
 
-  // Protected endpoint
+  // Protected endpoint - requires authentication
   update: procedure
-    .use(authMiddleware)
+    .use(AuthMiddleware)
     .input(UpdateUserSchema)
     .output(UserSchema)
     .mutation(),
 
   // Multiple middleware (executed in order)
   delete: procedure
-    .use(authMiddleware)
-    .use(requirePermission('user:delete'))
+    .use(AuthMiddleware)
+    .use(RequirePermissionMiddleware)
     .input(IdSchema)
     .mutation(),
 })
 ```
 
-### Built-in Middleware
+### Built-in Middleware Definitions
 
 ```typescript
 import {
-  loggingMiddleware,    // Logs request/response
-  timingMiddleware,     // Adds timing info to context
-  rateLimitMiddleware,  // Rate limiting
-  authMiddleware,       // Token verification
-  requirePermission,    // Permission checking
+  // Middleware definitions (interfaces)
+  LoggingMiddleware,
+  TimingMiddleware,
+  AuthMiddleware,
+  RequirePermissionMiddleware,
+  RateLimitMiddleware,
+  
+  // Pre-built implementations (layers)
+  LoggingMiddlewareLive,
+  TimingMiddlewareLive,
+  createAuthMiddlewareLive,
+  createRequirePermissionMiddlewareLive,
+  createRateLimitMiddlewareLive,
 } from 'effect-trpc'
 
-// Rate limiting
-const rateLimit = rateLimitMiddleware({
+// Use pre-built layers or create custom implementations
+const rateLimitLayer = createRateLimitMiddlewareLive({
   maxRequests: 100,
-  windowMs: 60_000,  // 1 minute
-  keyFn: (ctx) => ctx.headers.get('x-forwarded-for') ?? 'anonymous',
+  windowMs: 60_000,
 })
 ```
 
@@ -653,16 +709,14 @@ const rateLimit = rateLimitMiddleware({
 
 ```typescript
 interface BaseContext {
-  procedure: string      // Full procedure path, e.g., "user.create"
+  procedure: string      // Full procedure path, e.g., "users.create"
   headers: Headers       // Standard web Headers
   signal: AbortSignal    // Aborted on Effect fiber interruption
   clientId: number       // Unique client ID from @effect/rpc
 }
 
-// Middleware can extend the context
-interface AuthenticatedContext<TUser> extends BaseContext {
-  user: TUser
-}
+// Middleware extends the context by returning { ...ctx, additions }
+// The context type is automatically tracked through the middleware chain
 ```
 
 ## Error Handling

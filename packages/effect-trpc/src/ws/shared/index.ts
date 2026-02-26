@@ -201,8 +201,9 @@ export const extractSubscriptionHandlersFromLayer = <TRouter extends Router>(
       const proceduresGroup = group as ProceduresGroup<string, ProcedureRecord>
 
       // Get the ProceduresService for this group
+      // Use namespace for internal service identification
       const serviceTag = Context.GenericTag<ProceduresService<string, ProcedureRecord>>(
-        `@effect-trpc/${proceduresGroup.name}`,
+        `@effect-trpc/${proceduresGroup.namespace}`,
       )
 
       // Try to get the service - use serviceOption to handle missing service
