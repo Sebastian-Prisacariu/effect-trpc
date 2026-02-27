@@ -53,24 +53,27 @@ import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Ref from "effect/Ref"
 import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-    AuthResultMessage,
-    ErrorMessage,
-    PongMessage,
-    SubscribedMessage,
-    type FromServerMessage,
+  AuthResultMessage,
+  ErrorMessage,
+  PongMessage,
+  SubscribedMessage,
+  type FromServerMessage,
 } from "../ws/protocol.js"
-import { makeAdapterRuntimeState, type ConnectionAdmission } from "../ws/shared/adapter-runtime-state.js"
 import {
-    ConnectionRegistry,
-    createWebSocketLayerWithHandlers,
-    extractSubscriptionHandlersFromLayer,
-    registerHandlers,
-    SubscriptionManager,
-    WebSocketAuth,
-    WebSocketCodec,
-    type AuthResult,
-    type Connection,
-    type WebSocketAuthHandler,
+  makeAdapterRuntimeState,
+  type ConnectionAdmission,
+} from "../ws/shared/adapter-runtime-state.js"
+import {
+  ConnectionRegistry,
+  createWebSocketLayerWithHandlers,
+  extractSubscriptionHandlersFromLayer,
+  registerHandlers,
+  SubscriptionManager,
+  WebSocketAuth,
+  WebSocketCodec,
+  type AuthResult,
+  type Connection,
+  type WebSocketAuthHandler,
 } from "../ws/shared/index.js"
 import type { ClientId, SubscriptionId } from "../ws/types.js"
 
@@ -304,10 +307,7 @@ export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>
     attachTrackedFiber(fiber)
   }
 
-  const rejectConnection = (
-    ws: BunWebSocket<WebSocketData>,
-    admission: ConnectionAdmission,
-  ) => {
+  const rejectConnection = (ws: BunWebSocket<WebSocketData>, admission: ConnectionAdmission) => {
     switch (admission._tag) {
       case "ShuttingDown":
         ws.close(1001, "Server shutting down")
@@ -585,7 +585,9 @@ export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>
         const wasCleaningUp = yield* Ref.getAndSet(ws.data.cleanupGuard, true)
         if (wasCleaningUp) {
           // Already cleaning up - skip to prevent double cleanup
-          yield* Effect.logDebug("Skipping cleanup: already in progress", { clientId: ws.data.clientId })
+          yield* Effect.logDebug("Skipping cleanup: already in progress", {
+            clientId: ws.data.clientId,
+          })
           return
         }
       }

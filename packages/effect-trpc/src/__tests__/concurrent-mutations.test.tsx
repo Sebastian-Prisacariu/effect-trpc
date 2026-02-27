@@ -25,7 +25,7 @@ import type { AddressInfo } from "node:net"
 import * as React from "react"
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { procedure, procedures, Router } from "../index.js"
+import { procedure, procedures, Procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
 import { createTRPCReact } from "../react/create-client.js"
 
@@ -77,15 +77,9 @@ class MutationError extends Schema.TaggedError<MutationError>()("MutationError",
 const CounterProcedures = procedures("counter", {
   get: procedure.output(CounterSchema).query(),
 
-  increment: procedure
-    .input(IncrementInputSchema)
-    .output(CounterSchema)
-    .mutation(),
+  increment: procedure.input(IncrementInputSchema).output(CounterSchema).mutation(),
 
-  incrementSlow: procedure
-    .input(IncrementInputSchema)
-    .output(CounterSchema)
-    .mutation(),
+  incrementSlow: procedure.input(IncrementInputSchema).output(CounterSchema).mutation(),
 
   incrementFail: procedure
     .input(IncrementInputSchema)
@@ -97,10 +91,7 @@ const CounterProcedures = procedures("counter", {
 const ItemProcedures = procedures("item", {
   list: procedure.output(Schema.Array(ItemSchema)).query(),
 
-  create: procedure
-    .input(CreateItemInputSchema)
-    .output(ItemSchema)
-    .mutation(),
+  create: procedure.input(CreateItemInputSchema).output(ItemSchema).mutation(),
 
   delete: procedure
     .input(DeleteItemInputSchema)
@@ -124,7 +115,7 @@ const appRouter = Router.make({
   item: ItemProcedures,
 })
 
-type AppRouter = typeof appRouter
+type AppRouter = Effect.Effect.Success<typeof appRouter>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Fixtures - Mock Implementation
@@ -138,7 +129,7 @@ let nextItemId = 1
 // Delay helper for slow mutations
 const delay = (ms: number) => Effect.sleep(`${ms} millis`)
 
-const CounterHandlersLive = CounterProcedures.toLayer({
+const CounterHandlersLive = Procedures.toLayer(CounterProcedures, {
   get: (_ctx) => Effect.succeed(counterStore),
 
   increment: (_ctx, input) =>
@@ -164,7 +155,7 @@ const CounterHandlersLive = CounterProcedures.toLayer({
     Effect.gen(function* () {
       yield* delay(50)
       if (input.caller === "fail") {
-        return yield* Effect.fail(new MutationError({ message: `Mutation failed for ${input.caller}` }))
+        return yield* new MutationError({ message: `Mutation failed for ${input.caller}` })
       }
       counterStore = {
         value: counterStore.value + input.amount,
@@ -174,7 +165,7 @@ const CounterHandlersLive = CounterProcedures.toLayer({
     }),
 })
 
-const ItemHandlersLive = ItemProcedures.toLayer({
+const ItemHandlersLive = Procedures.toLayer(ItemProcedures, {
   list: (_ctx) => Effect.succeed(itemStore),
 
   create: (_ctx, input) =>
@@ -200,7 +191,7 @@ const ItemHandlersLive = ItemProcedures.toLayer({
   deleteFail: (_ctx, input) =>
     Effect.gen(function* () {
       yield* delay(50)
-      return yield* Effect.fail(new MutationError({ message: `Delete failed for ${input.id}` }))
+      return yield* new MutationError({ message: `Delete failed for ${input.id}` })
     }),
 })
 
@@ -273,7 +264,7 @@ describe("Concurrent Mutations", () => {
   // Helper to create a fresh client and wrapper for each test
   // This ensures complete isolation between tests
   const createClientAndWrapper = () => {
-    const trpc = createTRPCReact<AppRouter>({ 
+    const trpc = createTRPCReact<AppRouter>({
       url: serverUrl,
       httpClient: NodeHttpClient.layer,
     })
@@ -308,7 +299,7 @@ describe("Concurrent Mutations", () => {
           const promise1 = result.current.mutation1.mutateAsync({ amount: 1, caller: "caller1" })
           const promise2 = result.current.mutation2.mutateAsync({ amount: 2, caller: "caller2" })
           const [exit1, exit2] = await Promise.all([promise1, promise2])
-          
+
           expect(Exit.isSuccess(exit1)).toBe(true)
           expect(Exit.isSuccess(exit2)).toBe(true)
         })
@@ -324,18 +315,15 @@ describe("Concurrent Mutations", () => {
       const { trpc, wrapper, dispose } = createClientAndWrapper()
 
       try {
-        const { result } = renderHook(
-          () => trpc.procedures.counter.increment.useMutation(),
-          { wrapper },
-        )
+        const { result } = renderHook(() => trpc.procedures.counter.increment.useMutation(), {
+          wrapper,
+        })
 
         // Fire multiple mutations rapidly and await all
         await act(async () => {
           const promises: Promise<Exit.Exit<Counter, unknown>>[] = []
           for (let i = 1; i <= 5; i++) {
-            promises.push(
-              result.current.mutateAsync({ amount: 1, caller: `caller${i}` }),
-            )
+            promises.push(result.current.mutateAsync({ amount: 1, caller: `caller${i}` }))
           }
 
           const exits = await Promise.all(promises)
@@ -377,7 +365,7 @@ describe("Concurrent Mutations", () => {
         // Start mutations within act
         let promise1: Promise<Exit.Exit<Counter, unknown>> | undefined
         let promise2: Promise<Exit.Exit<Counter, unknown>> | undefined
-        
+
         // Start mutation1
         act(() => {
           promise1 = result.current.mutation1.mutateAsync({ amount: 1, caller: "slow1" })
@@ -855,18 +843,15 @@ describe("Concurrent Mutations", () => {
       const { trpc, wrapper, dispose } = createClientAndWrapper()
 
       try {
-        const { result } = renderHook(
-          () => trpc.procedures.counter.increment.useMutation(),
-          { wrapper },
-        )
+        const { result } = renderHook(() => trpc.procedures.counter.increment.useMutation(), {
+          wrapper,
+        })
 
         // Fire 10 mutations as fast as possible
         await act(async () => {
           const promises: Promise<Exit.Exit<Counter, unknown>>[] = []
           for (let i = 0; i < 10; i++) {
-            promises.push(
-              result.current.mutateAsync({ amount: 1, caller: `rapid${i}` }),
-            )
+            promises.push(result.current.mutateAsync({ amount: 1, caller: `rapid${i}` }))
           }
 
           const exits = await Promise.all(promises)

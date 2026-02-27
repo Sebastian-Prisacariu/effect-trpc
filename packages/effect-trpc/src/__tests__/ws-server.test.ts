@@ -145,7 +145,7 @@ describe("WebSocketAuth", () => {
         Effect.gen(function* () {
           const user = validTokens.get(token)
           if (!user) {
-            return yield* Effect.fail(new WebSocketAuthError({ reason: "InvalidToken" }))
+            return yield* new WebSocketAuthError({ reason: "InvalidToken" })
           }
           return { userId: user.userId, permissions: user.permissions }
         }),

@@ -165,42 +165,42 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
   Effect.gen(function* () {
     // Check for empty path
     if (!path || path.length === 0) {
-      return yield* Effect.fail(new InvalidPathError({
+      return yield* new InvalidPathError({
         path,
         reason: "Path cannot be empty"
-      }))
+      })
     }
 
     // Check path length
     if (path.length > MAX_PATH_LENGTH) {
-      return yield* Effect.fail(new InvalidPathError({
+      return yield* new InvalidPathError({
         path,
         reason: `Path too long (max ${MAX_PATH_LENGTH} characters)`
-      }))
+      })
     }
 
     // Check for leading/trailing dots (slashes in path notation)
     if (path.startsWith(".") || path.endsWith(".")) {
-      return yield* Effect.fail(new InvalidPathError({
+      return yield* new InvalidPathError({
         path,
         reason: "Path cannot have leading or trailing dots"
-      }))
+      })
     }
 
     // Check for consecutive dots (empty segments)
     if (path.includes("..")) {
-      return yield* Effect.fail(new InvalidPathError({
+      return yield* new InvalidPathError({
         path,
         reason: "Path cannot have consecutive dots (empty segments)"
-      }))
+      })
     }
 
     // Check format with regex
     if (!PATH_REGEX.test(path)) {
-      return yield* Effect.fail(new InvalidPathError({
+      return yield* new InvalidPathError({
         path,
         reason: "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter."
-      }))
+      })
     }
 
     return path
@@ -546,14 +546,12 @@ const makeSubscriptionManager = Effect.gen(function* () {
           .filter((s) => s.clientId === clientId).length
 
         if (clientSubCount >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
-          return yield* Effect.fail(
-            new SubscriptionError({
-              subscriptionId,
-              path: validatedPath,
-              reason: "Unauthorized",
-              description: `Maximum subscriptions per client (${MAX_SUBSCRIPTIONS_PER_CLIENT}) exceeded`,
-            }),
-          )
+          return yield* new SubscriptionError({
+            subscriptionId,
+            path: validatedPath,
+            reason: "Unauthorized",
+            description: `Maximum subscriptions per client (${MAX_SUBSCRIPTIONS_PER_CLIENT}) exceeded`,
+          })
         }
 
         // Get handler - validates that the procedure exists
@@ -561,14 +559,12 @@ const makeSubscriptionManager = Effect.gen(function* () {
         const handler = HashMap.get(handlerMap, validatedPath)
 
         if (Option.isNone(handler)) {
-          return yield* Effect.fail(
-            new SubscriptionError({
-              subscriptionId,
-              path: validatedPath,
-              reason: "NotFound",
-              description: `No handler registered for path: ${validatedPath}`,
-            }),
-          )
+          return yield* new SubscriptionError({
+            subscriptionId,
+            path: validatedPath,
+            reason: "NotFound",
+            description: `No handler registered for path: ${validatedPath}`,
+          })
         }
 
         // Get connection
@@ -690,15 +686,11 @@ const makeSubscriptionManager = Effect.gen(function* () {
         const sub = HashMap.get(map, subscriptionId)
 
         if (Option.isNone(sub)) {
-          return yield* Effect.fail(
-            new SubscriptionNotFoundError({ subscriptionId }),
-          )
+          return yield* new SubscriptionNotFoundError({ subscriptionId })
         }
 
         if (sub.value.clientId !== clientId) {
-          return yield* Effect.fail(
-            new SubscriptionNotFoundError({ subscriptionId, clientId }),
-          )
+          return yield* new SubscriptionNotFoundError({ subscriptionId, clientId })
         }
 
         // Get current queue size for backpressure monitoring
@@ -774,9 +766,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
         const sub = HashMap.get(map, subscriptionId)
 
         if (Option.isNone(sub)) {
-          return yield* Effect.fail(
-            new SubscriptionNotFoundError({ subscriptionId }),
-          )
+          return yield* new SubscriptionNotFoundError({ subscriptionId })
         }
 
         return sub.value

@@ -35,12 +35,12 @@ import * as Layer from "effect/Layer"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-    type CorsOptions,
-    type SecurityHeadersOptions,
-    addSecurityHeaders,
-    buildCorsHeaders,
-    buildSecurityHeaders,
-    createRpcWebHandler,
+  type CorsOptions,
+  type SecurityHeadersOptions,
+  addSecurityHeaders,
+  buildCorsHeaders,
+  buildSecurityHeaders,
+  createRpcWebHandler,
 } from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +64,9 @@ export class PayloadTooLargeError extends Error {
   readonly receivedSize: number
 
   constructor(options: { maxSize: number; receivedSize: number }) {
-    super(`Request body too large: received ${options.receivedSize} bytes, max ${options.maxSize} bytes`)
+    super(
+      `Request body too large: received ${options.receivedSize} bytes, max ${options.maxSize} bytes`,
+    )
     this.name = "PayloadTooLargeError"
     this.maxSize = options.maxSize
     this.receivedSize = options.receivedSize
@@ -86,19 +88,22 @@ export interface NodeToWebRequestOptions {
 }
 
 export interface CreateHandlerOptions<
-  TRouter extends RouterShape<RouterRecord>,
+  Routes extends RouterRecord,
   HandlersOut,
-  R,
+  HandlersR,
+  RouterR,
 > {
   /**
-   * The router instance.
+   * The router wrapped in an Effect.
+   * Requirements are tracked via Effect's R channel.
    */
-  readonly router: TRouter
+  readonly router: Effect.Effect<RouterShape<Routes>, never, RouterR>
 
   /**
-   * The layer providing all procedure implementations.
+   * The layer providing all procedure AND middleware implementations.
+   * Must satisfy all requirements from the router.
    */
-  readonly handlers: Layer.Layer<HandlersOut, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, HandlersR>
 
   /**
    * Path for the RPC endpoint.
@@ -189,15 +194,28 @@ export interface FetchHandler {
  * })
  * ```
  */
-export function createHandler<
-  TRouter extends RouterShape<RouterRecord>,
-  HandlersOut,
-  R,
->(
-  options: CreateHandlerOptions<TRouter, HandlersOut, R>,
+/**
+ * Extract a value from an Effect synchronously.
+ * Safe because our definitions always use Effect.succeed internally.
+ */
+function extractFromEffect<T>(effect: Effect.Effect<T, never, any>): T {
+  let extracted: T | undefined
+  Effect.runSync(
+    Effect.map(effect as Effect.Effect<T, never, never>, (val) => {
+      extracted = val
+    }),
+  )
+  if (extracted === undefined) {
+    throw new Error("Failed to extract router from Effect")
+  }
+  return extracted
+}
+
+export function createHandler<Routes extends RouterRecord, HandlersOut, HandlersR, RouterR>(
+  options: CreateHandlerOptions<Routes, HandlersOut, HandlersR, RouterR>,
 ): FetchHandler {
   const {
-    router,
+    router: routerEffect,
     handlers,
     path = "/rpc",
     disableTracing,
@@ -206,6 +224,9 @@ export function createHandler<
     securityHeaders: securityHeadersOption = true,
   } = options
 
+  // Extract the router from the Effect
+  const router = extractFromEffect(routerEffect)
+
   const handlersWithNodeRuntime = handlers.pipe(
     Layer.provide(NodeHttpPlatform.layer),
     Layer.provide(NodeContext.layer),
@@ -213,7 +234,7 @@ export function createHandler<
 
   // Create the web handler using shared utility
   const webHandler = createRpcWebHandler({
-    router,
+    router: router as RouterShape<RouterRecord>,
     handlers: handlersWithNodeRuntime,
     disableTracing,
     spanPrefix,
@@ -241,11 +262,9 @@ export function createHandler<
       // Check path - must be exact match or have path separator after
       // This prevents "/rpc-admin" from matching when path is "/rpc"
       const pathname = url.pathname
-      const pathMatches = 
-        pathname === path || 
-        pathname.startsWith(path + "/") ||
-        pathname.startsWith(path + "?")
-      
+      const pathMatches =
+        pathname === path || pathname.startsWith(path + "/") || pathname.startsWith(path + "?")
+
       if (!pathMatches) {
         const notFoundHeaders = new Headers()
         if (securityHeaders) {
@@ -475,10 +494,7 @@ export const webToNodeResponseEffect = (
  * })
  * ```
  */
-export function webToNodeResponse(
-  response: Response,
-  res: ServerResponse,
-): Promise<void> {
+export function webToNodeResponse(response: Response, res: ServerResponse): Promise<void> {
   // Effect.runPromise is appropriate here - this is a bridge function
   // that converts from Effect-land to Promise-land for Node.js HTTP APIs
   return Effect.runPromise(webToNodeResponseEffect(response, res))

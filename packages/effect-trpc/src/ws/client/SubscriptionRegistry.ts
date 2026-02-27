@@ -435,7 +435,7 @@ const makeSubscriptionRegistry = Effect.gen(function* () {
         const sub = HashMap.get(map, id)
 
         if (Option.isNone(sub)) {
-          return yield* Effect.fail(new SubscriptionNotFoundError({ subscriptionId: id }))
+          return yield* new SubscriptionNotFoundError({ subscriptionId: id })
         }
 
         return sub.value

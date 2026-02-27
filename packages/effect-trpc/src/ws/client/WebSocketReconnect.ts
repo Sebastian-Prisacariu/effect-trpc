@@ -157,13 +157,11 @@ const makeWebSocketReconnect = (
               mergedConfig.maxAttempts !== undefined &&
               attempt > mergedConfig.maxAttempts
             ) {
-              return yield* Effect.fail(
-                new WebSocketConnectionError({
-                  url: "unknown",
-                  reason: "MaxAttemptsReached",
-                  description: `Max reconnection attempts (${mergedConfig.maxAttempts}) reached`,
-                }),
-              )
+              return yield* new WebSocketConnectionError({
+                url: "unknown",
+                reason: "MaxAttemptsReached",
+                description: `Max reconnection attempts (${mergedConfig.maxAttempts}) reached`,
+              })
             }
 
             // Wait and reconnect

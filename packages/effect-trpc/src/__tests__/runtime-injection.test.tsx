@@ -20,12 +20,7 @@ import { Client } from "../core/client/index.js"
 import { procedure } from "../core/server/procedure.js"
 import { procedures } from "../core/server/procedures.js"
 import { Router } from "../core/server/router.js"
-import {
-  EffectTRPCProvider,
-  useRuntime,
-  useHasRuntime,
-  createTRPCHooks,
-} from "../react/index.js"
+import { EffectTRPCProvider, useRuntime, useHasRuntime, createTRPCHooks } from "../react/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Router
@@ -44,11 +39,14 @@ const userProcedures = procedures("user", {
     .query(),
 })
 
-const testRouter = Router.make({
+const testRouterEffect = Router.make({
   user: userProcedures,
 })
 
-type TestRouter = typeof testRouter
+type TestRouter = Effect.Effect.Success<typeof testRouterEffect>
+
+// Extract the router synchronously (Router.make returns Effect.succeed)
+const testRouter: TestRouter = Effect.runSync(testRouterEffect)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock Client Layer
@@ -67,7 +65,7 @@ const MockClientLive = Layer.succeed(Client, {
         byId: (input: { id: string }) =>
           Effect.succeed(mockUsers.find((u) => u.id === input.id) ?? mockUsers[0]),
       },
-    }) as unknown as ReturnType<typeof Client.Service["create"]>,
+    }) as unknown as ReturnType<(typeof Client.Service)["create"]>,
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,9 +156,7 @@ describe("Runtime Injection", () => {
 
       expect(() => {
         renderHook(() => null, {
-          wrapper: ({ children }) => (
-            <hooks.Provider>{children}</hooks.Provider>
-          ),
+          wrapper: ({ children }) => <hooks.Provider>{children}</hooks.Provider>,
         })
       }).toThrow("[effect-trpc] useRuntime must be used within an EffectTRPCProvider")
     })

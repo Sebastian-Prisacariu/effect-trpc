@@ -4,17 +4,9 @@ import * as Layer from "effect/Layer"
 import * as Match from "effect/Match"
 import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
-import type {
-  BaseContext,
-} from "../server/middleware.js"
-import type {
-  ProcedureRecord,
-  ProceduresGroup,
-} from "../server/procedures.js"
-import type {
-  ProcedureDefinition,
-  ProcedureType,
-} from "../server/procedure.js"
+import type { BaseContext } from "../server/middleware.js"
+import type { ProcedureRecord, ProceduresGroup } from "../server/procedures.js"
+import type { ProcedureDefinition, ProcedureType } from "../server/procedure.js"
 import type { RouterShape, RouterRecord } from "../server/router.js"
 import type { RpcError } from "../rpc/errors.js"
 import type { Stream } from "effect/Stream"
@@ -40,27 +32,74 @@ export interface SubscriptionProcedureClient<I, A, E> {
   (input: I): Stream<A, E | RpcError>
 }
 
+/**
+ * Client type for a procedure definition.
+ * Uses direct structural matching to work better across module boundaries.
+ */
 export type ProcedureClient<P> =
-  P extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx extends BaseContext, "query", infer _R, infer _Provides>
-  ? QueryProcedureClient<unknown extends I ? void : I, A, E>
-  : P extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx extends BaseContext, "mutation", infer _R, infer _Provides>
-  ? MutationProcedureClient<unknown extends I ? void : I, A, E>
-  : P extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx extends BaseContext, "stream" | "chat", infer _R, infer _Provides>
-  ? StreamProcedureClient<unknown extends I ? void : I, A, E>
-  : P extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx extends BaseContext, "subscription", infer _R, infer _Provides>
-  ? SubscriptionProcedureClient<unknown extends I ? void : I, A, E>
-  : never
+  // Try to unwrap Effect first
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx, infer Type>
+      ? CreateProcedureClient<I, A, E, Type>
+      : never
+    : // Direct ProcedureDefinition
+      P extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx, infer Type>
+      ? CreateProcedureClient<I, A, E, Type>
+      : never
 
+/**
+ * Helper to create the actual procedure client function type.
+ */
+type CreateProcedureClient<I, A, E, Type> = Type extends "query"
+  ? QueryProcedureClient<unknown extends I ? void : I, A, E>
+  : Type extends "mutation"
+    ? MutationProcedureClient<unknown extends I ? void : I, A, E>
+    : Type extends "stream" | "chat"
+      ? StreamProcedureClient<unknown extends I ? void : I, A, E>
+      : Type extends "subscription"
+        ? SubscriptionProcedureClient<unknown extends I ? void : I, A, E>
+        : never
+
+/**
+ * Helper type to resolve a single router entry.
+ *
+ * Pattern: Match Effect<T> first, then T directly, to handle both wrapped and unwrapped.
+ * Each branch uses a single-level conditional to help TypeScript evaluate correctly
+ * across module boundaries.
+ */
+type ResolveRouterEntry<Entry> =
+  // Check if it's an Effect wrapping something
+  Entry extends Effect.Effect<infer Inner, infer _E, infer _R>
+    ? ResolveInnerEntry<Inner>
+    : // Not an Effect, check the raw types
+      ResolveInnerEntry<Entry>
+
+/**
+ * Resolve the inner type (after Effect unwrapping).
+ * Uses direct structural matching rather than extracted helper types.
+ */
+type ResolveInnerEntry<Inner> =
+  // Case 1: Nested Router
+  Inner extends RouterShape<infer NestedRoutes>
+    ? RouterClient<NestedRoutes>
+    : // Case 2: ProceduresGroup - directly extract procedures and map
+      Inner extends { readonly _tag: "ProceduresGroup"; readonly procedures: infer P }
+      ? P extends Record<string, unknown>
+        ? { -readonly [K in keyof P]: ProcedureClient<P[K]> }
+        : never
+      : // Case 3: ProcedureDefinition - create client directly
+        Inner extends ProcedureDefinition<infer I, infer A, infer E, infer _Ctx, infer Type>
+        ? CreateProcedureClient<I, A, E, Type>
+        : // Case 4: Plain record of procedures
+          Inner extends Record<string, unknown>
+          ? { -readonly [K in keyof Inner]: ProcedureClient<Inner[K]> }
+          : never
+
+/**
+ * Client type for a router's routes.
+ */
 export type RouterClient<R extends RouterRecord> = {
-  [K in keyof R]: R[K] extends RouterShape<infer NestedRoutes>
-  ? RouterClient<NestedRoutes>
-  : R[K] extends ProceduresGroup<string, infer P>
-  ? { [PK in keyof P]: ProcedureClient<P[PK]> }
-  : R[K] extends AnyProcedureDefinition
-  ? ProcedureClient<R[K]>
-  : R[K] extends Record<string, AnyProcedureDefinition>
-  ? { [PK in keyof R[K]]: ProcedureClient<R[K][PK]> }
-  : never
+  -readonly [K in keyof R]: ResolveRouterEntry<R[K]>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,15 +111,13 @@ type AnyProcedureDefinition = ProcedureDefinition<
   unknown,
   unknown,
   BaseContext,
-  ProcedureType,
-  unknown,
-  unknown
+  ProcedureType
 >
 
 export class ProxyInvocationError extends Schema.TaggedError<ProxyInvocationError>()(
   "ProxyInvocationError",
   { rpcName: Schema.String, message: Schema.String },
-) { }
+) {}
 
 export interface ProxyShape {
   readonly createProxy: <TRouter extends RouterShape<RouterRecord>>(
@@ -88,98 +125,136 @@ export interface ProxyShape {
   ) => RouterClient<TRouter["routes"]>
 }
 
-export class Proxy extends Context.Tag("@effect-trpc/Proxy")<
-  Proxy,
-  ProxyShape
->() {
-  static readonly Live = Layer.effect(this, Effect.gen(function* () {
-    const transport = yield* Transport
+export class Proxy extends Context.Tag("@effect-trpc/Proxy")<Proxy, ProxyShape>() {
+  static readonly Live = Layer.effect(
+    this,
+    Effect.gen(function* () {
+      const transport = yield* Transport
 
-    const flattenRoutes = <Routes extends Record<string, unknown>>(
-      routes: Routes,
-      prefix = "",
-    ): Record<string, AnyProcedureDefinition> => {
-      let flat: Record<string, AnyProcedureDefinition> = {}
-
-      for (const [key, value] of Object.entries(routes)) {
-        const newPrefix = prefix ? `${prefix}.${key}` : key
-
-        Match.value(value).pipe(
-          Match.when(
-            (candidate: unknown): candidate is AnyProcedureDefinition =>
-              Predicate.isTagged(candidate, "ProcedureDefinition"),
-            (definition) => {
-              flat[newPrefix] = definition
-            },
-          ),
-          Match.when(
-            (candidate: unknown): candidate is RouterShape<RouterRecord> =>
-              Predicate.isTagged(candidate, "Router"),
-            (nestedRouter) => {
-              flat = { ...flat, ...flattenRoutes(nestedRouter.routes, newPrefix) }
-            },
-          ),
-          Match.when(
-            (candidate: unknown): candidate is ProceduresGroup<string, ProcedureRecord> =>
-              Predicate.isTagged(candidate, "ProceduresGroup"),
-            (group) => {
-              flat = { ...flat, ...flattenRoutes(group.procedures, newPrefix) }
-            },
-          ),
-          Match.when(Predicate.isRecord, (record) => {
-            flat = { ...flat, ...flattenRoutes(record, newPrefix) }
+      /**
+       * Extract a value from an Effect synchronously.
+       * Safe because our definitions always use Effect.succeed internally.
+       */
+      const extractFromEffect = <T>(effect: Effect.Effect<T, never, any>): T => {
+        let extracted: T | undefined
+        Effect.runSync(
+          Effect.map(effect as Effect.Effect<T, never, never>, (val) => {
+            extracted = val
           }),
-          Match.orElse(() => undefined),
         )
+        if (extracted === undefined) {
+          throw new Error("Failed to extract value from Effect")
+        }
+        return extracted
       }
 
-      return flat
-    }
-
-    const createRecursiveProxy = (
-      flatProcedures: Record<string, AnyProcedureDefinition>,
-      pathSegments: string[] = [],
-    ): unknown => {
-      return new globalThis.Proxy(() => { }, {
-        get(_target, prop: string) {
-          return createRecursiveProxy(flatProcedures, [...pathSegments, prop])
-        },
-        apply(_target, _thisArg, args) {
-          const rpcName = pathSegments.join(".")
-          const input = args[0] as unknown
-          const definition = flatProcedures[rpcName]
-
-          if (definition === undefined) {
-            return Effect.fail(
-              new ProxyInvocationError({
-                rpcName,
-                message: `Procedure not found at path '${rpcName}'`,
-              }),
-            )
+      /**
+       * Try to extract a value from something that might be an Effect.
+       */
+      const tryExtract = (value: unknown): unknown => {
+        // Check if it looks like an Effect (has required symbols/methods)
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          "pipe" in value &&
+          typeof (value as { pipe: unknown }).pipe === "function"
+        ) {
+          try {
+            return extractFromEffect(value as Effect.Effect<unknown, never, unknown>)
+          } catch {
+            return value
           }
-
-          const stream =
-            definition.type === "stream" ||
-            definition.type === "subscription" ||
-            definition.type === "chat"
-
-          return transport.call(rpcName, input, {
-            payloadSchema: definition.inputSchema,
-            successSchema: definition.outputSchema,
-            errorSchema: definition.errorSchema,
-            stream,
-          })
         }
-      })
-    }
+        return value
+      }
 
-    return {
-      createProxy: (router) => {
-        const flatProcedures = flattenRoutes(router.routes)
-        return createRecursiveProxy(
-          flatProcedures,
-        ) as RouterClient<typeof router.routes>
-      },
-    }
-  }))
+      const flattenRoutes = <Routes extends Record<string, unknown>>(
+        routes: Routes,
+        prefix = "",
+      ): Record<string, AnyProcedureDefinition> => {
+        let flat: Record<string, AnyProcedureDefinition> = {}
+
+        for (const [key, rawValue] of Object.entries(routes)) {
+          const newPrefix = prefix ? `${prefix}.${key}` : key
+
+          // Try to extract from Effect if needed
+          const value = tryExtract(rawValue)
+
+          Match.value(value).pipe(
+            Match.when(
+              (candidate: unknown): candidate is AnyProcedureDefinition =>
+                Predicate.isTagged(candidate, "ProcedureDefinition"),
+              (definition) => {
+                flat[newPrefix] = definition
+              },
+            ),
+            Match.when(
+              (candidate: unknown): candidate is RouterShape<RouterRecord> =>
+                Predicate.isTagged(candidate, "Router"),
+              (nestedRouter) => {
+                flat = { ...flat, ...flattenRoutes(nestedRouter.routes, newPrefix) }
+              },
+            ),
+            Match.when(
+              (candidate: unknown): candidate is ProceduresGroup<string, ProcedureRecord> =>
+                Predicate.isTagged(candidate, "ProceduresGroup"),
+              (group) => {
+                flat = { ...flat, ...flattenRoutes(group.procedures, newPrefix) }
+              },
+            ),
+            Match.when(Predicate.isRecord, (record) => {
+              flat = { ...flat, ...flattenRoutes(record, newPrefix) }
+            }),
+            Match.orElse(() => undefined),
+          )
+        }
+
+        return flat
+      }
+
+      const createRecursiveProxy = (
+        flatProcedures: Record<string, AnyProcedureDefinition>,
+        pathSegments: string[] = [],
+      ): unknown => {
+        return new globalThis.Proxy(() => {}, {
+          get(_target, prop: string) {
+            return createRecursiveProxy(flatProcedures, [...pathSegments, prop])
+          },
+          apply(_target, _thisArg, args) {
+            const rpcName = pathSegments.join(".")
+            const input = args[0] as unknown
+            const definition = flatProcedures[rpcName]
+
+            if (definition === undefined) {
+              return Effect.fail(
+                new ProxyInvocationError({
+                  rpcName,
+                  message: `Procedure not found at path '${rpcName}'`,
+                }),
+              )
+            }
+
+            const stream =
+              definition.type === "stream" ||
+              definition.type === "subscription" ||
+              definition.type === "chat"
+
+            return transport.call(rpcName, input, {
+              payloadSchema: definition.inputSchema,
+              successSchema: definition.outputSchema,
+              errorSchema: definition.errorSchema,
+              stream,
+            })
+          },
+        })
+      }
+
+      return {
+        createProxy: (router) => {
+          const flatProcedures = flattenRoutes(router.routes)
+          return createRecursiveProxy(flatProcedures) as RouterClient<typeof router.routes>
+        },
+      }
+    }),
+  )
 }

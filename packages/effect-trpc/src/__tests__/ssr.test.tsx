@@ -34,11 +34,16 @@ import { useNetworkStatus } from "../react/hooks/index.js"
 
 // Dynamic imports for react-dom/server and react-dom/client
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const ReactDOMServer: { renderToString: (element: React.ReactElement) => string } = require("react-dom/server")
+const ReactDOMServer: {
+  renderToString: (element: React.ReactElement) => string
+} = require("react-dom/server")
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const ReactDOMClient: {
   hydrateRoot: (container: Element, element: React.ReactElement) => { unmount: () => void }
-  createRoot: (container: Element) => { render: (element: React.ReactElement) => void; unmount: () => void }
+  createRoot: (container: Element) => {
+    render: (element: React.ReactElement) => void
+    unmount: () => void
+  }
 } = require("react-dom/client")
 
 const { renderToString } = ReactDOMServer
@@ -65,7 +70,7 @@ const testRouter = Router.make({
   user: testProcedures,
 })
 
-type TestRouter = typeof testRouter
+type TestRouter = Effect.Effect.Success<typeof testRouter>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock HTTP Client with fetch tracking
@@ -81,7 +86,13 @@ const createMockServer = (): MockServerState & { reset: () => void } => {
   const state: MockServerState = {
     fetchCount: 0,
     responses: new Map([
-      ["user.list", [{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }]],
+      [
+        "user.list",
+        [
+          { id: 1, name: "Alice" },
+          { id: 2, name: "Bob" },
+        ],
+      ],
       ["user.byId", { id: 1, name: "Alice" }],
     ]),
     lastRequest: null,
@@ -89,9 +100,15 @@ const createMockServer = (): MockServerState & { reset: () => void } => {
 
   return {
     ...state,
-    get fetchCount() { return state.fetchCount },
-    get responses() { return state.responses },
-    get lastRequest() { return state.lastRequest },
+    get fetchCount() {
+      return state.fetchCount
+    },
+    get responses() {
+      return state.responses
+    },
+    get lastRequest() {
+      return state.lastRequest
+    },
     reset: () => {
       state.fetchCount = 0
       state.lastRequest = null
@@ -109,18 +126,18 @@ const createMockHttpClient = (server: typeof mockServer) => {
   const mockClient = HttpClient.make((request) =>
     Effect.gen(function* () {
       server.fetchCount++
-      
+
       // Parse the request body to extract the procedure path
       let body: unknown = undefined
       if (request.body._tag === "Uint8Array") {
         const text = new TextDecoder().decode(request.body.body)
         // NDJSON format: each line is a separate JSON object
         const lines = text.trim().split("\n")
-        body = lines.map(line => JSON.parse(line))
+        body = lines.map((line) => JSON.parse(line))
       }
-      
+
       server.lastRequest = { url: request.url, body }
-      
+
       // Extract procedure path from the NDJSON request
       // The request format is: [{ _tag: "Request", request: { _tag: "user.list", ... } }]
       let procedurePath = "unknown"
@@ -130,13 +147,13 @@ const createMockHttpClient = (server: typeof mockServer) => {
           procedurePath = firstMsg.request._tag
         }
       }
-      
+
       // Get the response data
       const responseData = server.responses.get(procedurePath) ?? { error: "not found" }
-      
+
       // Format as NDJSON response
       const responseNdjson = JSON.stringify({ _tag: "Success", value: responseData }) + "\n"
-      
+
       // Create a mock Response
       const webResponse = new Response(responseNdjson, {
         status: 200,
@@ -144,11 +161,11 @@ const createMockHttpClient = (server: typeof mockServer) => {
           "Content-Type": "application/x-ndjson",
         },
       })
-      
+
       return HttpClientResponse.fromWeb(request, webResponse)
-    })
+    }),
   )
-  
+
   return Layer.succeed(HttpClient.HttpClient, mockClient)
 }
 
@@ -174,7 +191,7 @@ const createUserListComponent = (trpc: ReturnType<typeof createTestClient>) => {
   return function UserList({ initialData }: UserListProps) {
     const { data, isLoading, isSuccess } = trpc.procedures.user.list.useQuery(
       undefined,
-      initialData !== undefined ? { initialData } : undefined
+      initialData !== undefined ? { initialData } : undefined,
     )
 
     if (isLoading) {
@@ -253,7 +270,7 @@ describe("SSR Support", () => {
       const html = renderToString(
         <trpc.Provider>
           <UserList />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Should render loading state
@@ -277,7 +294,7 @@ describe("SSR Support", () => {
       const html = renderToString(
         <trpc.Provider>
           <UserList initialData={initialData} />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Should render loading state because initialData is applied in useEffect
@@ -305,7 +322,7 @@ describe("SSR Support", () => {
       const html = renderToString(
         <trpc.Provider>
           <MultiQueryComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Both should be in loading state
@@ -347,7 +364,7 @@ describe("SSR Support", () => {
         renderToString(
           <trpc.Provider>
             <ComplexComponent />
-          </trpc.Provider>
+          </trpc.Provider>,
         )
       }).not.toThrow()
 
@@ -372,7 +389,7 @@ describe("SSR Support", () => {
       const serverHtml = renderToString(
         <trpc.Provider>
           <UserList />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       expect(serverHtml).toContain("Loading...")
@@ -383,17 +400,20 @@ describe("SSR Support", () => {
         serverHtml,
         <trpc.Provider>
           <UserList />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // After hydration, useEffect runs and state should eventually change
       // from "loading" to either "no users" (empty) or the fetched data
       // The key point is that hydration doesn't crash and the component
       // continues to work on the client side
-      await waitFor(() => {
-        // Should transition out of loading state
-        expect(container.textContent).not.toContain("Loading...")
-      }, { timeout: 2000 })
+      await waitFor(
+        () => {
+          // Should transition out of loading state
+          expect(container.textContent).not.toContain("Loading...")
+        },
+        { timeout: 2000 },
+      )
     })
 
     it("applies initialData client-side after hydration (with refetchOnMount=false)", async () => {
@@ -417,7 +437,7 @@ describe("SSR Support", () => {
       const serverHtml = renderToString(
         <noRefetchTrpc.Provider>
           <NoRefetchUserList initialData={initialData} />
-        </noRefetchTrpc.Provider>
+        </noRefetchTrpc.Provider>,
       )
 
       expect(serverHtml).toContain("Loading...")
@@ -428,14 +448,17 @@ describe("SSR Support", () => {
         serverHtml,
         <noRefetchTrpc.Provider>
           <NoRefetchUserList initialData={initialData} />
-        </noRefetchTrpc.Provider>
+        </noRefetchTrpc.Provider>,
       )
 
       // Wait for initialData to be applied (happens in useEffect)
-      await waitFor(() => {
-        expect(container.textContent).toContain("Alice")
-        expect(container.textContent).toContain("Bob")
-      }, { timeout: 2000 })
+      await waitFor(
+        () => {
+          expect(container.textContent).toContain("Alice")
+          expect(container.textContent).toContain("Bob")
+        },
+        { timeout: 2000 },
+      )
 
       // No fetch should have happened because we had initialData and refetchOnMount=false
       expect(mockServer.fetchCount).toBe(0)
@@ -464,7 +487,7 @@ describe("SSR Support", () => {
       const serverHtml = renderToString(
         <freshTrpc.Provider>
           <FreshUserList initialData={initialData} />
-        </freshTrpc.Provider>
+        </freshTrpc.Provider>,
       )
 
       expect(mockServer.fetchCount).toBe(0)
@@ -474,7 +497,7 @@ describe("SSR Support", () => {
         serverHtml,
         <freshTrpc.Provider>
           <FreshUserList initialData={initialData} />
-        </freshTrpc.Provider>
+        </freshTrpc.Provider>,
       )
 
       // Wait for initialData to be applied
@@ -540,7 +563,7 @@ describe("SSR Support", () => {
       const html = renderToString(
         <trpc.Provider>
           <QueryComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Should render loading state without crashing
@@ -567,16 +590,14 @@ describe("SSR Support", () => {
         })
 
         return (
-          <div data-testid="status">
-            {isLoading ? "loading" : data ? "has-data" : "no-data"}
-          </div>
+          <div data-testid="status">{isLoading ? "loading" : data ? "has-data" : "no-data"}</div>
         )
       }
 
       const html = renderToString(
         <trpc.Provider>
           <DisabledQueryComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Should be in loading state (initial)
@@ -591,9 +612,7 @@ describe("SSR Support", () => {
         })
 
         return (
-          <div data-testid="status">
-            {isLoading ? "loading" : data ? "has-data" : "no-data"}
-          </div>
+          <div data-testid="status">{isLoading ? "loading" : data ? "has-data" : "no-data"}</div>
         )
       }
 
@@ -601,7 +620,7 @@ describe("SSR Support", () => {
       const serverHtml = renderToString(
         <trpc.Provider>
           <DisabledQueryComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Hydrate
@@ -609,7 +628,7 @@ describe("SSR Support", () => {
         serverHtml,
         <trpc.Provider>
           <DisabledQueryComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // Wait a bit
@@ -646,7 +665,7 @@ describe("SSR Support", () => {
           <trpc2.Provider>
             <UserList2 initialData={[{ id: 2, name: "Provider 2" }]} />
           </trpc2.Provider>
-        </div>
+        </div>,
       )
 
       // Both should render loading state (initialData is not applied during SSR)
@@ -684,7 +703,7 @@ describe("SSR Support", () => {
         renderToString(
           <trpc.Provider>
             <ErrorProneComponent />
-          </trpc.Provider>
+          </trpc.Provider>,
         )
       }).not.toThrow()
     })
@@ -712,7 +731,7 @@ describe("SSR Support", () => {
       const html = renderToString(
         <trpc.Provider>
           <ResultComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
 
       // During SSR, result should be in initial state
@@ -746,7 +765,7 @@ describe("SSR with Suspense (advanced)", () => {
     const SuspenseComponent = () => {
       // This would throw a promise during SSR
       const { data } = trpc.procedures.user.list.useSuspenseQuery(undefined)
-      return <div>{data.map(u => u.name).join(", ")}</div>
+      return <div>{data.map((u) => u.name).join(", ")}</div>
     }
 
     // Note: We expect this to throw because Suspense throws promises
@@ -755,7 +774,7 @@ describe("SSR with Suspense (advanced)", () => {
       renderToString(
         <trpc.Provider>
           <SuspenseComponent />
-        </trpc.Provider>
+        </trpc.Provider>,
       )
     }).toThrow()
   })
@@ -763,7 +782,7 @@ describe("SSR with Suspense (advanced)", () => {
   it("works with Suspense boundary during SSR", () => {
     const SuspenseComponent = () => {
       const { data } = trpc.procedures.user.list.useSuspenseQuery(undefined)
-      return <div data-testid="content">{data.map(u => u.name).join(", ")}</div>
+      return <div data-testid="content">{data.map((u) => u.name).join(", ")}</div>
     }
 
     // With a Suspense boundary, the fallback should render
@@ -772,7 +791,7 @@ describe("SSR with Suspense (advanced)", () => {
         <React.Suspense fallback={<div data-testid="fallback">Loading...</div>}>
           <SuspenseComponent />
         </React.Suspense>
-      </trpc.Provider>
+      </trpc.Provider>,
     )
 
     // The fallback should render (Suspense catches the thrown promise)
@@ -844,7 +863,7 @@ describe("SSR Documentation Tests", () => {
     const ServerRenderedUserList = ({ users }: Props) => {
       return (
         <ul>
-          {users.map(user => (
+          {users.map((user) => (
             <li key={user.id}>{user.name}</li>
           ))}
         </ul>

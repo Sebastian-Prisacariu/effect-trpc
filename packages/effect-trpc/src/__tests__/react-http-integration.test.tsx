@@ -10,7 +10,7 @@ import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { procedure } from "../core/server/procedure.js"
-import { procedures } from "../core/server/procedures.js"
+import { procedures, Procedures } from "../core/server/procedures.js"
 import { Router } from "../core/server/router.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/http.js"
 import { createTRPCReact } from "../react/index.js"
@@ -35,12 +35,12 @@ const appRouter = Router.make({
   todo: TodoProcedures,
 })
 
-type AppRouter = typeof appRouter
+type AppRouter = Effect.Effect.Success<typeof appRouter>
 
 const createTodoHandlers = (store: Array<Todo>) =>
-  Layer.mergeAll(
-    TodoProcedures.procedures.list.toLayer(() => Effect.succeed(store)),
-    TodoProcedures.procedures.add.toLayer((_ctx, input) =>
+  Procedures.toLayer(TodoProcedures, {
+    list: () => Effect.succeed(store),
+    add: (_ctx, input) =>
       Effect.sync(() => {
         const next: Todo = {
           id: String(store.length + 1),
@@ -49,8 +49,7 @@ const createTodoHandlers = (store: Array<Todo>) =>
         store.push(next)
         return next
       }),
-    ),
-  )
+  })
 
 describe("react client over real HTTP", () => {
   const store: Array<Todo> = []
@@ -110,10 +109,9 @@ describe("react client over real HTTP", () => {
     const wrapper = ({ children }: PropsWithChildren) => <trpc.Provider>{children}</trpc.Provider>
 
     try {
-      const { result } = renderHook(
-        () => trpc.procedures.todo.list.useQuery(undefined),
-        { wrapper },
-      )
+      const { result } = renderHook(() => trpc.procedures.todo.list.useQuery(undefined), {
+        wrapper,
+      })
 
       await waitFor(() => {
         expect(result.current.isSuccess).toBe(true)
@@ -133,10 +131,7 @@ describe("react client over real HTTP", () => {
     const wrapper = ({ children }: PropsWithChildren) => <trpc.Provider>{children}</trpc.Provider>
 
     try {
-      const mutation = renderHook(
-        () => trpc.procedures.todo.add.useMutation(),
-        { wrapper },
-      )
+      const mutation = renderHook(() => trpc.procedures.todo.add.useMutation(), { wrapper })
 
       await act(async () => {
         const exit = await mutation.result.current.mutateAsync({
@@ -149,10 +144,7 @@ describe("react client over real HTTP", () => {
       expect(mutation.result.current.isSuccess).toBe(true)
       expect(mutation.result.current.data?.title).toBe("from react hook")
 
-      const query = renderHook(
-        () => trpc.procedures.todo.list.useQuery(undefined),
-        { wrapper },
-      )
+      const query = renderHook(() => trpc.procedures.todo.list.useQuery(undefined), { wrapper })
 
       await waitFor(() => {
         expect(query.result.current.isSuccess).toBe(true)

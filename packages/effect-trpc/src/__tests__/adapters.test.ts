@@ -30,13 +30,24 @@ const UserSchema = Schema.Struct({
 })
 
 const UserProcedures = procedures("user", {
-  get: procedure.input(Schema.Struct({ id: Schema.String })).output(UserSchema).query(),
-  create: procedure.input(Schema.Struct({ name: Schema.String })).output(UserSchema).mutation(),
+  get: procedure
+    .input(Schema.Struct({ id: Schema.String }))
+    .output(UserSchema)
+    .query(),
+  create: procedure
+    .input(Schema.Struct({ name: Schema.String }))
+    .output(UserSchema)
+    .mutation(),
 })
 
-const testRouter = Router.make({
+const testRouterEffect = Router.make({
   user: UserProcedures,
 })
+
+type TestRouter = Effect.Effect.Success<typeof testRouterEffect>
+
+// Extract the router synchronously (Router.make returns Effect.succeed)
+const testRouter: TestRouter = Effect.runSync(testRouterEffect)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CORS Header Tests
@@ -143,7 +154,7 @@ describe("Node.js Request Conversion", () => {
     const req = createMockRequest({
       method: "GET",
       url: "/api/users",
-      headers: { "accept": "application/json" },
+      headers: { accept: "application/json" },
     })
 
     const webRequest = await nodeToWebRequest(req)
@@ -247,7 +258,9 @@ describe("Node.js Request Conversion", () => {
         body,
       })
 
-      await expect(nodeToWebRequest(req, { maxBodySize: 100 })).rejects.toThrow(PayloadTooLargeError)
+      await expect(nodeToWebRequest(req, { maxBodySize: 100 })).rejects.toThrow(
+        PayloadTooLargeError,
+      )
     })
 
     it("uses default 1MB limit when no maxBodySize specified", async () => {
@@ -304,7 +317,9 @@ describe("Node.js Request Conversion", () => {
 
       const result = await Effect.runPromise(
         nodeToWebRequestEffect(req, { maxBodySize: 100 }).pipe(
-          Effect.catchTag("PayloadTooLargeError", (err) => Effect.succeed({ caught: true, error: err })),
+          Effect.catchTag("PayloadTooLargeError", (err) =>
+            Effect.succeed({ caught: true, error: err }),
+          ),
         ),
       )
 
@@ -359,7 +374,11 @@ describe("Node.js Response Conversion", () => {
       getHeaders: () => headers,
     }
 
-    return res as unknown as ServerResponse & { getBody: () => string; isEnded: () => boolean; getHeaders: () => Record<string, string> }
+    return res as unknown as ServerResponse & {
+      getBody: () => string
+      isEnded: () => boolean
+      getHeaders: () => Record<string, string>
+    }
   }
 
   it("writes status and headers", async () => {
@@ -412,7 +431,7 @@ describe("Handler Creation", () => {
       const { createHandler } = await import("../node/index.js")
 
       const handler = createHandler({
-        router: testRouter,
+        router: testRouterEffect,
         handlers: Layer.empty as Layer.Layer<any>,
       })
 
@@ -427,7 +446,7 @@ describe("Handler Creation", () => {
       const { createHandler } = await import("../node/index.js")
 
       const handler = createHandler({
-        router: testRouter,
+        router: testRouterEffect,
         handlers: Layer.empty as Layer.Layer<any>,
         path: "/api/rpc",
       })
@@ -448,7 +467,7 @@ describe("Handler Creation", () => {
       const { createHandler } = await import("../node/index.js")
 
       const handler = createHandler({
-        router: testRouter,
+        router: testRouterEffect,
         handlers: Layer.empty as Layer.Layer<any>,
         cors: true,
       })
@@ -470,7 +489,7 @@ describe("Handler Creation", () => {
       const { createHandler } = await import("../node/index.js")
 
       const handler = createHandler({
-        router: testRouter,
+        router: testRouterEffect,
         handlers: Layer.empty as Layer.Layer<any>,
         cors: {
           origins: "https://example.com",
@@ -599,8 +618,8 @@ describe("WebSocket Protocol Messages", () => {
     const { SubscribedMessage } = await import("../ws/protocol.js")
 
     const msg = new SubscribedMessage({
-      id: "correlation-123",  // Client's correlation ID
-      subscriptionId: "sub-abc123" as any,  // Server-generated subscription ID
+      id: "correlation-123", // Client's correlation ID
+      subscriptionId: "sub-abc123" as any, // Server-generated subscription ID
     })
 
     expect(msg._tag).toBe("Subscribed")
@@ -667,7 +686,7 @@ describe("Broadcast Result", () => {
   it("BroadcastResult type is exported", async () => {
     // Import the module to verify it exports the type
     const ConnectionRegistryModule = await import("../ws/server/ConnectionRegistry.js")
-    
+
     // Verify the module exports something (it's a type so we can't check at runtime)
     expect(ConnectionRegistryModule).toBeDefined()
     expect(ConnectionRegistryModule.ConnectionRegistry).toBeDefined()

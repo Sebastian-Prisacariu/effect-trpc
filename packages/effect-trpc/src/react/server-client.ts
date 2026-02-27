@@ -38,9 +38,7 @@ type AnyProcedureDefinition = ProcedureDefinition<
   unknown,
   unknown,
   BaseContext,
-  ProcedureType,
-  unknown,
-  unknown
+  ProcedureType
 >
 
 /**
@@ -124,10 +122,7 @@ const flattenRoutes = (
  * @since 1.0.0
  * @category constructors
  */
-export function createInMemoryClientLive<
-  TRouter extends RouterShape<RouterRecord>,
-  R,
->(
+export function createInMemoryClientLive<TRouter extends RouterShape<RouterRecord>, R>(
   router: TRouter,
   handlers: Layer.Layer<R, never, never>,
 ): Layer.Layer<Client, never, never> {
@@ -175,21 +170,13 @@ export function createInMemoryClientLive<
     }),
   )
 
-  const procedureEngineLive = ProcedureEngine.Live.pipe(
-    Layer.provide(MiddlewareEngine.Live),
-  )
+  const procedureEngineLive = ProcedureEngine.Live.pipe(Layer.provide(MiddlewareEngine.Live))
 
-  const transportWithEngine = inMemoryTransportLive.pipe(
-    Layer.provide(procedureEngineLive),
-  )
+  const transportWithEngine = inMemoryTransportLive.pipe(Layer.provide(procedureEngineLive))
 
-  const proxyLive = Proxy.Live.pipe(
-    Layer.provide(transportWithEngine),
-  )
+  const proxyLive = Proxy.Live.pipe(Layer.provide(transportWithEngine))
 
-  const clientLive = Client.Live.pipe(
-    Layer.provide(proxyLive),
-  )
+  const clientLive = Client.Live.pipe(Layer.provide(proxyLive))
 
   return Layer.mergeAll(
     handlers,
@@ -203,10 +190,7 @@ export function createInMemoryClientLive<
 // Simple SSR Pattern (createServerClient)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CreateServerClientOptions<
-  TRouter extends RouterShape<RouterRecord>,
-  R,
-> {
+export interface CreateServerClientOptions<TRouter extends RouterShape<RouterRecord>, R> {
   /**
    * The router instance.
    */
@@ -273,10 +257,7 @@ export interface ServerTRPCClient<TRouter extends RouterShape<RouterRecord>> {
  * @since 0.1.0
  * @category constructors
  */
-export function createServerClient<
-  TRouter extends RouterShape<RouterRecord>,
-  R,
->(
+export function createServerClient<TRouter extends RouterShape<RouterRecord>, R>(
   options: CreateServerClientOptions<TRouter, R>,
 ): ServerTRPCClient<TRouter> {
   const { router, handlers } = options
@@ -289,9 +270,7 @@ export function createServerClient<
     return client.create(router)
   })
 
-  const procedures = Effect.runSync(
-    Effect.provide(program, clientLayer),
-  )
+  const procedures = Effect.runSync(Effect.provide(program, clientLayer))
 
   return {
     procedures,

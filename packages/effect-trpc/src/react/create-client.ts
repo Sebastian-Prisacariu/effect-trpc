@@ -26,13 +26,15 @@ import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Option from "effect/Option"
 import * as Stream from "effect/Stream"
 import type { ProcedureDefinition } from "../core/server/procedure.js"
-import type { AnyProceduresGroup, ProcedureRecord, ProceduresGroup } from "../core/server/procedures.js"
 import type {
-  AnyRouter,
-  RouterShape as Router,
-  RouterEntry,
-  RouterRecord,
-} from "../core/server/router.js"
+  AnyProceduresGroup,
+  ProcedureRecord,
+  ProceduresGroup,
+} from "../core/server/procedures.js"
+import type { AnyRouter, RouterShape, RouterEntry, RouterRecord } from "../core/server/router.js"
+
+/** Router type alias */
+type Router<Routes extends RouterRecord = RouterRecord> = RouterShape<Routes>
 import {
   RegistryProvider,
   callerAtomFamily,
@@ -58,7 +60,7 @@ import {
   type AtomCacheUtils,
   type MutationCallerState,
   type MutationMainState,
-  type QueryAtomState
+  type QueryAtomState,
 } from "./atoms.js"
 import {
   createRpcEffect,
@@ -507,31 +509,79 @@ interface SubscriptionProcedure<I, A, E> {
   useSubscription: (input: I, options?: UseSubscriptionOptions<A>) => UseSubscriptionReturn<A, E>
 }
 
+/**
+ * Extract ProcedureDefinition from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractProcedureDefinition<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends ProcedureDefinition<infer I, infer A, infer E, infer Ctx, infer Type>
+      ? ProcedureDefinition<I, A, E, Ctx, Type>
+      : never
+    : P extends ProcedureDefinition<infer I, infer A, infer E, infer Ctx, infer Type>
+      ? ProcedureDefinition<I, A, E, Ctx, Type>
+      : never
+
 type ProcedureHook<P> =
-  P extends ProcedureDefinition<infer I, infer O, infer E, any, "query", any, any>
-    ? QueryProcedure<unknown extends I ? void : I, O, E>
-    : P extends ProcedureDefinition<infer I, infer O, infer E, any, "mutation", any, any>
-      ? MutationProcedure<unknown extends I ? void : I, O, E>
-      : P extends ProcedureDefinition<infer I, infer O, infer E, any, "stream", any, any>
-        ? StreamProcedure<unknown extends I ? void : I, O, E>
-        : P extends ProcedureDefinition<infer I, infer O, infer E, any, "chat", any, any>
-          ? ChatProcedure<unknown extends I ? void : I, O, E>
-          : P extends ProcedureDefinition<infer I, infer O, infer E, any, "subscription", any, any>
-            ? SubscriptionProcedure<unknown extends I ? void : I, O, E>
-            : never
+  ExtractProcedureDefinition<P> extends ProcedureDefinition<
+    infer I,
+    infer O,
+    infer E,
+    any,
+    infer Type
+  >
+    ? Type extends "query"
+      ? QueryProcedure<unknown extends I ? void : I, O, E>
+      : Type extends "mutation"
+        ? MutationProcedure<unknown extends I ? void : I, O, E>
+        : Type extends "stream"
+          ? StreamProcedure<unknown extends I ? void : I, O, E>
+          : Type extends "chat"
+            ? ChatProcedure<unknown extends I ? void : I, O, E>
+            : Type extends "subscription"
+              ? SubscriptionProcedure<unknown extends I ? void : I, O, E>
+              : never
+    : never
 
 type ProceduresHooks<P extends ProcedureRecord> = {
   [K in keyof P]: ProcedureHook<P[K]>
 }
 
 /**
+ * Extract ProceduresGroup from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractProceduresGroup<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends ProceduresGroup<infer Name, infer Procs>
+      ? ProceduresGroup<Name, Procs>
+      : never
+    : P extends ProceduresGroup<infer Name, infer Procs>
+      ? ProceduresGroup<Name, Procs>
+      : never
+
+/**
+ * Extract RouterShape from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractRouterShape<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends RouterShape<infer Routes>
+      ? RouterShape<Routes>
+      : never
+    : P extends RouterShape<infer Routes>
+      ? RouterShape<Routes>
+      : never
+
+/**
  * Recursively build the client type from a RouterRecord.
  * Supports infinite nesting of routers and procedures groups.
+ * Handles both Effect-wrapped and plain values.
  */
 type RouterClient<R extends RouterRecord> = {
-  [K in keyof R]: R[K] extends ProceduresGroup<any, infer P>
+  [K in keyof R]: ExtractProceduresGroup<R[K]> extends ProceduresGroup<infer _Name, infer P>
     ? ProceduresHooks<P>
-    : R[K] extends Router<infer NestedRoutes>
+    : ExtractRouterShape<R[K]> extends RouterShape<infer NestedRoutes>
       ? RouterClient<NestedRoutes>
       : never
 }
@@ -2004,29 +2054,92 @@ export function createTRPCReact<TRouter extends Router>(
   }
 
   /**
+   * Try to extract a value from something that might be an Effect.
+   * Safe because our definitions always use Effect.succeed internally.
+   */
+  const tryExtractFromEffect = (value: unknown): unknown => {
+    // Check if it looks like an Effect (has required symbols/methods)
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "pipe" in value &&
+      typeof (value as { pipe: unknown }).pipe === "function"
+    ) {
+      try {
+        let extracted: unknown
+        Effect.runSync(
+          Effect.map(value as Effect.Effect<unknown, never, never>, (val) => {
+            extracted = val
+          }),
+        )
+        return extracted
+      } catch {
+        return value
+      }
+    }
+    return value
+  }
+
+  /**
    * Check if an entry appears to be a ProceduresGroup (has procedures property).
    * This is used at runtime to determine if we've reached a leaf node.
+   * Handles both Effect-wrapped and plain values.
    */
   const looksLikeProceduresGroup = (entry: unknown): boolean => {
+    const extracted = tryExtractFromEffect(entry)
     return (
-      entry !== null &&
-      typeof entry === "object" &&
-      "_tag" in entry &&
-      (entry as { _tag: string })._tag === "ProceduresGroup"
+      extracted !== null &&
+      typeof extracted === "object" &&
+      "_tag" in extracted &&
+      (extracted as { _tag: string })._tag === "ProceduresGroup"
     )
+  }
+
+  /**
+   * Extract ProceduresGroup from entry (handles Effect wrapper).
+   */
+  const extractProceduresGroup = (entry: unknown): AnyProceduresGroup | null => {
+    const extracted = tryExtractFromEffect(entry)
+    if (
+      extracted !== null &&
+      typeof extracted === "object" &&
+      "_tag" in extracted &&
+      (extracted as { _tag: string })._tag === "ProceduresGroup"
+    ) {
+      return extracted as AnyProceduresGroup
+    }
+    return null
   }
 
   /**
    * Check if an entry appears to be a Router (has routes property).
    * This is used at runtime to determine if we need to recurse.
+   * Handles both Effect-wrapped and plain values.
    */
   const looksLikeRouter = (entry: unknown): boolean => {
+    const extracted = tryExtractFromEffect(entry)
     return (
-      entry !== null &&
-      typeof entry === "object" &&
-      "_tag" in entry &&
-      (entry as { _tag: string })._tag === "Router"
+      extracted !== null &&
+      typeof extracted === "object" &&
+      "_tag" in extracted &&
+      (extracted as { _tag: string })._tag === "Router"
     )
+  }
+
+  /**
+   * Extract Router from entry (handles Effect wrapper).
+   */
+  const extractRouter = (entry: unknown): AnyRouter | null => {
+    const extracted = tryExtractFromEffect(entry)
+    if (
+      extracted !== null &&
+      typeof extracted === "object" &&
+      "_tag" in extracted &&
+      (extracted as { _tag: string })._tag === "Router"
+    ) {
+      return extracted as AnyRouter
+    }
+    return null
   }
 
   /**
@@ -2050,10 +2163,7 @@ export function createTRPCReact<TRouter extends Router>(
    * type safety via: `const api: RouterClient<typeof appRouter> = createRecursiveProxy(...)`
    */
   /* eslint-disable @typescript-eslint/no-unused-vars -- Dynamic proxy requires any */
-  const createRecursiveProxy = (
-    routeEntry: RouterEntry | RouterRecord,
-    pathParts: string[] = [],
-  ): any => {
+  const createRecursiveProxy = (routeEntry: unknown, pathParts: string[] = []): any => {
     return new Proxy(
       {},
       {
@@ -2065,16 +2175,23 @@ export function createTRPCReact<TRouter extends Router>(
 
           const newPathParts = [...pathParts, prop]
 
+          // Try to extract from Effect if needed
+          const extracted = tryExtractFromEffect(routeEntry)
+
           // If routeEntry is a RouterRecord (initial call or nested router routes)
-          if (!("_tag" in routeEntry)) {
-            const entry = routeEntry[prop]
+          if (typeof extracted === "object" && extracted !== null && !("_tag" in extracted)) {
+            const record = extracted as Record<string, unknown>
+            const entry = record[prop]
             if (entry) {
-              if (looksLikeRouter(entry)) {
+              const router = extractRouter(entry)
+              if (router) {
                 // Nested router - recurse into its routes
-                return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
-              } else if (looksLikeProceduresGroup(entry)) {
+                return createRecursiveProxy(router.routes, newPathParts)
+              }
+              const group = extractProceduresGroup(entry)
+              if (group) {
                 // ProceduresGroup - return proxy for procedures
-                return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+                return createRecursiveProxy(group, newPathParts)
               }
             }
             // Unknown entry - might be a procedure name, but we don't have the group
@@ -2083,8 +2200,8 @@ export function createTRPCReact<TRouter extends Router>(
           }
 
           // If we're inside a ProceduresGroup, prop should be a procedure name
-          if (looksLikeProceduresGroup(routeEntry)) {
-            const group = routeEntry as AnyProceduresGroup
+          const group = extractProceduresGroup(extracted)
+          if (group) {
             const procedureDef = group.procedures[prop]
             if (procedureDef) {
               // Build full path: join all parts with dots
@@ -2096,14 +2213,17 @@ export function createTRPCReact<TRouter extends Router>(
           }
 
           // If we're inside a Router, prop should be a key in routes
-          if (looksLikeRouter(routeEntry)) {
-            const router = routeEntry as AnyRouter
+          const router = extractRouter(extracted)
+          if (router) {
             const entry = router.routes[prop]
             if (entry) {
-              if (looksLikeRouter(entry)) {
-                return createRecursiveProxy((entry as AnyRouter).routes, newPathParts)
-              } else if (looksLikeProceduresGroup(entry)) {
-                return createRecursiveProxy(entry as AnyProceduresGroup, newPathParts)
+              const nestedRouter = extractRouter(entry)
+              if (nestedRouter) {
+                return createRecursiveProxy(nestedRouter.routes, newPathParts)
+              }
+              const nestedGroup = extractProceduresGroup(entry)
+              if (nestedGroup) {
+                return createRecursiveProxy(nestedGroup, newPathParts)
               }
             }
             return undefined

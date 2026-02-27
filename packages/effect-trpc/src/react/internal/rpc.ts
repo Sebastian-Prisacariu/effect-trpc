@@ -14,9 +14,10 @@ import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as Random from "effect/Random"
+import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
-import { RpcClientError, RpcResponseError } from "../../core/rpc/errors.js"
+import { isRpcClientError, RpcClientError, RpcResponseError } from "../../core/rpc/errors.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request ID
@@ -229,14 +230,9 @@ export const createRpcRequestBody = (
  */
 export const parseRpcLine = <A>(line: string): Effect.Effect<Option.Option<A>, RpcClientError> =>
   Effect.gen(function* () {
-    // First, parse the JSON
-    const rawJson: unknown = yield* Effect.try({
-      try: () => JSON.parse(line) as unknown,
-      catch: (e) => new RpcClientError({ message: `Failed to parse JSON: ${line}`, cause: e }),
-    })
-
-    // Try to decode as a response message using Schema
-    const decodeResult = yield* Schema.decodeUnknown(RpcResponseMessageSchema)(rawJson).pipe(
+    const decodeResult = yield* Schema.decodeUnknown(
+      Schema.parseJson(RpcResponseMessageSchema),
+    )(line).pipe(
       Effect.mapError(
         (e) => new RpcClientError({ message: `Invalid RPC message format`, cause: e }),
       ),
@@ -255,28 +251,21 @@ export const parseRpcLine = <A>(line: string): Effect.Effect<Option.Option<A>, R
       }
       const cause = msg.exit.cause
       if (cause?._tag === "Fail") {
-        // Preserve typed errors so Effect.catchTag works
-        // If the error has a _tag property, return it directly
         const error = cause.error
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "_tag" in error &&
-          typeof (error as { _tag: unknown })._tag === "string"
-        ) {
-          return yield* Effect.fail(error as RpcClientError)
+        if (isRpcClientError(error)) {
+          return yield* error
         }
-        return yield* Effect.fail(new RpcClientError({ message: "Request failed", cause: error }))
+        return yield* new RpcClientError({ message: "Request failed", cause: error })
       }
       if (cause?._tag === "Die") {
         const defectMsg = typeof cause.defect === "string" ? cause.defect : "Unexpected error"
-        return yield* Effect.fail(new RpcClientError({ message: defectMsg, cause: cause.defect }))
+        return yield* new RpcClientError({ message: defectMsg, cause: cause.defect })
       }
-      return yield* Effect.fail(new RpcClientError({ message: "Request failed" }))
+      return yield* new RpcClientError({ message: "Request failed" })
     }
 
     if (msg._tag === "Defect") {
-      return yield* Effect.fail(new RpcClientError({ message: msg.defect ?? "Unknown error" }))
+      return yield* new RpcClientError({ message: msg.defect ?? "Unknown error" })
     }
 
     return Option.none()
@@ -297,7 +286,7 @@ export const parseRpcResponse = <A>(text: string): Effect.Effect<A, RpcClientErr
       }
     }
 
-    return yield* Effect.fail(new RpcClientError({ message: "No response received" }))
+    return yield* new RpcClientError({ message: "No response received" })
   })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,17 +326,26 @@ export const createRpcEffect = <A>(
       HttpClientRequest.bodyText(body),
     )
 
-    const client = yield* HttpClient.HttpClient
-    const response = yield* client.execute(request)
+    const baseClient = yield* HttpClient.HttpClient
+    const client = baseClient.pipe(
+      HttpClient.filterStatusOk,
+      HttpClient.retryTransient({
+        schedule: Schedule.exponential("200 millis"),
+        times: 3,
+      }),
+    )
 
-    if (response.status >= 400) {
-      return yield* Effect.fail(
-        new RpcResponseError({
-          message: `HTTP error: ${response.status}`,
-          status: response.status,
-        }),
-      )
-    }
+    const response = yield* client.execute(request).pipe(
+      Effect.mapError((error): RpcClientError | RpcResponseError | HttpClientError.HttpClientError => {
+        if (error._tag === "ResponseError" && error.reason === "StatusCode") {
+          return new RpcResponseError({
+            message: `HTTP error: ${error.response.status}`,
+            status: error.response.status,
+          })
+        }
+        return error
+      }),
+    )
 
     const text = yield* response.text
     return yield* parseRpcResponse<A>(text)
@@ -439,17 +437,9 @@ export const createStreamEffect = <A>(
         Stream.filter((line) => line.trim().length > 0),
         Stream.mapEffect((line) =>
           Effect.gen(function* () {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-            const rawJson = yield* Effect.try({
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-              try: () => JSON.parse(line),
-              catch: (e) =>
-                new RpcClientError({ message: `Failed to parse stream line: ${line}`, cause: e }),
-            })
-
-            const decodeResult = yield* Schema.decodeUnknown(RpcStreamMessageSchema)(rawJson).pipe(
-              Effect.option,
-            )
+            const decodeResult = yield* Schema.decodeUnknown(
+              Schema.parseJson(RpcStreamMessageSchema),
+            )(line).pipe(Effect.option)
 
             if (Option.isNone(decodeResult)) {
               return new StreamSkip()
@@ -464,19 +454,11 @@ export const createStreamEffect = <A>(
               return new StreamEnd()
             }
             if (msg._tag === "Error" || msg._tag === "Failure") {
-              // Preserve typed errors so Effect.catchTag works
               const error = msg.error
-              if (
-                typeof error === "object" &&
-                error !== null &&
-                "_tag" in error &&
-                typeof (error as { _tag: unknown })._tag === "string"
-              ) {
-                return yield* Effect.fail(error as RpcClientError)
+              if (isRpcClientError(error)) {
+                return yield* error
               }
-              return yield* Effect.fail(
-                new RpcClientError({ message: "Stream error", cause: error }),
-              )
+              return yield* new RpcClientError({ message: "Stream error", cause: error })
             }
 
             return new StreamSkip()

@@ -55,24 +55,72 @@ interface MutationProcedureHook<I, A, E> {
   useMutation: (options?: UseMutationOptions<A, E, I>) => UseMutationReturn<A, E, I>
 }
 
-type ProcedureHook<P> =
-  P extends ProcedureDefinition<infer I, infer O, infer E, any, "query", any, any>
-    ? QueryProcedureHook<unknown extends I ? void : I, O, E>
-    : P extends ProcedureDefinition<infer I, infer O, infer E, any, "mutation", any, any>
-      ? MutationProcedureHook<unknown extends I ? void : I, O, E>
+/**
+ * Extract ProcedureDefinition from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractProcedureDefinition<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends ProcedureDefinition<infer I, infer A, infer E, infer Ctx, infer Type>
+      ? ProcedureDefinition<I, A, E, Ctx, Type>
       : never
+    : P extends ProcedureDefinition<infer I, infer A, infer E, infer Ctx, infer Type>
+      ? ProcedureDefinition<I, A, E, Ctx, Type>
+      : never
+
+type ProcedureHook<P> =
+  ExtractProcedureDefinition<P> extends ProcedureDefinition<
+    infer I,
+    infer O,
+    infer E,
+    any,
+    infer Type
+  >
+    ? Type extends "query"
+      ? QueryProcedureHook<unknown extends I ? void : I, O, E>
+      : Type extends "mutation"
+        ? MutationProcedureHook<unknown extends I ? void : I, O, E>
+        : never
+    : never
 
 type ProceduresHooks<P extends ProcedureRecord> = {
   [K in keyof P]: ProcedureHook<P[K]>
 }
 
 /**
+ * Extract ProceduresGroup from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractProceduresGroup<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends ProceduresGroup<infer Name, infer Procs>
+      ? ProceduresGroup<Name, Procs>
+      : never
+    : P extends ProceduresGroup<infer Name, infer Procs>
+      ? ProceduresGroup<Name, Procs>
+      : never
+
+/**
+ * Extract RouterShape from an Effect or return the value directly.
+ * Note: Uses `infer _E` and `infer _R` to handle Effect variance correctly.
+ */
+type ExtractRouterShape<P> =
+  P extends Effect.Effect<infer D, infer _E, infer _R>
+    ? D extends RouterShape<infer Routes>
+      ? RouterShape<Routes>
+      : never
+    : P extends RouterShape<infer Routes>
+      ? RouterShape<Routes>
+      : never
+
+/**
  * Recursively build the hooks type from a RouterRecord.
+ * Handles both Effect-wrapped and plain values.
  */
 export type RouterHooks<R extends RouterRecord> = {
-  [K in keyof R]: R[K] extends ProceduresGroup<any, infer P>
+  [K in keyof R]: ExtractProceduresGroup<R[K]> extends ProceduresGroup<infer _Name, infer P>
     ? ProceduresHooks<P>
-    : R[K] extends RouterShape<infer NestedRoutes>
+    : ExtractRouterShape<R[K]> extends RouterShape<infer NestedRoutes>
       ? RouterHooks<NestedRoutes>
       : never
 }
@@ -92,12 +140,14 @@ interface ClientContextValue<TRouter extends RouterShape<RouterRecord>> {
 
 const ClientContext = React.createContext<ClientContextValue<any> | null>(null)
 
-function useClient<TRouter extends RouterShape<RouterRecord>>(): CoreRouterClient<TRouter["routes"]> {
+function useClient<TRouter extends RouterShape<RouterRecord>>(): CoreRouterClient<
+  TRouter["routes"]
+> {
   const context = React.useContext(ClientContext)
   if (context === null) {
     throw new Error(
       "[effect-trpc] useClient must be used within a TRPCHooksProvider. " +
-      "Wrap your app with <trpc.Provider>..."
+        "Wrap your app with <trpc.Provider>...",
     )
   }
   return context.client
@@ -225,16 +275,9 @@ export function createTRPCHooks<TRouter extends RouterShape<RouterRecord>>(
       return runtime.runSync(program)
     }, [runtime])
 
-    const contextValue = React.useMemo(
-      () => ({ client }),
-      [client],
-    )
+    const contextValue = React.useMemo(() => ({ client }), [client])
 
-    return React.createElement(
-      ClientContext.Provider,
-      { value: contextValue },
-      children,
-    )
+    return React.createElement(ClientContext.Provider, { value: contextValue }, children)
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -425,9 +468,10 @@ export function createTRPCHooks<TRouter extends RouterShape<RouterRecord>>(
         }, [enabled, refetchInterval, refetchIntervalInBackground, refetch])
 
         // Compute display data
-        const data = AtomResult.isSuccess(atomState.result) && !atomState.result.waiting
-          ? atomState.result.value
-          : undefined
+        const data =
+          AtomResult.isSuccess(atomState.result) && !atomState.result.waiting
+            ? atomState.result.value
+            : undefined
 
         const error = AtomResult.isFailure(atomState.result)
           ? Option.getOrUndefined(AtomResult.error(atomState.result))
@@ -565,21 +609,24 @@ export function createTRPCHooks<TRouter extends RouterShape<RouterRecord>>(
 
   // Create recursive proxy for procedures
   const createRecursiveProxy = (pathSegments: string[] = []): unknown => {
-    return new Proxy({}, {
-      get(_target, prop: string) {
-        const newPath = [...pathSegments, prop]
+    return new Proxy(
+      {},
+      {
+        get(_target, prop: string) {
+          const newPath = [...pathSegments, prop]
 
-        // Check if this is a hook method
-        if (prop === "useQuery" || prop === "useMutation") {
-          const procedurePath = pathSegments.join(".")
-          const hooks = createProcedureHooks(procedurePath)
-          return (hooks as Record<string, unknown>)[prop]
-        }
+          // Check if this is a hook method
+          if (prop === "useQuery" || prop === "useMutation") {
+            const procedurePath = pathSegments.join(".")
+            const hooks = createProcedureHooks(procedurePath)
+            return (hooks as Record<string, unknown>)[prop]
+          }
 
-        // Otherwise, continue building the path
-        return createRecursiveProxy(newPath)
+          // Otherwise, continue building the path
+          return createRecursiveProxy(newPath)
+        },
       },
-    })
+    )
   }
 
   return {

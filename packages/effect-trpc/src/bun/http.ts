@@ -32,35 +32,34 @@
 
 import * as BunContext from "@effect/platform-bun/BunContext"
 import * as BunHttpPlatform from "@effect/platform-bun/BunHttpPlatform"
+import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import type { RouterRecord, RouterShape } from "../core/server/router.js"
 import {
-    type CorsOptions,
-    type SecurityHeadersOptions,
-    addSecurityHeaders,
-    buildCorsHeaders,
-    buildSecurityHeaders,
-    createRpcWebHandler,
+  type CorsOptions,
+  type SecurityHeadersOptions,
+  addSecurityHeaders,
+  buildCorsHeaders,
+  buildSecurityHeaders,
+  createRpcWebHandler,
 } from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CreateServerOptions<
-  TRouter extends RouterShape<RouterRecord>,
-  HandlersOut,
-  R,
-> {
+export interface CreateServerOptions<Routes extends RouterRecord, HandlersOut, HandlersR, RouterR> {
   /**
-   * The router instance.
+   * The router wrapped in an Effect.
+   * Requirements are tracked via Effect's R channel.
    */
-  readonly router: TRouter
+  readonly router: Effect.Effect<RouterShape<Routes>, never, RouterR>
 
   /**
-   * The layer providing all procedure implementations.
+   * The layer providing all procedure AND middleware implementations.
+   * Must satisfy all requirements from the router.
    */
-  readonly handlers: Layer.Layer<HandlersOut, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, HandlersR>
 
   /**
    * Port to listen on.
@@ -188,15 +187,28 @@ declare const Bun: {
  * })
  * ```
  */
-export function createFetchHandler<
-  TRouter extends RouterShape<RouterRecord>,
-  HandlersOut,
-  R,
->(
-  options: Omit<CreateServerOptions<TRouter, HandlersOut, R>, "port" | "host">,
+/**
+ * Extract a value from an Effect synchronously.
+ * Safe because our definitions always use Effect.succeed internally.
+ */
+function extractFromEffect<T>(effect: Effect.Effect<T, never, any>): T {
+  let extracted: T | undefined
+  Effect.runSync(
+    Effect.map(effect as Effect.Effect<T, never, never>, (val) => {
+      extracted = val
+    }),
+  )
+  if (extracted === undefined) {
+    throw new Error("Failed to extract router from Effect")
+  }
+  return extracted
+}
+
+export function createFetchHandler<Routes extends RouterRecord, HandlersOut, HandlersR, RouterR>(
+  options: Omit<CreateServerOptions<Routes, HandlersOut, HandlersR, RouterR>, "port" | "host">,
 ): FetchHandler {
   const {
-    router,
+    router: routerEffect,
     handlers,
     path = "/rpc",
     disableTracing,
@@ -205,6 +217,9 @@ export function createFetchHandler<
     securityHeaders: securityHeadersOption = true,
   } = options
 
+  // Extract the router from the Effect
+  const router = extractFromEffect(routerEffect)
+
   const handlersWithBunRuntime = handlers.pipe(
     Layer.provide(BunHttpPlatform.layer),
     Layer.provide(BunContext.layer),
@@ -212,7 +227,7 @@ export function createFetchHandler<
 
   // Create the web handler using shared utility
   const webHandler = createRpcWebHandler({
-    router,
+    router: router as RouterShape<RouterRecord>,
     handlers: handlersWithBunRuntime,
     disableTracing,
     spanPrefix,
@@ -297,12 +312,8 @@ export function createFetchHandler<
  * console.log(`Server running on http://localhost:${server.port}`)
  * ```
  */
-export function createServer<
-  TRouter extends RouterShape<RouterRecord>,
-  HandlersOut,
-  R,
->(
-  options: CreateServerOptions<TRouter, HandlersOut, R>,
+export function createServer<Routes extends RouterRecord, HandlersOut, HandlersR, RouterR>(
+  options: CreateServerOptions<Routes, HandlersOut, HandlersR, RouterR>,
 ): BunServerInstance {
   const { port = 3000, host = "0.0.0.0", ...handlerOptions } = options
 

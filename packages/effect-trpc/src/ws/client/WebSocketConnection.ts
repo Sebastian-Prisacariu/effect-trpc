@@ -334,12 +334,10 @@ const makeWebSocketConnection = (
           const ws = yield* Ref.get(wsRef)
 
           if (!ws || ws.readyState !== WebSocket.OPEN) {
-            return yield* Effect.fail(
-              new WebSocketSendError({
-                reason: "NotConnected",
-                description: "WebSocket is not connected",
-              }),
-            )
+            return yield* new WebSocketSendError({
+              reason: "NotConnected",
+              description: "WebSocket is not connected",
+            })
           }
 
           // Use Schema encoding for type-safe serialization (same as server)

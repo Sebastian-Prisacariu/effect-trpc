@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { Client } from "../core/client/index.js"
 import { procedure } from "../core/server/procedure.js"
-import { procedures } from "../core/server/procedures.js"
+import { procedures, Procedures } from "../core/server/procedures.js"
 import { Router } from "../core/server/router.js"
 import { createRouteHandler } from "../next/index.js"
 import { nodeToWebRequest, webToNodeResponse } from "../node/index.js"
@@ -28,14 +28,19 @@ const TodoProcedures = procedures("todo", {
   add: procedure.input(AddTodoInputSchema).output(TodoSchema).mutation(),
 })
 
-const appRouter = Router.make({
+const appRouterEffect = Router.make({
   todo: TodoProcedures,
 })
 
+type AppRouter = Effect.Effect.Success<typeof appRouterEffect>
+
+// Extract the router synchronously (Router.make returns Effect.succeed)
+const appRouter: AppRouter = Effect.runSync(appRouterEffect)
+
 const createTodoHandlers = (store: Array<Todo>) =>
-  Layer.mergeAll(
-    TodoProcedures.procedures.list.toLayer(() => Effect.succeed(store)),
-    TodoProcedures.procedures.add.toLayer((_ctx, input) =>
+  Procedures.toLayer(TodoProcedures, {
+    list: () => Effect.succeed(store),
+    add: (_ctx, input) =>
       Effect.sync(() => {
         const next: Todo = {
           id: String(store.length + 1),
@@ -44,8 +49,7 @@ const createTodoHandlers = (store: Array<Todo>) =>
         store.push(next)
         return next
       }),
-    ),
-  )
+  })
 
 describe("next integration path", () => {
   describe("createRouteHandler", () => {
@@ -57,7 +61,7 @@ describe("next integration path", () => {
     beforeAll(async () => {
       store.length = 0
       const routeHandlers = createRouteHandler({
-        router: appRouter,
+        router: appRouterEffect,
         handlers: createTodoHandlers(store),
         cors: true,
       })
@@ -110,9 +114,7 @@ describe("next integration path", () => {
         return { created, todos }
       })
 
-      const result = await Effect.runPromise(
-        Effect.provide(program, Client.HttpLive(serverUrl)),
-      )
+      const result = await Effect.runPromise(Effect.provide(program, Client.HttpLive(serverUrl)))
 
       expect(result.created.title).toBe("Ship Next path")
       expect(result.todos).toHaveLength(1)

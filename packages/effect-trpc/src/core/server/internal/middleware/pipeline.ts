@@ -47,11 +47,9 @@ export class Middleware extends Context.Tag("@effect-trpc/Middleware")<
               input as never,
             )) as BaseContext
           } else {
-            yield* Effect.fail(
-              new MiddlewareError({
-                message: "Unknown middleware definition",
-              }),
-            )
+            yield* new MiddlewareError({
+              message: "Unknown middleware definition",
+            })
           }
         }
 

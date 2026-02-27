@@ -24,7 +24,7 @@ import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { procedure, procedures, Router } from "../index.js"
+import { procedure, procedures, Procedures, Router } from "../index.js"
 import { createHandler, nodeToWebRequest, webToNodeResponse } from "../node/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,14 +111,11 @@ type AppRouter = typeof appRouter
 // ─────────────────────────────────────────────────────────────────────────────
 
 const createMockStreamHandlers = () =>
-  StreamProcedures.toLayer({
-    numbers: (_ctx, { count }) =>
-      Stream.range(0, count - 1),
+  Procedures.toLayer(StreamProcedures, {
+    numbers: (_ctx, { count }) => Stream.range(0, count - 1),
 
     delayed: (_ctx, { delayMs, count }) =>
-      Stream.range(0, count - 1).pipe(
-        Stream.tap(() => Effect.sleep(Duration.millis(delayMs))),
-      ),
+      Stream.range(0, count - 1).pipe(Stream.tap(() => Effect.sleep(Duration.millis(delayMs)))),
 
     failing: (_ctx, { failAfter }) =>
       Stream.range(0, failAfter - 1).pipe(
@@ -131,15 +128,13 @@ const createMockStreamHandlers = () =>
       ),
 
     infinite: (_ctx) =>
-      Stream.iterate(0, (n) => n + 1).pipe(
-        Stream.tap(() => Effect.sleep(Duration.millis(10))),
-      ),
+      Stream.iterate(0, (n) => n + 1).pipe(Stream.tap(() => Effect.sleep(Duration.millis(10)))),
 
     empty: (_ctx) => Stream.empty,
   })
 
 const createMockChatHandlers = () =>
-  ChatProcedures.toLayer({
+  Procedures.toLayer(ChatProcedures, {
     generate: (_ctx, { prompt }) =>
       Stream.fromIterable([
         { _tag: "text-delta" as const, delta: `Processing: ` },
@@ -149,9 +144,11 @@ const createMockChatHandlers = () =>
       ] satisfies ChatPart[]),
 
     failingChat: (_ctx, { prompt: _prompt }) =>
-      (Stream.fromIterable([
-        { _tag: "text-delta" as const, delta: "Starting..." },
-      ] satisfies ChatPart[]) as Stream.Stream<ChatPart, StreamError, never>).pipe(
+      (
+        Stream.fromIterable([
+          { _tag: "text-delta" as const, delta: "Starting..." },
+        ] satisfies ChatPart[]) as Stream.Stream<ChatPart, StreamError, never>
+      ).pipe(
         Stream.concat(
           Stream.fail({
             _tag: "StreamError" as const,
@@ -286,9 +283,7 @@ describe("Stream and Chat Procedures", () => {
     })
 
     it("stream with delay still completes", async () => {
-      const stream = Stream.range(0, 2).pipe(
-        Stream.tap(() => Effect.sleep(Duration.millis(10))),
-      )
+      const stream = Stream.range(0, 2).pipe(Stream.tap(() => Effect.sleep(Duration.millis(10))))
 
       const chunks = await Effect.runPromise(Stream.runCollect(stream))
 
@@ -339,7 +334,9 @@ describe("Stream and Chat Procedures", () => {
 
     it("chat stream can fail mid-generation", async () => {
       const stream = Stream.concat(
-        Stream.fromIterable([{ _tag: "text-delta" as const, delta: "Starting..." }] satisfies ChatPart[]),
+        Stream.fromIterable([
+          { _tag: "text-delta" as const, delta: "Starting..." },
+        ] satisfies ChatPart[]),
         Stream.fail({ _tag: "StreamError" as const, message: "Generation failed" }),
       )
 
@@ -361,8 +358,8 @@ describe("Stream and Chat Procedures", () => {
       // Accumulate text from deltas
       const text = await Effect.runPromise(
         stream.pipe(
-          Stream.filter((part): part is Extract<ChatPart, { _tag: "text-delta" }> =>
-            part._tag === "text-delta",
+          Stream.filter(
+            (part): part is Extract<ChatPart, { _tag: "text-delta" }> => part._tag === "text-delta",
           ),
           Stream.map((part) => part.delta),
           Stream.runFold("", (acc, delta) => acc + delta),
@@ -393,10 +390,7 @@ describe("Stream and Chat Procedures", () => {
     it("completion handler runs even on error", async () => {
       let completed = false
 
-      const stream = Stream.concat(
-        Stream.make(1),
-        Stream.fail("error"),
-      ).pipe(
+      const stream = Stream.concat(Stream.make(1), Stream.fail("error")).pipe(
         Stream.ensuring(
           Effect.sync(() => {
             completed = true
@@ -488,9 +482,7 @@ describe("Stream and Chat Procedures", () => {
     it("take limits stream output", async () => {
       const stream = Stream.iterate(0, (n) => n + 1)
 
-      const chunks = await Effect.runPromise(
-        stream.pipe(Stream.take(5), Stream.runCollect),
-      )
+      const chunks = await Effect.runPromise(stream.pipe(Stream.take(5), Stream.runCollect))
 
       expect(Chunk.toArray(chunks)).toEqual([0, 1, 2, 3, 4])
     })
@@ -518,11 +510,7 @@ describe("Stream and Chat Procedures", () => {
       const stream = Stream.fail({
         _tag: "StreamError" as const,
         message: "Caught error",
-      }).pipe(
-        Stream.catchTag("StreamError", (error) =>
-          Stream.make(`Recovered: ${error.message}`),
-        ),
-      )
+      }).pipe(Stream.catchTag("StreamError", (error) => Stream.make(`Recovered: ${error.message}`)))
 
       const chunks = await Effect.runPromise(Stream.runCollect(stream))
 

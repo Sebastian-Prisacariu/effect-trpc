@@ -46,24 +46,25 @@ import * as Layer from "effect/Layer"
 import * as Ref from "effect/Ref"
 import * as Schedule from "effect/Schedule"
 import type { RouterRecord, RouterShape } from "../core/server/router.js"
+import { type FromServerMessage } from "../ws/protocol.js"
 import {
-    type FromServerMessage,
-} from "../ws/protocol.js"
-import { makeAdapterRuntimeState, type ConnectionAdmission } from "../ws/shared/adapter-runtime-state.js"
+  makeAdapterRuntimeState,
+  type ConnectionAdmission,
+} from "../ws/shared/adapter-runtime-state.js"
 import {
-    cleanupConnection,
-    ConnectionRegistry,
-    createWebSocketRuntimeWithHandlers,
-    extractSubscriptionHandlersFromLayer,
-    handleMessage,
-    initialConnectionState,
-    makeCleanupGuard,
-    registerHandlers,
-    WebSocketCodec,
-    type AuthResult,
-    type Connection,
-    type ConnectionStateData,
-    type WebSocketAuthHandler,
+  cleanupConnection,
+  ConnectionRegistry,
+  createWebSocketRuntimeWithHandlers,
+  extractSubscriptionHandlersFromLayer,
+  handleMessage,
+  initialConnectionState,
+  makeCleanupGuard,
+  registerHandlers,
+  WebSocketCodec,
+  type AuthResult,
+  type Connection,
+  type ConnectionStateData,
+  type WebSocketAuthHandler,
 } from "../ws/shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,9 +134,7 @@ export interface WebSocketHandler {
    * @param ws - The WebSocket instance (from 'ws' package)
    * @returns Effect that runs until the connection closes
    */
-  readonly handleConnection: (
-    ws: WebSocketLike,
-  ) => Effect.Effect<void, never, never>
+  readonly handleConnection: (ws: WebSocketLike) => Effect.Effect<void, never, never>
 
   /**
    * Broadcast a message to all connected clients.
@@ -145,10 +144,7 @@ export interface WebSocketHandler {
   /**
    * Broadcast a message to a specific user (all their connections).
    */
-  readonly broadcastToUser: (
-    userId: string,
-    message: FromServerMessage,
-  ) => Effect.Effect<void>
+  readonly broadcastToUser: (userId: string, message: FromServerMessage) => Effect.Effect<void>
 
   /**
    * Get count of connected clients.
@@ -293,7 +289,7 @@ export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>
     () => {
       Effect.runSync(runtimeState.markReady)
     },
-    (error) => { 
+    (error) => {
       const registrationError = error instanceof Error ? error : new Error(String(error))
       Effect.runSync(runtimeState.markFailed(registrationError))
       // Log the error since handler registration failure is critical
@@ -326,26 +322,24 @@ export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>
             ),
           )
           if (!encoded) return
-          
-          const json = typeof encoded === "string" 
-            ? encoded 
-            : new TextDecoder().decode(encoded)
-            
+
+          const json = typeof encoded === "string" ? encoded : new TextDecoder().decode(encoded)
+
           yield* Effect.async<void, never>((resume) => {
             if (ws.readyState === ws.OPEN) {
               ws.send(json, (err) => {
                 // Log WebSocket send errors but don't fail the effect
                 if (err) {
-                  Effect.runFork(
-                    Effect.logWarning(`WebSocket send failed: ${err.message}`),
-                  )
+                  Effect.runFork(Effect.logWarning(`WebSocket send failed: ${err.message}`))
                 }
                 resume(Effect.void)
               })
             } else {
               // Log when trying to send to non-open WebSocket
               Effect.runFork(
-                Effect.logDebug(`WebSocket send skipped: connection not open (state: ${ws.readyState})`),
+                Effect.logDebug(
+                  `WebSocket send skipped: connection not open (state: ${ws.readyState})`,
+                ),
               )
               resume(Effect.void)
             }
@@ -437,7 +431,7 @@ export function createWebSocketHandler<TRouter extends RouterShape<RouterRecord>
         const handleMessage = (data: unknown) => {
           // Update last activity
           managedRuntime.runFork(updateLastActivity)
-          
+
           let dataStr: string
           if (typeof data === "string") {
             dataStr = data

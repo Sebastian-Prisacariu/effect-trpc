@@ -19,44 +19,39 @@
  * ```
  */
 
-import type * as Layer from "effect/Layer"
+import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import type { RouterRecord, RouterShape } from "../core/server/router.js"
-import {
-  type CorsOptions,
-  buildCorsHeaders,
-  createRpcWebHandler,
-} from "../shared/index.js"
+import { type CorsOptions, buildCorsHeaders, createRpcWebHandler } from "../shared/index.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Options for createRouteHandler.
+ *
+ * With Effect-based requirement tracking, the router is passed as an Effect
+ * that carries all its requirements in the R channel. The handlers layer
+ * must provide all required services.
+ */
 export interface CreateRouteHandlerOptions<
-  TRouter extends RouterShape<RouterRecord>,
+  Routes extends RouterRecord,
   HandlersOut,
-  R,
+  HandlersR,
+  RouterR,
 > {
   /**
-   * The router instance.
+   * The router wrapped in an Effect.
+   * Requirements are tracked via Effect's R channel.
    */
-  readonly router: TRouter
+  readonly router: Effect.Effect<RouterShape<Routes>, never, RouterR>
 
   /**
-   * The layer providing all procedure implementations.
-   *
-   * @remarks
-   * **Why `any` for the provided type?**
-   *
-   * The Layer's provided type is `any` because the handlers layer is constructed
-   * dynamically from router procedure definitions. TypeScript cannot infer the
-   * exact union of all procedure handler services at this generic interface level.
-   *
-   * Type safety is maintained through:
-   * 1. The `TRouter` generic constrains which procedures exist
-   * 2. The handlers implementation is type-checked when created
-   * 3. Only the `R` (requirements) type matters for composition
+   * The layer providing all procedure AND middleware implementations.
+   * Must satisfy all requirements from the router.
    */
-  readonly handlers: Layer.Layer<HandlersOut, never, R>
+  readonly handlers: Layer.Layer<HandlersOut, never, HandlersR>
 
   /**
    * Disable OpenTelemetry tracing.
@@ -105,6 +100,23 @@ export interface RouteHandlers {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Extract a value from an Effect synchronously.
+ * Safe because our definitions always use Effect.succeed internally.
+ */
+function extractFromEffect<T>(effect: Effect.Effect<T, never, any>): T {
+  let extracted: T | undefined
+  Effect.runSync(
+    Effect.map(effect as Effect.Effect<T, never, never>, (val) => {
+      extracted = val
+    }),
+  )
+  if (extracted === undefined) {
+    throw new Error("Failed to extract router from Effect")
+  }
+  return extracted
+}
+
+/**
  * Create Next.js App Router route handlers for effect-trpc.
  *
  * @remarks
@@ -135,17 +147,21 @@ export interface RouteHandlers {
  * // export const runtime = "edge"
  * ```
  */
-export function createRouteHandler<
-  TRouter extends RouterShape<RouterRecord>,
-  HandlersOut,
-  R,
->(
-  options: CreateRouteHandlerOptions<TRouter, HandlersOut, R>,
+export function createRouteHandler<Routes extends RouterRecord, HandlersOut, HandlersR, RouterR>(
+  options: CreateRouteHandlerOptions<Routes, HandlersOut, HandlersR, RouterR>,
 ): RouteHandlers {
-  const { router, handlers, disableTracing, spanPrefix, cors } = options
+  const { router: routerEffect, handlers, disableTracing, spanPrefix, cors } = options
+
+  // Extract the router from the Effect
+  const router = extractFromEffect(routerEffect)
 
   // Create the web handler using shared utility
-  const webHandler = createRpcWebHandler({ router, handlers, disableTracing, spanPrefix })
+  const webHandler = createRpcWebHandler({
+    router: router as RouterShape<RouterRecord>,
+    handlers: handlers as Layer.Layer<unknown, never, unknown>,
+    disableTracing,
+    spanPrefix,
+  } as Parameters<typeof createRpcWebHandler>[0])
 
   // Build CORS headers if enabled
   const corsHeaders = cors ? buildCorsHeaders(cors === true ? {} : cors) : null

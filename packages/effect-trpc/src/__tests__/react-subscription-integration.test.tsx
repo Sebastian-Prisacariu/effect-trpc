@@ -14,13 +14,13 @@ const receivedMessages: any[] = []
 
 /**
  * Enhanced MockWebSocket that wraps Node.js WebSocket for integration tests.
- * 
+ *
  * This uses the shared createWrappedMockWebSocket utility which provides:
  * - Standard WebSocket API properties (readyState constants, bufferedAmount, protocol)
  * - Proper state transitions
  * - Event forwarding for browser-style handlers (onopen, onclose, onmessage, onerror)
  * - Test helper methods (__getSentMessages, __clearSentMessages, etc.)
- * 
+ *
  * Additional functionality for this test file:
  * - Intercepts sent messages and stores Subscribe/ClientData/Unsubscribe for assertions
  */
@@ -35,14 +35,18 @@ class MockWebSocket extends BaseMockWebSocket {
 
   constructor(url: string, protocols?: string | string[]) {
     super(url, protocols)
-    
+
     // Intercept send to capture messages for test assertions
     const self = this as any
     const originalSend = self["send"].bind(this)
-    self["send"] = function(data: any, cb?: any) {
+    self["send"] = function (data: any, cb?: any) {
       try {
         const parsed = typeof data === "string" ? JSON.parse(data) : JSON.parse(data.toString())
-        if (parsed._tag === "ClientData" || parsed._tag === "Unsubscribe" || parsed._tag === "Subscribe") {
+        if (
+          parsed._tag === "ClientData" ||
+          parsed._tag === "Unsubscribe" ||
+          parsed._tag === "Subscribe"
+        ) {
           receivedMessages.push(parsed)
         }
       } catch (_e) {
@@ -57,7 +61,7 @@ globalThis.WebSocket = MockWebSocket as any
 if (typeof window !== "undefined") window.WebSocket = MockWebSocket as any
 if (typeof global !== "undefined") global.WebSocket = MockWebSocket as any
 
-import { procedure, procedures, Router } from "../index.js"
+import { procedure, procedures, Procedures, Router } from "../index.js"
 import { createWebSocketHandler } from "../node/index.js"
 import { useSubscription, WebSocketProvider } from "../react/subscription.js"
 
@@ -65,33 +69,31 @@ const EchoInput = Schema.Struct({ text: Schema.String })
 const EchoOutput = Schema.Struct({ text: Schema.String })
 
 const testProcedures = procedures("test", {
-  echo: procedure
-    .input(EchoInput)
-    .output(EchoOutput)
-    .subscription(),
-  protected: procedure
-    .input(Schema.String)
-    .output(Schema.String)
-    .subscription(),
+  echo: procedure.input(EchoInput).output(EchoOutput).subscription(),
+  protected: procedure.input(Schema.String).output(Schema.String).subscription(),
 })
 
-const testRouter = Router.make({
+const testRouterEffect = Router.make({
   test: testProcedures,
 })
 
-const TestHandlersLive = testProcedures.toLayer({
+type TestRouter = Effect.Effect.Success<typeof testRouterEffect>
+
+// Extract the router synchronously (Router.make returns Effect.succeed)
+const testRouter: TestRouter = Effect.runSync(testRouterEffect)
+
+const TestHandlersLive = Procedures.toLayer(testProcedures, {
   echo: {
-    onSubscribe: (input, _ctx) => {
-      return Effect.succeed(Stream.fromEffect(Effect.succeed({ text: input.text })).pipe(
-        Stream.concat(Stream.never)
-      ))
-    }
+    onSubscribe: (input: { readonly text: string }, _ctx: unknown) => {
+      return Effect.succeed(
+        Stream.fromEffect(Effect.succeed({ text: input.text })).pipe(Stream.concat(Stream.never)),
+      )
+    },
   },
   protected: {
-    onSubscribe: (input, _ctx) => Effect.succeed(Stream.fromEffect(Effect.succeed(input)).pipe(
-      Stream.concat(Stream.never)
-    ))
-  }
+    onSubscribe: (input: string, _ctx: unknown) =>
+      Effect.succeed(Stream.fromEffect(Effect.succeed(input)).pipe(Stream.concat(Stream.never))),
+  },
 }) as Layer.Layer<unknown, never, never>
 
 let wss: WebSocketServer
@@ -101,15 +103,15 @@ const connections: Set<any> = new Set()
 
 beforeAll(async () => {
   port = 4600 + Math.floor(Math.random() * 500)
-  
+
   wsHandler = createWebSocketHandler({
     router: testRouter,
     handlers: TestHandlersLive,
     auth: {
       authenticate: (token) => Effect.succeed({ userId: token }),
-      canSubscribe: (auth, path) => 
-        Effect.succeed(path !== "test.protected" || auth.userId === "valid")
-    }
+      canSubscribe: (auth, path) =>
+        Effect.succeed(path !== "test.protected" || auth.userId === "valid"),
+    },
   })
 
   wss = new WebSocketServer({ port })
@@ -137,16 +139,18 @@ afterAll(async () => {
 
 const createWrapper = (getToken: Effect.Effect<string, unknown> = Effect.succeed("test-token")) => {
   return ({ children }: { children: React.ReactNode }) => (
-    <WebSocketProvider config={{
-      url: `ws://localhost:${port}`,
-      getToken,
-      reconnect: {
-        initialDelayMs: 100,
-        maxDelayMs: 200,
-        factor: 1.5,
-        maxAttempts: 3
-      }
-    }}>
+    <WebSocketProvider
+      config={{
+        url: `ws://localhost:${port}`,
+        getToken,
+        reconnect: {
+          initialDelayMs: 100,
+          maxDelayMs: 200,
+          factor: 1.5,
+          maxAttempts: 3,
+        },
+      }}
+    >
       {children}
     </WebSocketProvider>
   )
@@ -160,16 +164,29 @@ describe("useSubscription Integration", () => {
 
   it("1. WS ID Integrity: successfully sends data and unsubscribes using the dynamically generated id", async () => {
     const wrapper = createWrapper()
-    const { result } = renderHook(() => useSubscription("test.echo", { text: "hello" }), { wrapper })
+    const { result } = renderHook(() => useSubscription("test.echo", { text: "hello" }), {
+      wrapper,
+    })
 
     // Debug: Log state transitions
     console.log("Initial state:", result.current.state._tag)
     console.log("Connection state:", result.current.connectionState._tag)
 
-    await waitFor(() => {
-      console.log("Waiting... state:", result.current.state._tag, "connection:", result.current.connectionState._tag, "received:", receivedMessages.length, receivedMessages.map(m => m._tag).join(","))
-      expect(result.current.isActive).toBe(true)
-    }, { timeout: 3000, interval: 100 })
+    await waitFor(
+      () => {
+        console.log(
+          "Waiting... state:",
+          result.current.state._tag,
+          "connection:",
+          result.current.connectionState._tag,
+          "received:",
+          receivedMessages.length,
+          receivedMessages.map((m) => m._tag).join(","),
+        )
+        expect(result.current.isActive).toBe(true)
+      },
+      { timeout: 3000, interval: 100 },
+    )
 
     // Simulate sending data from client to server
     act(() => {
@@ -177,7 +194,7 @@ describe("useSubscription Integration", () => {
     })
 
     await waitFor(() => {
-      const clientDataMsgs = receivedMessages.filter(m => m._tag === "ClientData")
+      const clientDataMsgs = receivedMessages.filter((m) => m._tag === "ClientData")
       expect(clientDataMsgs.length).toBe(1)
       expect(clientDataMsgs[0].data).toEqual({ clientMessage: "world" })
       // ID should be a dynamically generated string
@@ -192,13 +209,15 @@ describe("useSubscription Integration", () => {
 
     await waitFor(() => {
       // Check that an Unsubscribe message was sent
-      expect(receivedMessages.some(m => m._tag === "Unsubscribe")).toBe(true)
+      expect(receivedMessages.some((m) => m._tag === "Unsubscribe")).toBe(true)
     })
   })
 
   it("2. Reconnection & State: dropping a connection transitions to Reconnecting and successfully re-establishes", async () => {
     const wrapper = createWrapper()
-    const { result } = renderHook(() => useSubscription("test.echo", { text: "hello" }), { wrapper })
+    const { result } = renderHook(() => useSubscription("test.echo", { text: "hello" }), {
+      wrapper,
+    })
 
     await waitFor(() => {
       expect(result.current.isActive).toBe(true)
@@ -206,26 +225,32 @@ describe("useSubscription Integration", () => {
 
     // Drop the connection
     act(() => {
-      connections.forEach(ws => ws.terminate())
+      connections.forEach((ws) => ws.terminate())
     })
 
     // Should transition to Reconnecting
-    await waitFor(() => {
-      expect(result.current.isReconnecting).toBe(true)
-    }, { interval: 10 })
+    await waitFor(
+      () => {
+        expect(result.current.isReconnecting).toBe(true)
+      },
+      { interval: 10 },
+    )
 
     // Should automatically reconnect and become active again
-    await waitFor(() => {
-      expect(result.current.isActive).toBe(true)
-    }, { timeout: 3000 })
+    await waitFor(
+      () => {
+        expect(result.current.isActive).toBe(true)
+      },
+      { timeout: 3000 },
+    )
   })
 
   it("3. Stale Input Check: updating React state, then dropping connection results in new state being sent on resubscribe", async () => {
     const wrapper = createWrapper()
-    const { result, rerender } = renderHook(
-      ({ input }) => useSubscription("test.echo", input),
-      { wrapper, initialProps: { input: { text: "first" } } }
-    )
+    const { result, rerender } = renderHook(({ input }) => useSubscription("test.echo", input), {
+      wrapper,
+      initialProps: { input: { text: "first" } },
+    })
 
     await waitFor(() => {
       expect(result.current.isActive).toBe(true)
@@ -251,22 +276,28 @@ describe("useSubscription Integration", () => {
 
     // Drop connection
     act(() => {
-      connections.forEach(ws => ws.terminate())
+      connections.forEach((ws) => ws.terminate())
     })
 
     // Wait for reconnect and active state
-    await waitFor(() => {
-      expect(result.current.isReconnecting).toBe(true)
-    }, { interval: 10 })
+    await waitFor(
+      () => {
+        expect(result.current.isReconnecting).toBe(true)
+      },
+      { interval: 10 },
+    )
 
-    await waitFor(() => {
-      expect(result.current.connectionState._tag).toBe("Ready")
-      const subscribes = receivedMessages.filter(m => m._tag === "Subscribe")
-      expect(subscribes.length).toBeGreaterThan(0)
-    }, { timeout: 3000, interval: 10 })
+    await waitFor(
+      () => {
+        expect(result.current.connectionState._tag).toBe("Ready")
+        const subscribes = receivedMessages.filter((m) => m._tag === "Subscribe")
+        expect(subscribes.length).toBeGreaterThan(0)
+      },
+      { timeout: 3000, interval: 10 },
+    )
 
     // Check that the new input was sent on resubscribe
-    const subscribes = receivedMessages.filter(m => m._tag === "Subscribe")
+    const subscribes = receivedMessages.filter((m) => m._tag === "Subscribe")
     expect(subscribes.length).toBeGreaterThan(0)
     const lastSubscribe = subscribes[subscribes.length - 1]
     expect(lastSubscribe.input).toEqual({ text: "second" })
@@ -276,9 +307,12 @@ describe("useSubscription Integration", () => {
     const wrapper = createWrapper(Effect.succeed("invalid"))
     const { result } = renderHook(() => useSubscription("test.protected", "hello"), { wrapper })
 
-    await waitFor(() => {
-      expect(result.current.isError).toBe(true)
-      expect(result.current.state._tag).toBe("Error")
-    }, { timeout: 1000 })
+    await waitFor(
+      () => {
+        expect(result.current.isError).toBe(true)
+        expect(result.current.state._tag).toBe("Error")
+      },
+      { timeout: 1000 },
+    )
   })
 })

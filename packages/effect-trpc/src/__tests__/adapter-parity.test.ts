@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { createFetchHandler as createBunHandler } from "../bun/index.js"
-import { procedure, procedures, Router } from "../index.js"
+import { procedure, procedures, Procedures, Router } from "../index.js"
 import { createRouteHandler as createNextHandler } from "../next/index.js"
 import { createHandler as createNodeHandler } from "../node/index.js"
 
@@ -12,7 +12,7 @@ import { createHandler as createNodeHandler } from "../node/index.js"
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MyError extends Schema.TaggedError<MyError>()("MyError", {
-  message: Schema.String
+  message: Schema.String,
 }) {}
 
 const TestProcedures = procedures("test", {
@@ -21,17 +21,14 @@ const TestProcedures = procedures("test", {
     .output(Schema.String)
     .query(),
 
-  fail: procedure
-    .output(Schema.Never)
-    .error(MyError)
-    .mutation(),
+  fail: procedure.output(Schema.Never).error(MyError).mutation(),
 })
 
 const appRouter = Router.make({
   test: TestProcedures,
 })
 
-const HandlersLive = TestProcedures.toLayer({
+const HandlersLive = Procedures.toLayer(TestProcedures, {
   hello: (_ctx, { name }) => Effect.succeed(`Hello, ${name}!`),
   fail: () => Effect.fail(new MyError({ message: "Task failed successfully" })),
 })
@@ -72,20 +69,22 @@ describe("Adapter Payload Parity", () => {
   })
 
   const makeRequest = (tag: string, payload: unknown) => {
-    const body = JSON.stringify({
-      _tag: "Request",
-      id: "123",
-      tag,
-      payload,
-      headers: [],
-    }) + "\n"
+    const body =
+      JSON.stringify({
+        _tag: "Request",
+        id: "123",
+        tag,
+        payload,
+        headers: [],
+      }) + "\n"
 
     // Create a fresh request for each handler because reading body consumes it
-    return () => new Request("http://localhost:3000/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/ndjson" },
-      body,
-    })
+    return () =>
+      new Request("http://localhost:3000/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/ndjson" },
+        body,
+      })
   }
 
   const getResponseData = async (response: Response) => {
@@ -128,9 +127,9 @@ describe("Adapter Payload Parity", () => {
         requestId: "123",
         exit: {
           _tag: "Success",
-          value: "Hello, Alice!"
-        }
-      }
+          value: "Hello, Alice!",
+        },
+      },
     ])
   })
 
@@ -166,11 +165,11 @@ describe("Adapter Payload Parity", () => {
             _tag: "Fail",
             error: {
               _tag: "MyError",
-              message: "Task failed successfully"
-            }
-          }
-        }
-      }
+              message: "Task failed successfully",
+            },
+          },
+        },
+      },
     ])
   })
 })

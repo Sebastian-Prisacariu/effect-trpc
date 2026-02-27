@@ -5,8 +5,7 @@ tRPC-style ergonomics for Effect-based applications.
 [![npm version](https://badge.fury.io/js/effect-trpc.svg)](https://www.npmjs.com/package/effect-trpc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> [!CAUTION]
-> **🚧 EXPERIMENTAL — NOT FOR PRODUCTION USE 🚧**
+> [!CAUTION] > **🚧 EXPERIMENTAL — NOT FOR PRODUCTION USE 🚧**
 >
 > This library is in active development and the API **will change without notice**.
 > It is published for early feedback and experimentation only.
@@ -34,6 +33,7 @@ tRPC-style ergonomics for Effect-based applications.
 - **Type safety** - End-to-end types from server to client with no code generation
 - **Streaming first** - Native support for streams and AI chat completions
 - **Effect-first API** - `mutate()` returns Effect, `mutateAsync()` for Promise escape hatch
+- **Unified R channel** - All requirements (middleware services + dependencies) tracked via Effect's type system
 
 ## Installation
 
@@ -47,9 +47,9 @@ pnpm add effect-trpc effect @effect/rpc @effect/platform @effect/schema
 
 ```typescript
 // src/server/procedures/user.ts
-import { procedures, procedure } from 'effect-trpc'
-import * as Schema from 'effect/Schema'
-import * as Effect from 'effect/Effect'
+import { procedures, Procedures, procedure } from "effect-trpc"
+import * as Schema from "effect/Schema"
+import * as Effect from "effect/Effect"
 
 // Define your schemas
 const UserSchema = Schema.Struct({
@@ -63,36 +63,29 @@ const CreateUserSchema = Schema.Struct({
   email: Schema.String,
 })
 
-// Define procedures
-export const UserProcedures = procedures('user', {
-  list: procedure
-    .output(Schema.Array(UserSchema))
-    .query(),
-    
+// Define procedures (returns Effect<ProceduresGroup>)
+export const UserProcedures = procedures("user", {
+  list: procedure.output(Schema.Array(UserSchema)).query(),
+
   byId: procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(UserSchema)
     .query(),
-    
+
   create: procedure
     .input(CreateUserSchema)
     .output(UserSchema)
-    .invalidates(['user.list'])  // Automatic cache invalidation
+    .invalidates(["user.list"]) // Automatic cache invalidation
     .mutation(),
 })
 
-// Implement handlers
-export const UserProceduresLive = UserProcedures.toLayer({
-  list: () => 
-    Effect.succeed([
-      { id: '1', name: 'Alice', email: 'alice@example.com' }
-    ]),
-    
-  byId: ({ id }) => 
-    Effect.succeed({ id, name: 'Test User', email: 'test@example.com' }),
-    
-  create: ({ name, email }) =>
-    Effect.succeed({ id: crypto.randomUUID(), name, email }),
+// Implement handlers using Procedures.toLayer()
+export const UserProceduresLive = Procedures.toLayer(UserProcedures, {
+  list: () => Effect.succeed([{ id: "1", name: "Alice", email: "alice@example.com" }]),
+
+  byId: (_ctx, { id }) => Effect.succeed({ id, name: "Test User", email: "test@example.com" }),
+
+  create: (_ctx, { name, email }) => Effect.succeed({ id: crypto.randomUUID(), name, email }),
 })
 ```
 
@@ -100,35 +93,36 @@ export const UserProceduresLive = UserProcedures.toLayer({
 
 ```typescript
 // src/server/router.ts
-import { Router } from 'effect-trpc'
-import { UserProcedures, UserProceduresLive } from './procedures/user'
-import { PostProcedures, PostProceduresLive } from './procedures/post'
+import { Router } from "effect-trpc"
+import * as Effect from "effect/Effect"
+import { UserProcedures, UserProceduresLive } from "./procedures/user"
+import { PostProcedures, PostProceduresLive } from "./procedures/post"
 
+// Router.make returns Effect<RouterShape, never, R>
+// where R unions all procedure requirements
 export const appRouter = Router.make({
   user: UserProcedures,
   post: PostProcedures,
 })
 
-// Export type for client
-export type AppRouter = typeof appRouter
+// Extract RouterShape type for client (from Effect's success channel)
+export type AppRouter = Effect.Effect.Success<typeof appRouter>
 ```
 
 ### 3. Create Next.js Handler
 
 ```typescript
 // src/app/api/trpc/[...trpc]/route.ts
-import { createRouteHandler } from 'effect-trpc/next'
-import * as Layer from 'effect/Layer'
-import { appRouter } from '~/server/router'
-import { UserProceduresLive } from '~/server/procedures/user'
-import { PostProceduresLive } from '~/server/procedures/post'
+import { createRouteHandler } from "effect-trpc/next"
+import * as Layer from "effect/Layer"
+import { appRouter } from "~/server/router"
+import { UserProceduresLive } from "~/server/procedures/user"
+import { PostProceduresLive } from "~/server/procedures/post"
 
+// Handler accepts Effect-wrapped router directly
 const handler = createRouteHandler({
-  router: appRouter,
-  handlers: Layer.mergeAll(
-    UserProceduresLive,
-    PostProceduresLive,
-  ),
+  router: appRouter, // Effect<RouterShape, never, R>
+  handlers: Layer.mergeAll(UserProceduresLive, PostProceduresLive),
 })
 
 export { handler as GET, handler as POST }
@@ -138,11 +132,11 @@ export { handler as GET, handler as POST }
 
 ```typescript
 // src/lib/trpc.ts
-import { createTRPCReact } from 'effect-trpc/react'
-import type { AppRouter } from '~/server/router'
+import { createTRPCReact } from "effect-trpc/react"
+import type { AppRouter } from "~/server/router"
 
 export const api = createTRPCReact<AppRouter>({
-  url: '/api/trpc',
+  url: "/api/trpc",
 })
 ```
 
@@ -206,11 +200,9 @@ export function UserList() {
 For data fetching. Cached by default.
 
 ```typescript
-const UserProcedures = procedures('user', {
-  list: procedure
-    .output(Schema.Array(UserSchema))
-    .query(),
-    
+const UserProcedures = procedures("user", {
+  list: procedure.output(Schema.Array(UserSchema)).query(),
+
   byId: procedure
     .input(Schema.Struct({ id: Schema.String }))
     .output(UserSchema)
@@ -219,7 +211,7 @@ const UserProcedures = procedures('user', {
 
 // Client usage
 const users = api.user.list.useQuery()
-const user = api.user.byId.useQuery({ id: '123' })
+const user = api.user.byId.useQuery({ id: "123" })
 ```
 
 ### Mutation
@@ -227,16 +219,14 @@ const user = api.user.byId.useQuery({ id: '123' })
 For data modifications. Not cached.
 
 ```typescript
-const UserProcedures = procedures('user', {
+const UserProcedures = procedures("user", {
   create: procedure
     .input(CreateUserSchema)
     .output(UserSchema)
-    .invalidates(['user.list'])
+    .invalidates(["user.list"])
     .mutation(),
-    
-  delete: procedure
-    .input(Schema.Struct({ id: Schema.String }))
-    .mutation(),
+
+  delete: procedure.input(Schema.Struct({ id: Schema.String })).mutation(),
 })
 
 // Client usage
@@ -244,18 +234,18 @@ const createUser = api.user.create.useMutation()
 
 // Effect-first (preferred)
 const handleCreate = Effect.gen(function* () {
-  const user = yield* createUser.mutate({ name: 'Alice', email: 'alice@example.com' })
-  console.log('Created:', user)
+  const user = yield* createUser.mutate({ name: "Alice", email: "alice@example.com" })
+  console.log("Created:", user)
 })
 
 // Promise escape hatch (returns Exit, never throws)
 const handleCreateAsync = async () => {
-  const result = await createUser.mutateAsync({ name: 'Alice', email: 'alice@example.com' })
-  
+  const result = await createUser.mutateAsync({ name: "Alice", email: "alice@example.com" })
+
   if (Exit.isSuccess(result)) {
-    console.log('Created:', result.value)
+    console.log("Created:", result.value)
   } else {
-    console.log('Failed:', Cause.squash(result.cause))
+    console.log("Failed:", Cause.squash(result.cause))
   }
 }
 ```
@@ -269,16 +259,16 @@ const createUser = api.user.create.useMutation({
   // Called before mutation - return previous data for rollback
   onMutate: async (newUser, ctx) => {
     // Cancel any in-flight queries to prevent race conditions
-    ctx.cancelQueries('user.list')
+    ctx.cancelQueries("user.list")
 
     // Snapshot current data
-    const previousUsers = ctx.getQueryData<User[]>('user.list')
+    const previousUsers = ctx.getQueryData<User[]>("user.list")
 
     // Optimistically update the cache
     if (previousUsers) {
-      ctx.setQueryData('user.list', undefined, [
+      ctx.setQueryData("user.list", undefined, [
         ...previousUsers,
-        { id: 'temp-' + Date.now(), ...newUser }
+        { id: "temp-" + Date.now(), ...newUser },
       ])
     }
 
@@ -300,13 +290,14 @@ const createUser = api.user.create.useMutation({
   },
 
   // Declarative invalidation
-  invalidates: ['user.list'],
+  invalidates: ["user.list"],
 })
 ```
 
 The `OptimisticUpdateContext` provides:
+
 - `getQueryData<T>(path, input?)` - Get cached data for a query
-- `setQueryData<T>(path, input, data)` - Set cached data optimistically  
+- `setQueryData<T>(path, input, data)` - Set cached data optimistically
 - `cancelQueries(path)` - Cancel in-flight queries to prevent race conditions
 
 ### Stream
@@ -314,23 +305,21 @@ The `OptimisticUpdateContext` provides:
 For server-sent events and real-time data over HTTP.
 
 ```typescript
-const NotificationProcedures = procedures('notifications', {
+const NotificationProcedures = procedures("notifications", {
   watch: procedure
     .input(Schema.Struct({ userId: Schema.String }))
-    .output(NotificationSchema)  // Schema for each streamed item
+    .output(NotificationSchema) // Schema for each streamed item
     .stream(),
 })
 
 // Server implementation returns a Stream
-const NotificationProceduresLive = NotificationProcedures.toLayer({
-  watch: ({ userId }) =>
-    Stream.fromEffect(Database).pipe(
-      Stream.flatMap(db => db.notifications.subscribe(userId))
-    ),
+const NotificationProceduresLive = Procedures.toLayer(NotificationProcedures, {
+  watch: (_ctx, { userId }) =>
+    Stream.fromEffect(Database).pipe(Stream.flatMap((db) => db.notifications.subscribe(userId))),
 })
 
 // Client usage
-const notifications = api.notifications.watch.useStream({ userId: '123' })
+const notifications = api.notifications.watch.useStream({ userId: "123" })
 
 // notifications.data is the latest streamed value
 // notifications.isStreaming indicates if stream is active
@@ -339,6 +328,7 @@ const notifications = api.notifications.watch.useStream({ userId: '123' })
 ### Subscription (WebSocket)
 
 For real-time bidirectional communication over WebSocket. Unlike streams (HTTP SSE), subscriptions support:
+
 - Multiple subscriptions over a single connection
 - Bidirectional communication (client can send data after subscribing)
 - Automatic reconnection
@@ -346,23 +336,23 @@ For real-time bidirectional communication over WebSocket. Unlike streams (HTTP S
 
 ```typescript
 // Define subscription procedure
-const ChatProcedures = procedures('chat', {
+const ChatProcedures = procedures("chat", {
   room: procedure
     .input(Schema.Struct({ roomId: Schema.String }))
-    .output(ChatMessageSchema)  // Schema for each message
+    .output(ChatMessageSchema) // Schema for each message
     .subscription(),
 })
 
 // Server implementation
-const ChatProceduresLive = ChatProcedures.toLayer({
-  room: ({ roomId }) => ({
+const ChatProceduresLive = Procedures.toLayer(ChatProcedures, {
+  room: (_ctx, { roomId }) => ({
     // Called when client subscribes
     onSubscribe: (context) =>
       Effect.gen(function* () {
         const messages = yield* MessageStream.forRoom(roomId)
-        return messages  // Return a Stream
+        return messages // Return a Stream
       }),
-    
+
     // Optional: handle data sent by client
     onClientMessage: (data, context) =>
       Effect.gen(function* () {
@@ -375,9 +365,9 @@ const ChatProceduresLive = ChatProcedures.toLayer({
 #### Server Setup (Node.js)
 
 ```typescript
-import { createHandler, createWebSocketHandler } from 'effect-trpc/node'
-import { WebSocketServer } from 'ws'
-import * as http from 'node:http'
+import { createHandler, createWebSocketHandler } from "effect-trpc/node"
+import { WebSocketServer } from "ws"
+import * as http from "node:http"
 
 // Create HTTP handler for queries/mutations
 const httpHandler = createHandler({
@@ -406,14 +396,14 @@ const server = http.createServer(async (req, res) => {
 
 // WebSocket server
 const wss = new WebSocketServer({ server })
-wss.on('connection', (ws) => {
+wss.on("connection", (ws) => {
   Effect.runFork(wsHandler.handleConnection(ws))
 })
 
 server.listen(3000)
 
 // Cleanup
-process.on('SIGINT', async () => {
+process.on("SIGINT", async () => {
   await wsHandler.dispose()
   await httpHandler.dispose()
   server.close()
@@ -423,7 +413,7 @@ process.on('SIGINT', async () => {
 #### Server Setup (Bun)
 
 ```typescript
-import { createFetchHandler, createWebSocketHandler } from 'effect-trpc/bun'
+import { createFetchHandler, createWebSocketHandler } from "effect-trpc/bun"
 
 const httpHandler = createFetchHandler({
   router: appRouter,
@@ -445,15 +435,15 @@ Bun.serve({
   port: 3000,
   fetch(req, server) {
     const url = new URL(req.url)
-    
+
     // Upgrade WebSocket connections
-    if (url.pathname === '/ws') {
+    if (url.pathname === "/ws") {
       if (server.upgrade(req, { data: { authenticated: false } })) {
-        return  // Upgrade successful
+        return // Upgrade successful
       }
-      return new Response('Upgrade failed', { status: 500 })
+      return new Response("Upgrade failed", { status: 500 })
     }
-    
+
     // Handle HTTP requests
     return httpHandler.fetch(req)
   },
@@ -461,7 +451,7 @@ Bun.serve({
 })
 
 // Cleanup
-process.on('SIGINT', async () => {
+process.on("SIGINT", async () => {
   await wsHandler.dispose()
   await httpHandler.dispose()
 })
@@ -471,26 +461,26 @@ process.on('SIGINT', async () => {
 
 ```typescript
 // src/lib/trpc.ts
-import { createTRPCReact, WebSocketProvider } from 'effect-trpc/react'
-import type { AppRouter } from '~/server/router'
+import { createTRPCReact, WebSocketProvider } from "effect-trpc/react"
+import type { AppRouter } from "~/server/router"
 
 export const api = createTRPCReact<AppRouter>({
-  url: '/api/trpc',
-  wsUrl: 'ws://localhost:3000/ws',
+  url: "/api/trpc",
+  wsUrl: "ws://localhost:3000/ws",
 })
 ```
 
 ```tsx
 // src/app/providers.tsx
-'use client'
+"use client"
 
-import { api, WebSocketProvider } from '~/lib/trpc'
-import * as Effect from 'effect/Effect'
+import { api, WebSocketProvider } from "~/lib/trpc"
+import * as Effect from "effect/Effect"
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <api.Provider>
-      <WebSocketProvider 
+      <WebSocketProvider
         config={{
           url: "ws://localhost:3000/ws",
           getToken: Effect.succeed(getAuthToken()),
@@ -505,30 +495,28 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
 ```tsx
 // src/components/ChatRoom.tsx
-'use client'
+"use client"
 
-import { api } from '~/lib/trpc'
+import { api } from "~/lib/trpc"
 
 export function ChatRoom({ roomId }: { roomId: string }) {
   const subscription = api.chat.room.useSubscription(
     { roomId },
     {
       onData: (message) => {
-        console.log('New message:', message)
+        console.log("New message:", message)
       },
       onError: (error) => {
-        console.error('Subscription error:', error)
+        console.error("Subscription error:", error)
       },
-    }
+    },
   )
 
   return (
     <div>
       <div>Status: {subscription.state._tag}</div>
       <div>Latest: {subscription.data?.content}</div>
-      <button onClick={() => subscription.unsubscribe()}>
-        Leave Room
-      </button>
+      <button onClick={() => subscription.unsubscribe()}>Leave Room</button>
     </div>
   )
 }
@@ -537,12 +525,12 @@ export function ChatRoom({ roomId }: { roomId: string }) {
 #### Subscription States
 
 ```typescript
-subscription.state._tag     // 'Idle' | 'Subscribing' | 'Active' | 'Error' | 'Complete' | 'Unsubscribed'
+subscription.state._tag // 'Idle' | 'Subscribing' | 'Active' | 'Error' | 'Complete' | 'Unsubscribed'
 subscription.connectionState._tag // 'Disconnected' | 'Connecting' | 'Authenticating' | 'Ready' | 'Reconnecting' | 'Error'
-subscription.data           // Latest received data
-subscription.error          // Error if state is 'Error'
-subscription.resubscribe()  // Start/restart subscription
-subscription.unsubscribe()  // Stop subscription
+subscription.data // Latest received data
+subscription.error // Error if state is 'Error'
+subscription.resubscribe() // Start/restart subscription
+subscription.unsubscribe() // Stop subscription
 ```
 
 ### Chat
@@ -550,27 +538,29 @@ subscription.unsubscribe()  // Stop subscription
 For AI completions with `@effect/ai` compatibility.
 
 ```typescript
-const AIProcedures = procedures('ai', {
+const AIProcedures = procedures("ai", {
   complete: procedure
-    .input(Schema.Struct({ 
-      messages: Schema.Array(MessageSchema) 
-    }))
-    .output(ChatPartSchema)  // Schema for each streamed part
+    .input(
+      Schema.Struct({
+        messages: Schema.Array(MessageSchema),
+      }),
+    )
+    .output(ChatPartSchema) // Schema for each streamed part
     .chat(),
 })
 
 // Client usage
 const chat = api.ai.complete.useChat({
-  onPart: (part) => console.log('Received part:', part),
-  onFinish: (fullText) => console.log('Complete:', fullText),
+  onPart: (part) => console.log("Received part:", part),
+  onFinish: (fullText) => console.log("Complete:", fullText),
 })
 
 // Send a message
-chat.send({ messages: [{ role: 'user', content: 'Hello!' }] })
+chat.send({ messages: [{ role: "user", content: "Hello!" }] })
 
 // Access state
-chat.text       // Accumulated text
-chat.parts      // Array of all parts
+chat.text // Accumulated text
+chat.parts // Array of all parts
 chat.isStreaming // Whether currently streaming
 ```
 
@@ -580,51 +570,56 @@ Add cross-cutting concerns like authentication, logging, and rate limiting.
 
 ### Creating Middleware
 
+Middleware uses a builder pattern and returns `Effect<MiddlewareDefinition>`:
+
 ```typescript
-import { Middleware } from 'effect-trpc'
-import type { BaseContext, AuthenticatedContext } from 'effect-trpc'
+import { Middleware } from "effect-trpc"
+import type { BaseContext, AuthenticatedContext } from "effect-trpc"
+import * as Schema from "effect/Schema"
 
-const authMiddleware = Middleware.make<BaseContext, AuthenticatedContext<User>, AuthError, never>(
-  'auth',
-  (ctx, next) =>
-    Effect.gen(function* () {
-      const token = ctx.headers.get('authorization')
-      if (!token) {
-        return yield* Effect.fail(new AuthError({
-          procedure: ctx.procedure,
-          reason: 'No authorization header',
-        }))
-      }
+// Define middleware with builder pattern
+// Returns Effect<MiddlewareDefinition, never, R> where R is declared requirements
+const AuthMiddleware = Middleware<BaseContext>("auth")
+  .input(Schema.Struct({ token: Schema.optional(Schema.String) })) // Optional input requirements
+  .error(AuthError) // Error types it can produce
+  .requires(SessionService, UserRepository) // Services it needs
+  .provides<{ user: User }>() // What it adds to context
 
-      const user = yield* verifyToken(token.replace('Bearer ', ''))
-      
-      // Call next with enhanced context
-      return yield* next({ ...ctx, user })
-    })
+// Create the implementation with Middleware.toLayer()
+const AuthMiddlewareLive = Middleware.toLayer(AuthMiddleware, (ctx, input) =>
+  Effect.gen(function* () {
+    const token = input.token ?? ctx.headers.get("authorization")
+    if (!token) {
+      return yield* new AuthError({
+        procedure: ctx.procedure,
+        reason: "No authorization header",
+      })
+    }
+
+    const session = yield* SessionService
+    const userRepo = yield* UserRepository
+    const user = yield* userRepo.findById(session.userId)
+
+    // Return enhanced context
+    return { ...ctx, user }
+  }),
 )
 ```
 
 ### Applying to Procedures
 
 ```typescript
-const UserProcedures = procedures('user', {
+const UserProcedures = procedures("user", {
   // Public endpoint
-  byId: procedure
-    .input(IdSchema)
-    .output(UserSchema)
-    .query(),
+  byId: procedure.input(IdSchema).output(UserSchema).query(),
 
   // Protected endpoint
-  update: procedure
-    .use(authMiddleware)
-    .input(UpdateUserSchema)
-    .output(UserSchema)
-    .mutation(),
+  update: procedure.use(authMiddleware).input(UpdateUserSchema).output(UserSchema).mutation(),
 
   // Multiple middleware (executed in order)
   delete: procedure
     .use(authMiddleware)
-    .use(requirePermission('user:delete'))
+    .use(requirePermission("user:delete"))
     .input(IdSchema)
     .mutation(),
 })
@@ -634,18 +629,18 @@ const UserProcedures = procedures('user', {
 
 ```typescript
 import {
-  loggingMiddleware,    // Logs request/response
-  timingMiddleware,     // Adds timing info to context
-  rateLimitMiddleware,  // Rate limiting
-  authMiddleware,       // Token verification
-  requirePermission,    // Permission checking
-} from 'effect-trpc'
+  loggingMiddleware, // Logs request/response
+  timingMiddleware, // Adds timing info to context
+  rateLimitMiddleware, // Rate limiting
+  authMiddleware, // Token verification
+  requirePermission, // Permission checking
+} from "effect-trpc"
 
 // Rate limiting
 const rateLimit = rateLimitMiddleware({
   maxRequests: 100,
-  windowMs: 60_000,  // 1 minute
-  keyFn: (ctx) => ctx.headers.get('x-forwarded-for') ?? 'anonymous',
+  windowMs: 60_000, // 1 minute
+  keyFn: (ctx) => ctx.headers.get("x-forwarded-for") ?? "anonymous",
 })
 ```
 
@@ -653,10 +648,10 @@ const rateLimit = rateLimitMiddleware({
 
 ```typescript
 interface BaseContext {
-  procedure: string      // Full procedure path, e.g., "user.create"
-  headers: Headers       // Standard web Headers
-  signal: AbortSignal    // Aborted on Effect fiber interruption
-  clientId: number       // Unique client ID from @effect/rpc
+  procedure: string // Full procedure path, e.g., "user.create"
+  headers: Headers // Standard web Headers
+  signal: AbortSignal // Aborted on Effect fiber interruption
+  clientId: number // Unique client ID from @effect/rpc
 }
 
 // Middleware can extend the context
@@ -673,34 +668,34 @@ effect-trpc provides rich error types with metadata for proper HTTP responses an
 
 ```typescript
 import {
-  InputValidationError,   // 400 - Invalid input
-  OutputValidationError,  // 500 - Server returned invalid data
-  NotFoundError,          // 404 - Resource not found
-  UnauthorizedError,      // 401 - Authentication required
-  ForbiddenError,         // 403 - Access denied
-  RateLimitedError,       // 429 - Rate limit exceeded (retryable)
-  TimeoutError,           // 504 - Request timed out (retryable)
-  InternalError,          // 500 - Unexpected error
-  NetworkError,           // Client-side network error (retryable)
-} from 'effect-trpc'
+  InputValidationError, // 400 - Invalid input
+  OutputValidationError, // 500 - Server returned invalid data
+  NotFoundError, // 404 - Resource not found
+  UnauthorizedError, // 401 - Authentication required
+  ForbiddenError, // 403 - Access denied
+  RateLimitedError, // 429 - Rate limit exceeded (retryable)
+  TimeoutError, // 504 - Request timed out (retryable)
+  InternalError, // 500 - Unexpected error
+  NetworkError, // Client-side network error (retryable)
+} from "effect-trpc"
 ```
 
 ### Using in Handlers
 
 ```typescript
-const UserProceduresLive = UserProcedures.toLayer({
-  byId: ({ id }) =>
+const UserProceduresLive = Procedures.toLayer(UserProcedures, {
+  byId: (_ctx, { id }) =>
     Effect.gen(function* () {
       const user = yield* db.users.findUnique({ where: { id } })
-      
+
       if (!user) {
-        return yield* Effect.fail(new NotFoundError({
-          procedure: 'user.byId',
-          resource: 'User',
+        return yield* new NotFoundError({
+          procedure: "user.byId",
+          resource: "User",
           resourceId: id,
-        }))
+        })
       }
-      
+
       return user
     }),
 })
@@ -721,9 +716,9 @@ return Result.builder(query.result)
   .onErrorTag('NotFoundError', (err) => <NotFound resource={err.resource} />)
   .onErrorTag('ForbiddenError', () => <AccessDenied />)
   .onErrorTag('RateLimitError', (err) => (
-    <RetryButton 
-      onClick={() => query.refetch()} 
-      retryAfter={err.retryAfterMs} 
+    <RetryButton
+      onClick={() => query.refetch()}
+      retryAfter={err.retryAfterMs}
     />
   ))
   .onError((error) => <GenericError error={error} />)
@@ -748,11 +743,11 @@ Define invalidation rules on your procedures:
 
 ```typescript
 // Server: src/server/procedures/user.ts
-const UserProcedures = procedures('user', {
+const UserProcedures = procedures("user", {
   create: procedure
     .input(CreateUserSchema)
-    .invalidates(['user.list'])        // Invalidate specific queries
-    .invalidatesTags(['users'])        // Or by tag
+    .invalidates(["user.list"]) // Invalidate specific queries
+    .invalidatesTags(["users"]) // Or by tag
     .mutation(),
 })
 ```
@@ -761,7 +756,7 @@ To use declarative invalidation on the client, extract metadata from your router
 
 ```typescript
 // Server: src/server/router.ts
-import { Router, extractMetadata } from 'effect-trpc'
+import { Router, extractMetadata } from "effect-trpc"
 
 export const appRouter = Router.make({
   user: UserProcedures,
@@ -774,12 +769,12 @@ export const routerMetadata = extractMetadata(appRouter)
 
 ```typescript
 // Client: src/lib/trpc.ts
-import { createTRPCReact } from 'effect-trpc/react'
-import type { AppRouter } from '~/server/router'
-import { routerMetadata } from '~/server/router'
+import { createTRPCReact } from "effect-trpc/react"
+import type { AppRouter } from "~/server/router"
+import { routerMetadata } from "~/server/router"
 
 export const api = createTRPCReact<AppRouter>({
-  metadata: routerMetadata,  // Enables declarative invalidation
+  metadata: routerMetadata, // Enables declarative invalidation
 })
 ```
 
@@ -790,7 +785,7 @@ Now when `user.create` succeeds, `user.list` queries are automatically invalidat
 ```typescript
 // Invalidate specific query
 api.user.list.invalidate()
-api.user.byId.invalidate({ id: '123' })
+api.user.byId.invalidate({ id: "123" })
 
 // Invalidate all queries in a namespace
 api.user.invalidateAll()
@@ -803,10 +798,7 @@ api.invalidateAll()
 
 ```typescript
 // Override or add to declarative invalidations
-await createUser.mutateAsync(
-  { name: 'Alice' },
-  { invalidates: ['user.list', 'stats.userCount'] }
-)
+await createUser.mutateAsync({ name: "Alice" }, { invalidates: ["user.list", "stats.userCount"] })
 ```
 
 ## React Hooks
@@ -874,11 +866,11 @@ Result.builder(mutation.result)
 ### useStream
 
 ```typescript
-const stream = api.notifications.watch.useStream({ userId: '123' })
+const stream = api.notifications.watch.useStream({ userId: "123" })
 
-stream.data         // Latest streamed value
-stream.isStreaming  // Whether stream is active
-stream.error        // Error if stream failed
+stream.data // Latest streamed value
+stream.isStreaming // Whether stream is active
+stream.error // Error if stream failed
 ```
 
 ### useChat
@@ -901,8 +893,8 @@ chat.isStreaming                 // Whether currently streaming
 const utils = api.useUtils()
 
 // Invalidate specific paths
-utils.invalidate('user.list')
-utils.invalidate('user.byId', { id: '123' })
+utils.invalidate("user.list")
+utils.invalidate("user.byId", { id: "123" })
 
 // Invalidate all paths
 utils.invalidateAll()
@@ -925,7 +917,7 @@ import {
   NotFoundError,
   UnauthorizedError,
   // etc.
-} from 'effect-trpc'
+} from "effect-trpc"
 ```
 
 ### `effect-trpc/react`
@@ -935,16 +927,16 @@ React hooks and provider:
 ```typescript
 import {
   createTRPCReact,
-  Result,           // effect-atom's Result namespace (for builder pattern)
-  QueryResult,      // Type for query hook return
-  MutationResult,   // Type for mutation hook return
+  Result, // effect-atom's Result namespace (for builder pattern)
+  QueryResult, // Type for query hook return
+  MutationResult, // Type for mutation hook return
   // Individual hooks (for custom setups)
   useQuery,
   useMutation,
   useStream,
   useChat,
   useUtils,
-} from 'effect-trpc/react'
+} from "effect-trpc/react"
 ```
 
 #### Result Builder Pattern
@@ -969,6 +961,7 @@ return Result.builder(query.result)
 ```
 
 Builder methods:
+
 - `.onInitial(fn)` - Handle initial state (no data yet)
 - `.onWaiting(fn)` - Handle loading/waiting state
 - `.onSuccess(fn)` - Handle success with data
@@ -985,7 +978,7 @@ Builder methods:
 Next.js App Router integration:
 
 ```typescript
-import { createRouteHandler } from 'effect-trpc/next'
+import { createRouteHandler } from "effect-trpc/next"
 
 // SSR/RSC helpers are planned for v2.
 // In the meantime, call your Effect services directly in Server Components:
@@ -1001,11 +994,11 @@ import { createRouteHandler } from 'effect-trpc/next'
 ## Type Inference
 
 ```typescript
-import type { InferInput, InferOutput, InferError } from 'effect-trpc'
+import type { InferInput, InferOutput, InferError } from "effect-trpc"
 
-type CreateUserInput = InferInput<typeof UserProcedures['create']>
-type CreateUserOutput = InferOutput<typeof UserProcedures['create']>
-type CreateUserError = InferError<typeof UserProcedures['create']>
+type CreateUserInput = InferInput<(typeof UserProcedures)["create"]>
+type CreateUserOutput = InferOutput<(typeof UserProcedures)["create"]>
+type CreateUserError = InferError<(typeof UserProcedures)["create"]>
 ```
 
 ## Development
@@ -1030,6 +1023,7 @@ cd examples/nextjs-app && bun dev
 ## Roadmap
 
 ### Implemented
+
 - [x] Procedure builder API (query, mutation, stream, chat, subscription)
 - [x] Middleware system with context enhancement
 - [x] React hooks (`useQuery`, `useMutation`, `useStream`, `useChat`, `useSubscription`)
@@ -1043,6 +1037,7 @@ cd examples/nextjs-app && bun dev
 - [x] Result builder pattern (via effect-atom)
 
 ### Planned
+
 - [ ] SSR/RSC helpers (prefetch, dehydrate, HydrationBoundary)
 - [ ] Automatic cache invalidation (Convex-style reactivity)
 - [ ] Custom procedure type extensions

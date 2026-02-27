@@ -219,14 +219,12 @@ const makeMessageRateLimiter = (config: RateLimitConfig): Effect.Effect<MessageR
         // Check limit
         if (newCount > config.maxMessages) {
           const retryAfterMs = state.windowStart + config.windowMs - now
-          return yield* Effect.fail(
-            new MessageRateLimitExceededError({
-              clientId,
-              currentCount: newCount,
-              maxMessages: config.maxMessages,
-              retryAfterMs: Math.max(0, retryAfterMs),
-            }),
-          )
+          return yield* new MessageRateLimitExceededError({
+            clientId,
+            currentCount: newCount,
+            maxMessages: config.maxMessages,
+            retryAfterMs: Math.max(0, retryAfterMs),
+          })
         }
       })
 

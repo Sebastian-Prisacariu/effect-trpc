@@ -55,7 +55,7 @@ const TodosHandlersLive = todosProcedures.toLayer({
       if (!existing) {
         // Use Effect.fail for expected errors (not found is recoverable)
         // NOT Effect.die which is for unrecoverable defects
-        return yield* Effect.fail(new TodoNotFoundError({ id }))
+        return yield* new TodoNotFoundError({ id })
       }
       const updated: Todo = {
         ...existing,
@@ -72,7 +72,7 @@ const TodosHandlersLive = todosProcedures.toLayer({
       if (!existing) {
         // Use Effect.fail for expected errors (not found is recoverable)
         // NOT Effect.die which is for unrecoverable defects
-        return yield* Effect.fail(new TodoNotFoundError({ id }))
+        return yield* new TodoNotFoundError({ id })
       }
       const updated: Todo = { ...existing, completed: !existing.completed }
       todos.set(id, updated)

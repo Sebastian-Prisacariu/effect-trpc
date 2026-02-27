@@ -24,35 +24,39 @@ import type {
 } from "../../core/server/procedures.js"
 import type { RouterRecord, RouterShape } from "../../core/server/router.js"
 import {
-    AuthResultMessage,
-    ErrorMessage,
-    type FromServerMessage,
-    PongMessage,
-    SubscribedMessage,
+  AuthResultMessage,
+  ErrorMessage,
+  type FromServerMessage,
+  PongMessage,
+  SubscribedMessage,
 } from "../protocol.js"
 import {
-    type AuthResult,
-    type Connection,
-    ConnectionRegistry,
-    ConnectionRegistryLive,
-    MessageRateLimiter,
-    MessageRateLimiterDisabled,
-    MessageRateLimiterLive,
-    type RateLimitConfig,
-    type RegisteredHandler,
-    SubscriptionManager,
-    SubscriptionManagerLive,
-    WebSocketAuth,
-    type WebSocketAuthHandler,
-    WebSocketAuthTest,
-    WebSocketCodec,
-    WebSocketCodecLive,
-    makeMessageRateLimiterLayer,
-    makeWebSocketAuth,
+  type AuthResult,
+  type Connection,
+  ConnectionRegistry,
+  ConnectionRegistryLive,
+  MessageRateLimiter,
+  MessageRateLimiterDisabled,
+  MessageRateLimiterLive,
+  type RateLimitConfig,
+  type RegisteredHandler,
+  SubscriptionManager,
+  SubscriptionManagerLive,
+  WebSocketAuth,
+  type WebSocketAuthHandler,
+  WebSocketAuthTest,
+  WebSocketCodec,
+  WebSocketCodecLive,
+  makeMessageRateLimiterLayer,
+  makeWebSocketAuth,
 } from "../server/index.js"
 import type { ClientId, SubscriptionId } from "../types.js"
 export { makeAdapterRuntimeState } from "./adapter-runtime-state.js"
-export type { AdapterLifecycle, AdapterRuntimeState, ConnectionAdmission } from "./adapter-runtime-state.js"
+export type {
+  AdapterLifecycle,
+  AdapterRuntimeState,
+  ConnectionAdmission,
+} from "./adapter-runtime-state.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared Types
@@ -109,23 +113,25 @@ export interface WebSocketLayerOptions {
 
 /**
  * Create the full WebSocket service layer.
- * 
+ *
  * @param options - Configuration options or just an auth handler for backward compatibility
  */
 export const createWebSocketLayer = (options?: WebSocketAuthHandler | WebSocketLayerOptions) => {
   // Handle backward compatibility: if options is a function, treat it as auth handler
-  const opts: WebSocketLayerOptions = typeof options === "function"
-    ? { auth: options as WebSocketAuthHandler }
-    : (options as WebSocketLayerOptions | undefined) ?? {}
+  const opts: WebSocketLayerOptions =
+    typeof options === "function"
+      ? { auth: options as WebSocketAuthHandler }
+      : (options as WebSocketLayerOptions | undefined) ?? {}
 
   const authLayer = opts.auth !== undefined ? makeWebSocketAuth(opts.auth) : WebSocketAuthTest
-  
+
   // Rate limiter layer: use custom config, default, or disabled
-  const rateLimiterLayer = opts.rateLimit === false
-    ? MessageRateLimiterDisabled
-    : opts.rateLimit !== undefined
-      ? makeMessageRateLimiterLayer(opts.rateLimit)
-      : MessageRateLimiterLive
+  const rateLimiterLayer =
+    opts.rateLimit === false
+      ? MessageRateLimiterDisabled
+      : opts.rateLimit !== undefined
+        ? makeMessageRateLimiterLayer(opts.rateLimit)
+        : MessageRateLimiterLive
 
   const baseLayer = Layer.mergeAll(
     WebSocketCodecLive,
@@ -191,6 +197,49 @@ type ProcedureDefinitionRuntime = {
 const isProcedureDefinitionRuntime = (value: unknown): value is ProcedureDefinitionRuntime =>
   Predicate.isTagged(value, "ProcedureDefinition")
 
+/**
+ * Try to extract a value from something that might be an Effect.
+ */
+const tryExtractFromEffect = (value: unknown): unknown => {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "pipe" in value &&
+    typeof (value as { pipe: unknown }).pipe === "function"
+  ) {
+    try {
+      let extracted: unknown
+      Effect.runSync(
+        Effect.map(value as Effect.Effect<unknown, never, never>, (val) => {
+          extracted = val
+        }),
+      )
+      return extracted
+    } catch {
+      return value
+    }
+  }
+  return value
+}
+
+/**
+ * Extract ProceduresGroup from a value (handles Effect wrapper).
+ */
+const extractProceduresGroup = (
+  value: unknown,
+): ProceduresGroup<string, ProcedureRecord> | null => {
+  const extracted = tryExtractFromEffect(value)
+  if (
+    extracted !== null &&
+    typeof extracted === "object" &&
+    "_tag" in extracted &&
+    (extracted as { _tag: string })._tag === "ProceduresGroup"
+  ) {
+    return extracted as ProceduresGroup<string, ProcedureRecord>
+  }
+  return null
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handler Extraction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,7 +259,8 @@ export const extractSubscriptionHandlersFromLayer = <TRouter extends RouterShape
     let handlers = HashMap.empty<string, RegisteredHandler>()
 
     for (const [groupKey, group] of Object.entries(router.routes)) {
-      const proceduresGroup = group as ProceduresGroup<string, ProcedureRecord>
+      const proceduresGroup = extractProceduresGroup(group)
+      if (!proceduresGroup) continue
 
       // Get the ProceduresService for this group
       const serviceTag = Context.GenericTag<ProceduresService<string, ProcedureRecord>>(
@@ -220,7 +270,8 @@ export const extractSubscriptionHandlersFromLayer = <TRouter extends RouterShape
       // Try to get the service - use serviceOption to handle missing service
       const maybeService = yield* Effect.serviceOption(serviceTag)
 
-      for (const [procKey, proc] of Object.entries(proceduresGroup.procedures)) {
+      for (const [procKey, procValue] of Object.entries(proceduresGroup.procedures)) {
+        const proc = tryExtractFromEffect(procValue)
         if (isProcedureDefinitionRuntime(proc) && proc.type === "subscription") {
           const path = `${groupKey}.${procKey}`
 
@@ -228,8 +279,9 @@ export const extractSubscriptionHandlersFromLayer = <TRouter extends RouterShape
           let handlerImpl: SubscriptionHandler<unknown, unknown, unknown, never> | undefined
 
           if (maybeService._tag === "Some") {
-             
-            handlerImpl = maybeService.value.handlers[procKey] as SubscriptionHandler<unknown, unknown, unknown, never> | undefined
+            handlerImpl = maybeService.value.handlers[procKey] as
+              | SubscriptionHandler<unknown, unknown, unknown, never>
+              | undefined
           }
 
           if (handlerImpl) {
@@ -295,7 +347,7 @@ export interface HandleMessageOptions {
 /**
  * Handle an incoming WebSocket message.
  * Returns the updated connection state if auth succeeded.
- * 
+ *
  * If a cleanup guard is provided, this will skip processing if cleanup
  * has already started, preventing race conditions where messages are
  * processed after connection resources have been cleaned up.
@@ -322,11 +374,11 @@ export const handleMessage = (options: HandleMessageOptions) =>
       Effect.catchAll((error) =>
         Effect.gen(function* () {
           // Log at warning level - parsing failures should be visible
-          yield* Effect.logWarning("Failed to decode WebSocket message", { 
+          yield* Effect.logWarning("Failed to decode WebSocket message", {
             error: error.message,
             data: data.slice(0, 200), // Truncate for logging
           })
-          
+
           // Send error back to client so they know the message wasn't understood
           yield* send(
             new ErrorMessage({
@@ -338,7 +390,7 @@ export const handleMessage = (options: HandleMessageOptions) =>
               },
             }),
           )
-          
+
           return null
         }),
       ),
@@ -436,70 +488,71 @@ export const handleMessage = (options: HandleMessageOptions) =>
 
       if (!canSubscribe) {
         // Send authorization error to client
-        yield* send(new ErrorMessage({
-          id: message.id,
-          error: {
-            _tag: "ForbiddenError",
-            message: "Not authorized to subscribe to this path",
-            cause: undefined,
-          },
-        }))
+        yield* send(
+          new ErrorMessage({
+            id: message.id,
+            error: {
+              _tag: "ForbiddenError",
+              message: "Not authorized to subscribe to this path",
+              cause: undefined,
+            },
+          }),
+        )
         return
       }
 
-      const subscriptionId = yield* subscriptions.subscribe(
-        state.clientId,
-        message.id, // Client's correlation ID
-        message.path,
-        message.input,
-      ).pipe(
-        Effect.catchAll((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logWarning("Subscription failed", { 
-              path: message.path, 
-              error: error._tag,
-              message: error.message,
-            })
-            yield* send(new ErrorMessage({
-              id: message.id,
-              error: {
-                _tag: error._tag,
+      const subscriptionId = yield* subscriptions
+        .subscribe(
+          state.clientId,
+          message.id, // Client's correlation ID
+          message.path,
+          message.input,
+        )
+        .pipe(
+          Effect.catchAll((error) =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning("Subscription failed", {
+                path: message.path,
+                error: error._tag,
                 message: error.message,
-                cause: undefined,
-              },
-            }))
-            return null as SubscriptionId | null
-          }),
-        ),
-      )
+              })
+              yield* send(
+                new ErrorMessage({
+                  id: message.id,
+                  error: {
+                    _tag: error._tag,
+                    message: error.message,
+                    cause: undefined,
+                  },
+                }),
+              )
+              return null as SubscriptionId | null
+            }),
+          ),
+        )
 
       if (subscriptionId) {
         // Return both the client's correlation ID and server-generated subscription ID
-        yield* send(new SubscribedMessage({ 
-          id: message.id,
-          subscriptionId,
-        }))
+        yield* send(
+          new SubscribedMessage({
+            id: message.id,
+            subscriptionId,
+          }),
+        )
       }
       return
     }
 
     // Handle unsubscribe
     if (message._tag === "Unsubscribe") {
-      yield* subscriptions.unsubscribe(
-        state.clientId,
-        message.id as SubscriptionId,
-      )
+      yield* subscriptions.unsubscribe(state.clientId, message.id as SubscriptionId)
       return
     }
 
     // Handle client data (bidirectional)
     if (message._tag === "ClientData") {
       yield* subscriptions
-        .sendToSubscription(
-          state.clientId,
-          message.id as SubscriptionId,
-          message.data,
-        )
+        .sendToSubscription(state.clientId, message.id as SubscriptionId, message.data)
         .pipe(
           Effect.catchAll((error) =>
             Effect.logWarning("Failed to send data to subscription", {
@@ -533,7 +586,7 @@ export interface CleanupConnectionOptions {
 
 /**
  * Clean up a client connection.
- * 
+ *
  * If a cleanup guard is provided, this will atomically mark cleanup as started
  * before proceeding. If cleanup was already started, this is a no-op to prevent
  * double cleanup.
@@ -555,7 +608,7 @@ export const cleanupConnection = (options: CleanupConnectionOptions) =>
     const registry = yield* ConnectionRegistry
     const subscriptions = yield* SubscriptionManager
     const rateLimiter = yield* MessageRateLimiter
-    
+
     yield* subscriptions.cleanupClient(clientId)
     yield* rateLimiter.clearClient(clientId)
     yield* registry.unregister(clientId, reason)
@@ -566,8 +619,18 @@ export const cleanupConnection = (options: CleanupConnectionOptions) =>
 // ─────────────────────────────────────────────────────────────────────────────
 
 export {
-    ConnectionRegistry, MessageRateLimiter, MessageRateLimiterDisabled, MessageRateLimiterLive, SubscriptionManager, WebSocketAuth, WebSocketCodec, makeMessageRateLimiterLayer, makeWebSocketAuth, type AuthResult,
-    type Connection, type RateLimitConfig, type RegisteredHandler,
-    type WebSocketAuthHandler
+  ConnectionRegistry,
+  MessageRateLimiter,
+  MessageRateLimiterDisabled,
+  MessageRateLimiterLive,
+  SubscriptionManager,
+  WebSocketAuth,
+  WebSocketCodec,
+  makeMessageRateLimiterLayer,
+  makeWebSocketAuth,
+  type AuthResult,
+  type Connection,
+  type RateLimitConfig,
+  type RegisteredHandler,
+  type WebSocketAuthHandler,
 }
-

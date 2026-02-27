@@ -140,12 +140,10 @@ const makeWebSocketHeartbeat = (config: HeartbeatConfig) =>
 
               if (DateTime.lessThanOrEqualTo(currentPongTime, startTime)) {
                 // No pong received - timeout
-                return yield* Effect.fail(
-                  new HeartbeatTimeoutError({
-                    clientId,
-                    lastPongAt: DateTime.toDate(currentPongTime),
-                  }),
-                )
+                return yield* new HeartbeatTimeoutError({
+                  clientId,
+                  lastPongAt: DateTime.toDate(currentPongTime),
+                })
               }
 
               // Pong received, wait for remaining interval

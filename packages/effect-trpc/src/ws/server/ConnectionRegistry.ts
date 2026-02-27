@@ -276,13 +276,11 @@ const makeConnectionRegistry = (config: ConnectionRegistryConfig = {}) =>
             const currentCount = HashMap.size(currentMap)
 
             if (currentCount >= maxConnections) {
-              return yield* Effect.fail(
-                new ConnectionLimitExceededError({
-                  currentCount,
-                  maxConnections,
-                  clientId: connection.clientId,
-                }),
-              )
+              return yield* new ConnectionLimitExceededError({
+                currentCount,
+                maxConnections,
+                clientId: connection.clientId,
+              })
             }
           }
 
@@ -317,7 +315,7 @@ const makeConnectionRegistry = (config: ConnectionRegistryConfig = {}) =>
         const conn = HashMap.get(map, clientId)
 
         if (Option.isNone(conn)) {
-          return yield* Effect.fail(new ConnectionNotFoundError({ clientId }))
+          return yield* new ConnectionNotFoundError({ clientId })
         }
 
         return conn.value
