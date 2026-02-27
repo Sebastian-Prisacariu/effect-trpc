@@ -29,15 +29,10 @@ import type {
 import { UnsubscribeReason as UnsubscribeReasonCtor } from "../../core/server/procedures.js"
 import {
   InvalidPathError,
-  SubscriptionError,
   SubscriptionNotFoundError,
   WebSocketSubscriptionError,
 } from "../errors.js"
-import {
-  CompleteMessage,
-  DataMessage,
-  ErrorMessage,
-} from "../protocol.js"
+import { CompleteMessage, DataMessage, ErrorMessage } from "../protocol.js"
 import type { ClientId, SubscriptionId } from "../types.js"
 import { generateSubscriptionId } from "../types.js"
 import { BackpressureController } from "./BackpressureController.js"
@@ -65,12 +60,12 @@ export interface ActiveSubscription {
   readonly input: unknown
   /** When the subscription started */
   readonly startedAt: DateTimeType.Utc
-  /** 
+  /**
    * The running fiber, wrapped in Option to handle race conditions.
    * Initially None until the fiber is forked and assigned.
    * This prevents issues if unsubscribe is called before fork completes.
    */
-  readonly fiber: Option.Option<Fiber.RuntimeFiber<void, SubscriptionError>>
+  readonly fiber: Option.Option<Fiber.RuntimeFiber<void, WebSocketSubscriptionError>>
   /** Queue for client messages (bidirectional) */
   readonly clientMessages: Queue.Queue<unknown>
 }
@@ -167,7 +162,7 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
     if (!path || path.length === 0) {
       return yield* new InvalidPathError({
         path,
-        reason: "Path cannot be empty"
+        reason: "Path cannot be empty",
       })
     }
 
@@ -175,7 +170,7 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
     if (path.length > MAX_PATH_LENGTH) {
       return yield* new InvalidPathError({
         path,
-        reason: `Path too long (max ${MAX_PATH_LENGTH} characters)`
+        reason: `Path too long (max ${MAX_PATH_LENGTH} characters)`,
       })
     }
 
@@ -183,7 +178,7 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
     if (path.startsWith(".") || path.endsWith(".")) {
       return yield* new InvalidPathError({
         path,
-        reason: "Path cannot have leading or trailing dots"
+        reason: "Path cannot have leading or trailing dots",
       })
     }
 
@@ -191,7 +186,7 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
     if (path.includes("..")) {
       return yield* new InvalidPathError({
         path,
-        reason: "Path cannot have consecutive dots (empty segments)"
+        reason: "Path cannot have consecutive dots (empty segments)",
       })
     }
 
@@ -199,7 +194,8 @@ export const validatePath = (path: string): Effect.Effect<string, InvalidPathErr
     if (!PATH_REGEX.test(path)) {
       return yield* new InvalidPathError({
         path,
-        reason: "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter."
+        reason:
+          "Invalid path format. Use alphanumeric characters, dots, and underscores. Must start with a letter.",
       })
     }
 
@@ -275,7 +271,7 @@ export declare namespace SubscriptionManager {
       correlationId: string,
       path: string,
       input: unknown,
-    ) => Effect.Effect<SubscriptionId, SubscriptionError, any>
+    ) => Effect.Effect<SubscriptionId, WebSocketSubscriptionError, any>
 
     /**
      * Stop a subscription.
@@ -344,9 +340,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
   const handlers = yield* Ref.make(HashMap.empty<string, RegisteredHandler>())
 
   // Active subscriptions by ID
-  const subscriptions = yield* Ref.make(
-    HashMap.empty<SubscriptionId, ActiveSubscription>(),
-  )
+  const subscriptions = yield* Ref.make(HashMap.empty<SubscriptionId, ActiveSubscription>())
 
   /**
    * Run a subscription handler in a fiber.
@@ -371,21 +365,23 @@ const makeSubscriptionManager = Effect.gen(function* () {
       // Validate input if schema provided
       const validatedInput = handler.inputSchema
         ? yield* Schema.decodeUnknown(handler.inputSchema)(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new SubscriptionError({
-                subscriptionId,
-                path: handler.path,
-                reason: "InputValidation",
-                description: "Invalid subscription input",
-                cause,
-              }),
-          ),
-        )
+            Effect.mapError(
+              (cause) =>
+                new WebSocketSubscriptionError({
+                  subscriptionId,
+                  path: handler.path,
+                  reason: "InputValidation",
+                  description: "Invalid subscription input",
+                  cause,
+                }),
+            ),
+          )
         : input
 
       // Call onSubscribe to get the stream (with timeout to prevent indefinite blocking)
-      const stream = yield* Effect.suspend(() => handler.handler.onSubscribe(validatedInput, ctx)).pipe(
+      const stream = yield* Effect.suspend(() =>
+        handler.handler.onSubscribe(validatedInput, ctx),
+      ).pipe(
         Effect.timeoutFail({
           duration: DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT,
           onTimeout: () =>
@@ -396,11 +392,10 @@ const makeSubscriptionManager = Effect.gen(function* () {
               description: `Subscription handler setup timed out after ${Duration.toMillis(DEFAULT_SUBSCRIPTION_SETUP_TIMEOUT)}ms`,
             }),
         }),
-        Effect.mapError(
-          (cause) =>
-            cause instanceof SubscriptionError
-              ? cause
-              : new WebSocketSubscriptionError({
+        Effect.mapError((cause) =>
+          cause instanceof WebSocketSubscriptionError
+            ? cause
+            : new WebSocketSubscriptionError({
                 subscriptionId,
                 path: handler.path,
                 reason: "HandlerError",
@@ -408,14 +403,25 @@ const makeSubscriptionManager = Effect.gen(function* () {
                 cause,
               }),
         ),
-        Effect.catchAllDefect((defect) => Effect.logError("Subscription handler defect", { subscriptionId, path: handler.path, defect }).pipe(Effect.flatMap(() => Effect.fail(
-          new WebSocketSubscriptionError({
+        Effect.catchAllDefect((defect) =>
+          Effect.logError("Subscription handler defect", {
             subscriptionId,
             path: handler.path,
-            reason: "HandlerError",
-            description: "Handler setup failed",
-            cause: defect,
-          })))))
+            defect,
+          }).pipe(
+            Effect.flatMap(() =>
+              Effect.fail(
+                new WebSocketSubscriptionError({
+                  subscriptionId,
+                  path: handler.path,
+                  reason: "HandlerError",
+                  description: "Handler setup failed",
+                  cause: defect,
+                }),
+              ),
+            ),
+          ),
+        ),
       )
 
       // Set up client message handler if provided
@@ -428,7 +434,10 @@ const makeSubscriptionManager = Effect.gen(function* () {
             Stream.tap((data) =>
               handler.handler.onClientMessage!(data, ctx).pipe(
                 Effect.catchAllCause((cause) =>
-                  Effect.logWarning("onClientMessage handler failed", { cause, path: handler.path }),
+                  Effect.logWarning("onClientMessage handler failed", {
+                    cause,
+                    path: handler.path,
+                  }),
                 ),
               ),
             ),
@@ -461,7 +470,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
                 outputData = yield* Schema.decodeUnknown(handler.outputSchema)(data).pipe(
                   Effect.mapError(
                     (cause) =>
-                      new SubscriptionError({
+                      new WebSocketSubscriptionError({
                         subscriptionId,
                         path: handler.path,
                         reason: "OutputValidation",
@@ -473,9 +482,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
               }
 
               // Send to client
-              yield* connection.send(
-                new DataMessage({ id: subscriptionId, data: outputData }),
-              )
+              yield* connection.send(new DataMessage({ id: subscriptionId, data: outputData }))
             }),
           ),
           Stream.runDrain,
@@ -507,253 +514,247 @@ const makeSubscriptionManager = Effect.gen(function* () {
         if (handler.handler.onUnsubscribe) {
           yield* handler.handler.onUnsubscribe(ctx, reason).pipe(Effect.ignore)
         }
-      }).pipe(Effect.ensuring(cleanupClientMessageFiber), Effect.catchAllDefect((defect) => Effect.logError("Subscription fiber defect", { defect })))
+      }).pipe(
+        Effect.ensuring(cleanupClientMessageFiber),
+        Effect.catchAllDefect((defect) => Effect.logError("Subscription fiber defect", { defect })),
+      )
     })
 
   const service: SubscriptionManager.Service = {
-    registerHandler: Effect.fn("SubscriptionManager.registerHandler")(
-      function* (handler: RegisteredHandler) {
-        yield* Effect.annotateCurrentSpan("path", handler.path)
-        yield* Ref.update(handlers, HashMap.set(handler.path, handler))
-      },
-    ),
+    registerHandler: Effect.fn("SubscriptionManager.registerHandler")(function* (
+      handler: RegisteredHandler,
+    ) {
+      yield* Effect.annotateCurrentSpan("path", handler.path)
+      yield* Ref.update(handlers, HashMap.set(handler.path, handler))
+    }),
 
-    subscribe: Effect.fn("SubscriptionManager.subscribe")(
-      function* (clientId: ClientId, correlationId: string, path: string, input: unknown) {
-        yield* Effect.annotateCurrentSpan("clientId", clientId)
-        yield* Effect.annotateCurrentSpan("correlationId", correlationId)
-        yield* Effect.annotateCurrentSpan("path", path)
+    subscribe: Effect.fn("SubscriptionManager.subscribe")(function* (
+      clientId: ClientId,
+      correlationId: string,
+      path: string,
+      input: unknown,
+    ) {
+      yield* Effect.annotateCurrentSpan("clientId", clientId)
+      yield* Effect.annotateCurrentSpan("correlationId", correlationId)
+      yield* Effect.annotateCurrentSpan("path", path)
 
-        // Validate path format FIRST (before any resource allocation)
-        // This prevents malformed paths from consuming server resources
-        const validatedPath = yield* validatePath(path).pipe(
-          Effect.mapError((err) =>
-            new SubscriptionError({
+      // Validate path format FIRST (before any resource allocation)
+      // This prevents malformed paths from consuming server resources
+      const validatedPath = yield* validatePath(path).pipe(
+        Effect.mapError(
+          (err) =>
+            new WebSocketSubscriptionError({
               subscriptionId: "pending", // No ID yet since validation failed early
               path: err.path,
               reason: "InputValidation",
               description: err.reason,
             }),
-          ),
-        )
+        ),
+      )
 
-        // Generate server-side subscription ID (security: never trust client IDs)
-        const subscriptionId = yield* generateSubscriptionId
+      // Generate server-side subscription ID (security: never trust client IDs)
+      const subscriptionId = yield* generateSubscriptionId
 
-        // Check per-client subscription limit to prevent resource exhaustion
-        const currentSubscriptions = yield* Ref.get(subscriptions)
-        const clientSubCount = Array.from(HashMap.values(currentSubscriptions))
-          .filter((s) => s.clientId === clientId).length
+      // Check per-client subscription limit to prevent resource exhaustion
+      const currentSubscriptions = yield* Ref.get(subscriptions)
+      const clientSubCount = Array.from(HashMap.values(currentSubscriptions)).filter(
+        (s) => s.clientId === clientId,
+      ).length
 
-        if (clientSubCount >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
-          return yield* new SubscriptionError({
-            subscriptionId,
-            path: validatedPath,
-            reason: "Unauthorized",
-            description: `Maximum subscriptions per client (${MAX_SUBSCRIPTIONS_PER_CLIENT}) exceeded`,
-          })
-        }
-
-        // Get handler - validates that the procedure exists
-        const handlerMap = yield* Ref.get(handlers)
-        const handler = HashMap.get(handlerMap, validatedPath)
-
-        if (Option.isNone(handler)) {
-          return yield* new SubscriptionError({
-            subscriptionId,
-            path: validatedPath,
-            reason: "NotFound",
-            description: `No handler registered for path: ${validatedPath}`,
-          })
-        }
-
-        // Get connection
-        const connection = yield* registry.get(clientId).pipe(
-          Effect.mapError(
-            () =>
-              new SubscriptionError({
-                subscriptionId,
-                path: validatedPath,
-                reason: "NotFound",
-                description: "Client connection not found",
-              }),
-          ),
-        )
-
-        // Create bounded client messages queue to prevent memory exhaustion
-        const clientMessages = yield* Queue.bounded<unknown>(MAX_CLIENT_MESSAGE_QUEUE_SIZE)
-
-        // Register with backpressure controller if available
-        if (Option.isSome(backpressure)) {
-          yield* backpressure.value.register(subscriptionId, clientId, connection)
-        }
-
-        // Store active subscription FIRST to prevent race condition
-        // (fiber cleanup referencing non-existent subscription)
-        // Fiber starts as None and is set after fork completes
-        const startedAt = yield* DateTime.now
-        const active: ActiveSubscription = {
-          id: subscriptionId,
-          clientId,
+      if (clientSubCount >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
+        return yield* new WebSocketSubscriptionError({
+          subscriptionId,
           path: validatedPath,
-          input,
-          startedAt,
-          fiber: Option.none(), // Will be set after fork
-          clientMessages,
-        }
+          reason: "Unauthorized",
+          description: `Maximum subscriptions per client (${MAX_SUBSCRIPTIONS_PER_CLIENT}) exceeded`,
+        })
+      }
 
-        yield* Ref.update(subscriptions, HashMap.set(subscriptionId, active))
+      // Get handler - validates that the procedure exists
+      const handlerMap = yield* Ref.get(handlers)
+      const handler = HashMap.get(handlerMap, validatedPath)
 
-        // Fork the subscription runner as a daemon so it survives the parent message handler
-        // (the parent Effect from handleMessage completes after sending Subscribed, but the
-        // subscription stream needs to keep running independently)
-        const fiber = yield* Effect.forkDaemon(
-          runSubscription(
-            connection,
-            subscriptionId,
-            handler.value,
-            input,
-            clientMessages,
-          ).pipe(
-            Effect.ensuring(
-              // Clean up on completion (including backpressure state)
-              Effect.all([
-                Ref.update(subscriptions, HashMap.remove(subscriptionId)),
-                Option.isSome(backpressure)
-                  ? backpressure.value.unregister(subscriptionId)
-                  : Effect.void,
-              ]),
-            ),
-            Effect.catchAll((error) =>
-              // Send error to client
-              connection.send(
-                new ErrorMessage({
-                  id: subscriptionId,
-                  error: {
-                    _tag: "SubscriptionError",
-                    message: error instanceof Error ? error.message : "Subscription failed",
-                    cause: error,
-                  },
-                }),
-              ),
+      if (Option.isNone(handler)) {
+        return yield* new WebSocketSubscriptionError({
+          subscriptionId,
+          path: validatedPath,
+          reason: "NotFound",
+          description: `No handler registered for path: ${validatedPath}`,
+        })
+      }
+
+      // Get connection
+      const connection = yield* registry.get(clientId).pipe(
+        Effect.mapError(
+          () =>
+            new WebSocketSubscriptionError({
+              subscriptionId,
+              path: validatedPath,
+              reason: "NotFound",
+              description: "Client connection not found",
+            }),
+        ),
+      )
+
+      // Create bounded client messages queue to prevent memory exhaustion
+      const clientMessages = yield* Queue.bounded<unknown>(MAX_CLIENT_MESSAGE_QUEUE_SIZE)
+
+      // Register with backpressure controller if available
+      if (Option.isSome(backpressure)) {
+        yield* backpressure.value.register(subscriptionId, clientId, connection)
+      }
+
+      // Store active subscription FIRST to prevent race condition
+      // (fiber cleanup referencing non-existent subscription)
+      // Fiber starts as None and is set after fork completes
+      const startedAt = yield* DateTime.now
+      const active: ActiveSubscription = {
+        id: subscriptionId,
+        clientId,
+        path: validatedPath,
+        input,
+        startedAt,
+        fiber: Option.none(), // Will be set after fork
+        clientMessages,
+      }
+
+      yield* Ref.update(subscriptions, HashMap.set(subscriptionId, active))
+
+      // Fork the subscription runner as a daemon so it survives the parent message handler
+      // (the parent Effect from handleMessage completes after sending Subscribed, but the
+      // subscription stream needs to keep running independently)
+      const fiber = yield* Effect.forkDaemon(
+        runSubscription(connection, subscriptionId, handler.value, input, clientMessages).pipe(
+          Effect.ensuring(
+            // Clean up on completion (including backpressure state)
+            Effect.all([
+              Ref.update(subscriptions, HashMap.remove(subscriptionId)),
+              Option.isSome(backpressure)
+                ? backpressure.value.unregister(subscriptionId)
+                : Effect.void,
+            ]),
+          ),
+          Effect.catchAll((error) =>
+            // Send error to client
+            connection.send(
+              new ErrorMessage({
+                id: subscriptionId,
+                error: {
+                  _tag: "WebSocketSubscriptionError",
+                  message: error instanceof Error ? error.message : "Subscription failed",
+                  cause: error,
+                },
+              }),
             ),
           ),
-        )
+        ),
+      )
 
-        // Update subscription with real fiber reference (now wrapped in Option.some)
-        const updatedActive: ActiveSubscription = { ...active, fiber: Option.some(fiber) }
-        yield* Ref.update(subscriptions, HashMap.set(subscriptionId, updatedActive))
+      // Update subscription with real fiber reference (now wrapped in Option.some)
+      const updatedActive: ActiveSubscription = { ...active, fiber: Option.some(fiber) }
+      yield* Ref.update(subscriptions, HashMap.set(subscriptionId, updatedActive))
 
-        return subscriptionId
-      },
-    ),
+      return subscriptionId
+    }),
 
-    unsubscribe: Effect.fn("SubscriptionManager.unsubscribe")(
-      function* (clientId: ClientId, subscriptionId: SubscriptionId) {
-        yield* Effect.annotateCurrentSpan("clientId", clientId)
-        yield* Effect.annotateCurrentSpan("subscriptionId", subscriptionId)
+    unsubscribe: Effect.fn("SubscriptionManager.unsubscribe")(function* (
+      clientId: ClientId,
+      subscriptionId: SubscriptionId,
+    ) {
+      yield* Effect.annotateCurrentSpan("clientId", clientId)
+      yield* Effect.annotateCurrentSpan("subscriptionId", subscriptionId)
 
-        // Atomic read-and-remove to prevent race conditions
-        const removedSub = yield* Ref.modify(subscriptions, (map) => {
-          const sub = HashMap.get(map, subscriptionId)
-          if (Option.isSome(sub) && sub.value.clientId === clientId) {
-            return [sub, HashMap.remove(map, subscriptionId)] as const
-          }
-          return [Option.none<ActiveSubscription>(), map] as const
-        })
-
-        // Clean up the removed subscription (if any) outside the atomic operation
-        if (Option.isSome(removedSub)) {
-          // Only interrupt if fiber was set (handles race where unsubscribe called before fork completed)
-          if (Option.isSome(removedSub.value.fiber)) {
-            yield* Fiber.interrupt(removedSub.value.fiber.value)
-          }
-          yield* Queue.shutdown(removedSub.value.clientMessages)
-          // Unregister from backpressure controller
-          if (Option.isSome(backpressure)) {
-            yield* backpressure.value.unregister(subscriptionId)
-          }
-        }
-      },
-    ),
-
-    sendToSubscription: Effect.fn("SubscriptionManager.sendToSubscription")(
-      function* (clientId: ClientId, subscriptionId: SubscriptionId, data: unknown) {
-        yield* Effect.annotateCurrentSpan("clientId", clientId)
-        yield* Effect.annotateCurrentSpan("subscriptionId", subscriptionId)
-
-        const map = yield* Ref.get(subscriptions)
+      // Atomic read-and-remove to prevent race conditions
+      const removedSub = yield* Ref.modify(subscriptions, (map) => {
         const sub = HashMap.get(map, subscriptionId)
-
-        if (Option.isNone(sub)) {
-          return yield* new SubscriptionNotFoundError({ subscriptionId })
+        if (Option.isSome(sub) && sub.value.clientId === clientId) {
+          return [sub, HashMap.remove(map, subscriptionId)] as const
         }
+        return [Option.none<ActiveSubscription>(), map] as const
+      })
 
-        if (sub.value.clientId !== clientId) {
-          return yield* new SubscriptionNotFoundError({ subscriptionId, clientId })
+      // Clean up the removed subscription (if any) outside the atomic operation
+      if (Option.isSome(removedSub)) {
+        // Only interrupt if fiber was set (handles race where unsubscribe called before fork completed)
+        if (Option.isSome(removedSub.value.fiber)) {
+          yield* Fiber.interrupt(removedSub.value.fiber.value)
         }
-
-        // Get current queue size for backpressure monitoring
-        const currentSize = yield* Queue.size(sub.value.clientMessages)
-
-        // Record queue state with backpressure controller (if available)
-        // This may send Pause/Resume signals to the client
+        yield* Queue.shutdown(removedSub.value.clientMessages)
+        // Unregister from backpressure controller
         if (Option.isSome(backpressure)) {
-          yield* backpressure.value.recordQueueState(
-            subscriptionId,
-            currentSize,
-            MAX_CLIENT_MESSAGE_QUEUE_SIZE,
-          )
+          yield* backpressure.value.unregister(subscriptionId)
         }
+      }
+    }),
 
-        yield* Queue.offer(sub.value.clientMessages, data)
-      },
-    ),
+    sendToSubscription: Effect.fn("SubscriptionManager.sendToSubscription")(function* (
+      clientId: ClientId,
+      subscriptionId: SubscriptionId,
+      data: unknown,
+    ) {
+      yield* Effect.annotateCurrentSpan("clientId", clientId)
+      yield* Effect.annotateCurrentSpan("subscriptionId", subscriptionId)
+
+      const map = yield* Ref.get(subscriptions)
+      const sub = HashMap.get(map, subscriptionId)
+
+      if (Option.isNone(sub)) {
+        return yield* new SubscriptionNotFoundError({ subscriptionId })
+      }
+
+      if (sub.value.clientId !== clientId) {
+        return yield* new SubscriptionNotFoundError({ subscriptionId, clientId })
+      }
+
+      // Get current queue size for backpressure monitoring
+      const currentSize = yield* Queue.size(sub.value.clientMessages)
+
+      // Record queue state with backpressure controller (if available)
+      // This may send Pause/Resume signals to the client
+      if (Option.isSome(backpressure)) {
+        yield* backpressure.value.recordQueueState(
+          subscriptionId,
+          currentSize,
+          MAX_CLIENT_MESSAGE_QUEUE_SIZE,
+        )
+      }
+
+      yield* Queue.offer(sub.value.clientMessages, data)
+    }),
 
     getClientSubscriptions: (clientId: ClientId) =>
       Effect.gen(function* () {
         const map = yield* Ref.get(subscriptions)
-        return Array.from(HashMap.values(map)).filter(
-          (s) => s.clientId === clientId,
-        )
+        return Array.from(HashMap.values(map)).filter((s) => s.clientId === clientId)
       }),
 
-    cleanupClient: Effect.fn("SubscriptionManager.cleanupClient")(
-      function* (clientId: ClientId) {
-        yield* Effect.annotateCurrentSpan("clientId", clientId)
+    cleanupClient: Effect.fn("SubscriptionManager.cleanupClient")(function* (clientId: ClientId) {
+      yield* Effect.annotateCurrentSpan("clientId", clientId)
 
-        // Atomic read-and-remove to prevent race conditions with concurrent subscribe
-        const clientSubs = yield* Ref.modify(subscriptions, (map) => {
-          const toRemove = Array.from(HashMap.values(map)).filter(
-            (s) => s.clientId === clientId,
-          )
-          const newMap = toRemove.reduce(
-            (acc, sub) => HashMap.remove(acc, sub.id),
-            map,
-          )
-          return [toRemove, newMap] as const
-        })
+      // Atomic read-and-remove to prevent race conditions with concurrent subscribe
+      const clientSubs = yield* Ref.modify(subscriptions, (map) => {
+        const toRemove = Array.from(HashMap.values(map)).filter((s) => s.clientId === clientId)
+        const newMap = toRemove.reduce((acc, sub) => HashMap.remove(acc, sub.id), map)
+        return [toRemove, newMap] as const
+      })
 
-        // Clean up removed subscriptions outside the atomic operation
-        yield* Effect.forEach(
-          clientSubs,
-          (sub) =>
-            Effect.all([
-              // Only interrupt if fiber was set (handles race where cleanup called before fork completed)
-              Option.isSome(sub.fiber)
-                ? Fiber.interrupt(sub.fiber.value)
-                : Effect.void,
-              Queue.shutdown(sub.clientMessages),
-            ]),
-          { concurrency: "unbounded", discard: true },
-        )
+      // Clean up removed subscriptions outside the atomic operation
+      yield* Effect.forEach(
+        clientSubs,
+        (sub) =>
+          Effect.all([
+            // Only interrupt if fiber was set (handles race where cleanup called before fork completed)
+            Option.isSome(sub.fiber) ? Fiber.interrupt(sub.fiber.value) : Effect.void,
+            Queue.shutdown(sub.clientMessages),
+          ]),
+        { concurrency: "unbounded", discard: true },
+      )
 
-        // Clean up backpressure state for the client
-        if (Option.isSome(backpressure)) {
-          yield* backpressure.value.cleanupClient(clientId)
-        }
-      },
-    ),
+      // Clean up backpressure state for the client
+      if (Option.isSome(backpressure)) {
+        yield* backpressure.value.cleanupClient(clientId)
+      }
+    }),
 
     count: Effect.gen(function* () {
       const map = yield* Ref.get(subscriptions)
@@ -786,9 +787,7 @@ const makeSubscriptionManager = Effect.gen(function* () {
         (sub) =>
           Effect.all([
             // Only interrupt if fiber was set (handles race where cleanup called before fork completed)
-            Option.isSome(sub.fiber)
-              ? Fiber.interrupt(sub.fiber.value)
-              : Effect.void,
+            Option.isSome(sub.fiber) ? Fiber.interrupt(sub.fiber.value) : Effect.void,
             Queue.shutdown(sub.clientMessages),
           ]),
         { concurrency: "unbounded", discard: true },
@@ -813,11 +812,8 @@ const makeSubscriptionManager = Effect.gen(function* () {
  * @since 0.1.0
  * @category Layers
  */
-export const SubscriptionManagerLive: Layer.Layer<
-  SubscriptionManager,
-  never,
-  ConnectionRegistry
-> = Layer.effect(SubscriptionManager, makeSubscriptionManager)
+export const SubscriptionManagerLive: Layer.Layer<SubscriptionManager, never, ConnectionRegistry> =
+  Layer.effect(SubscriptionManager, makeSubscriptionManager)
 
 // Assign static property after layer is defined
 SubscriptionManager.Live = SubscriptionManagerLive

@@ -11,9 +11,7 @@ import * as Predicate from "effect/Predicate"
 // Type Identification
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const WebSocketErrorTypeId: unique symbol = Symbol.for(
-  "@effect-trpc/WebSocketError",
-)
+export const WebSocketErrorTypeId: unique symbol = Symbol.for("@effect-trpc/WebSocketError")
 export type WebSocketErrorTypeId = typeof WebSocketErrorTypeId
 
 export const isWebSocketError = (u: unknown): u is WebSocketError =>
@@ -33,7 +31,13 @@ export class WebSocketConnectionError extends Schema.TaggedError<WebSocketConnec
   "WebSocketConnectionError",
   {
     url: Schema.String,
-    reason: Schema.Literal("ConnectionFailed", "ConnectionLost", "Timeout", "Closed", "MaxAttemptsReached"),
+    reason: Schema.Literal(
+      "ConnectionFailed",
+      "ConnectionLost",
+      "Timeout",
+      "Closed",
+      "MaxAttemptsReached",
+    ),
     description: Schema.optional(Schema.String),
     code: Schema.optional(Schema.Number),
     cause: Schema.optional(Schema.Defect),
@@ -102,7 +106,15 @@ export class WebSocketCloseError extends Schema.TaggedError<WebSocketCloseError>
 export class WebSocketAuthError extends Schema.TaggedError<WebSocketAuthError>()(
   "WebSocketAuthError",
   {
-    reason: Schema.Literal("InvalidToken", "Expired", "Missing", "Rejected", "Timeout", "TokenError", "SendFailed"),
+    reason: Schema.Literal(
+      "InvalidToken",
+      "Expired",
+      "Missing",
+      "Rejected",
+      "Timeout",
+      "TokenError",
+      "SendFailed",
+    ),
     description: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect),
   },
@@ -150,20 +162,6 @@ export class WebSocketSubscriptionError extends Schema.TaggedError<WebSocketSubs
     return `WebSocket subscription error [${this.path}] (${this.subscriptionId}): ${this.reason}${desc}`
   }
 }
-
-/**
- * @deprecated Use {@link WebSocketSubscriptionError} instead
- * @since 0.1.0
- * @category errors
- */
-export const SubscriptionError = WebSocketSubscriptionError
-
-/**
- * @deprecated Use {@link WebSocketSubscriptionError} instead
- * @since 0.1.0
- * @category errors
- */
-export type SubscriptionError = WebSocketSubscriptionError
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol Errors
@@ -360,13 +358,10 @@ export class MessageRateLimitExceededError extends Schema.TaggedError<MessageRat
  * @since 0.1.0
  * @category errors
  */
-export class InvalidPathError extends Schema.TaggedError<InvalidPathError>()(
-  "InvalidPathError",
-  {
-    path: Schema.String,
-    reason: Schema.String,
-  },
-) {
+export class InvalidPathError extends Schema.TaggedError<InvalidPathError>()("InvalidPathError", {
+  path: Schema.String,
+  reason: Schema.String,
+}) {
   readonly [WebSocketErrorTypeId]: WebSocketErrorTypeId = WebSocketErrorTypeId
 
   override get message(): string {

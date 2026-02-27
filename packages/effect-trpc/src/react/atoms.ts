@@ -121,18 +121,6 @@ export const queryKeyRegistryAtom: Atom.Writable<QueryKeyRegistryState> = Atom.k
 )
 
 /**
- * Legacy atom for backward compatibility.
- * Returns just the keys set from the new registry state.
- *
- * @deprecated Use queryKeyRegistryAtom instead
- * @since 0.1.0
- * @category atoms
- */
-export const queryKeysAtom: Atom.Atom<ReadonlySet<string>> = Atom.readable((get) =>
-  get(queryKeyRegistryAtom).keys,
-)
-
-/**
  * Register a query key in the registry with LRU tracking.
  * Called when a query hook mounts.
  *
@@ -206,7 +194,7 @@ export const clearQueryKeyRegistry = (registry: AtomRegistry.Registry): void => 
  * @category utils
  */
 export const getRegisteredQueryKeys = (registry: AtomRegistry.Registry): ReadonlySet<string> => {
-  return registry.get(queryKeysAtom)
+  return registry.get(queryKeyRegistryAtom).keys
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

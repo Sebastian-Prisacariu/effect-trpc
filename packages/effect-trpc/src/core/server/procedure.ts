@@ -113,11 +113,6 @@ export type InferProcedureType<T> =
 export type InferProcedureRequirements<T> =
   T extends Effect.Effect<ProcedureDefinition<any, any, any, any, any>, any, infer R> ? R : never
 
-// Legacy type aliases for backwards compatibility during migration
-export type InferProcedureMiddlewareR<T> = never
-export type InferProcedureProvides<T> = never
-export type InferProcedureMiddlewareReqs<T> = InferProcedureRequirements<T>
-
 export type ApplyMiddlewareToProcedure<P, M> =
   P extends ProcedureDefinition<
     infer I,

@@ -1,11 +1,8 @@
-import * as HttpLayerRouter from "@effect/platform/HttpLayerRouter"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Match from "effect/Match"
 import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
-import { createServer, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
 import { describe, expect, it } from "vitest"
 
 import { Client } from "../core/client/index.js"
@@ -23,7 +20,6 @@ import { Router, type RouterRecord, type RouterShape } from "../core/server/rout
 import { RpcBridge } from "../core/server/internal/bridge.js"
 import { Middleware as MiddlewareEngine } from "../core/server/internal/middleware/pipeline.js"
 import { Procedure as ProcedureEngine } from "../core/server/internal/procedure/base/builder.js"
-import { nodeToWebRequest, webToNodeResponse } from "../node/http.js"
 
 /**
  * Extract a value from an Effect synchronously.
@@ -207,97 +203,6 @@ describe("core vertical integration", () => {
       Effect.provide(program, coreLive) as Effect.Effect<string, unknown, never>,
     )
     expect(result).toBe("hello Ada from acme")
-  })
-
-  // Skip: This test uses deprecated internal API patterns for Router.provide/toHttpLayer
-  // The main HTTP functionality is tested via the public API in other test files
-  it.skip("runs query via real HTTP roundtrip with Client.HttpLive", async () => {
-    const ping = procedure
-      .input(Schema.Struct({ name: Schema.String }))
-      .output(Schema.String)
-      .query()
-
-    const pingLive = Procedure.toLayer(ping, (_ctx, input) => Effect.succeed(`pong ${input.name}`))
-
-    const router = Router.make({
-      system: {
-        ping: ping as unknown as Effect.Effect<ProcedureDefinition, never, unknown>,
-      },
-    })
-
-    const procedureEngineLive = ProcedureEngine.Live.pipe(Layer.provide(MiddlewareEngine.Live))
-
-    const runtimeLayer = Layer.mergeAll(
-      MiddlewareEngine.Live,
-      procedureEngineLive,
-      pingLive,
-      RpcBridge.Live,
-    ) as unknown as Layer.Layer<unknown, never, never>
-
-    const provided = Router.provide(runtimeLayer)(router)
-    const httpLayer = Router.toHttpLayer({ path: "/rpc" })(provided)
-    const handlerLayer = httpLayer as unknown as Layer.Layer<
-      never,
-      never,
-      HttpLayerRouter.HttpRouter
-    >
-    const webHandler = HttpLayerRouter.toWebHandler(handlerLayer, {
-      disableLogger: true,
-    })
-
-    let httpServer: Server | undefined
-    let rpcUrl = ""
-
-    try {
-      await new Promise<void>((resolve) => {
-        httpServer = createServer((req, res) => {
-          void (async () => {
-            try {
-              const request = await nodeToWebRequest(req)
-              const response = await webHandler.handler(request)
-              await webToNodeResponse(response, res)
-            } catch {
-              res.writeHead(500, { "content-type": "text/plain" })
-              res.end("Internal Server Error")
-            }
-          })()
-        })
-
-        httpServer.listen(0, () => {
-          const address = httpServer!.address() as AddressInfo
-          rpcUrl = `http://127.0.0.1:${address.port}/rpc`
-          resolve()
-        })
-      })
-
-      const program = Effect.gen(function* () {
-        const client = yield* Client
-        const routerShape = extractFromEffect(
-          router as unknown as Effect.Effect<RouterShape<RouterRecord>, never, unknown>,
-        )
-        const api = client.create(routerShape)
-        const pingCall = (api as Record<string, Record<string, unknown>>)["system"]![
-          "ping"
-        ] as unknown as (input: { readonly name: string }) => Effect.Effect<string, unknown, never>
-        return yield* pingCall({ name: "Ada" })
-      })
-
-      const result = await Effect.runPromise(
-        Effect.provide(
-          program,
-          Client.HttpLive(rpcUrl) as unknown as Layer.Layer<unknown, never, never>,
-        ),
-      )
-
-      expect(result).toBe("pong Ada")
-    } finally {
-      await webHandler.dispose()
-      if (httpServer !== undefined) {
-        await new Promise<void>((resolve) => {
-          httpServer!.close(() => resolve())
-        })
-      }
-    }
   })
 
   it("applies router and procedures-group middleware to all procedures", async () => {

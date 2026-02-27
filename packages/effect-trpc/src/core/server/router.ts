@@ -32,7 +32,7 @@ import { RpcBridge } from "./internal/bridge.js"
  * - Effect<ProcedureDefinition, never, R>
  * - Effect<ProceduresGroup, never, R>
  * - Effect<RouterShape, never, R>
- * - Plain records for backwards compatibility
+ * - Plain records for nested namespaces (e.g., { namespace: { procedure: Effect<Def> } })
  */
 export type RouterEntry =
   | Effect.Effect<ProcedureDefinition<any, any, any, any, any>, never, any>

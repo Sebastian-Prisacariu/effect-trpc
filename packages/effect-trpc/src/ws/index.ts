@@ -36,12 +36,7 @@
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type {
-  ClientId,
-  SubscriptionId,
-  ConnectionState,
-  SubscriptionState,
-} from "./types.js"
+export type { ClientId, SubscriptionId, ConnectionState, SubscriptionState } from "./types.js"
 
 export {
   ClientId as ClientIdSchema,
@@ -105,8 +100,6 @@ export {
   WebSocketCloseError,
   WebSocketAuthError,
   WebSocketSubscriptionError,
-  /** @deprecated Use WebSocketSubscriptionError instead */
-  SubscriptionError,
   WebSocketProtocolError,
   ConnectionNotFoundError,
   SubscriptionNotFoundError,
