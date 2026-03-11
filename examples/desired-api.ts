@@ -268,52 +268,100 @@ export const { POST } = createRouteHandler({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7a. SERVER CLIENT (Server Components, API routes)
+// 7. TRANSPORT (swappable — HTTP, mock, in-memory)
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { createServerClient } from "effect-trpc/server"
-
-// No React hooks — safe for RSC
-export const serverApi = createServerClient<AppRouter>({
-  url: "/api/trpc",
-})
-// Only exposes: .run, .runPromise, .runPromiseExit, .prefetch, .prefetchPromise
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 7b. CLIENT (React Client Components)
-// ═══════════════════════════════════════════════════════════════════════════
-
-import { createClient, Result, isTransientError } from "effect-trpc/client"
+import { Transport, Client, Result, isTransientError } from "effect-trpc"
 import { Duration, Schedule } from "effect"
 
-// Has React hooks — use in client components only
-export const api = createClient<AppRouter>({
-  url: "/api/trpc",
+// ─── Default HTTP Transport ───
+const httpTransport = Transport.http("/api/trpc")
+
+// ─── Mock Transport (type-safe!) ───
+// TypeScript enforces all routes with correct input/output types
+const mockTransport = Transport.make<typeof appRouter>({
+  "user.list": () => Effect.succeed([
+    new User({ id: "1", name: "Mock User", email: "mock@example.com" }),
+  ]),
+  "user.byId": ({ id }) => Effect.succeed(
+    new User({ id, name: `User ${id}`, email: `${id}@example.com` })
+  ),
+  "user.create": (input) => Effect.succeed(
+    new User({ id: "new-1", ...input })
+  ),
+  "user.delete": () => Effect.void,
+  "user.watch": () => Effect.succeed(
+    new User({ id: "1", name: "Watched User", email: "watch@example.com" })
+  ),
+  "contracts.public.list": () => Effect.succeed([]),
+  "contracts.public.get": ({ id }) => Effect.succeed(
+    new Contract({ id, title: "Mock Contract", userId: "1" })
+  ),
+  "contracts.private.list": () => Effect.succeed([]),
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. CLIENT (React)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Client.make — returns Effect (safe, composable)
+// Client.unsafeMake — returns client directly (escape hatch)
+
+const api = Client.unsafeMake<AppRouter>({
   defaults: {
     // Cache behavior
-    idleTTL: Duration.minutes(5),           // Keep cached 5 min after unmount
-    staleTime: Duration.minutes(1),         // Consider fresh for 1 min
-    keepAlive: false,                       // Don't keep forever by default
+    idleTTL: Duration.minutes(5),
+    staleTime: Duration.minutes(1),
+    keepAlive: false,
     
     // Revalidation triggers
-    refetchOnWindowFocus: true,             // Refetch when tab regains focus
-    refetchOnReconnect: true,               // Refetch when back online
-    refetchInterval: undefined,             // No polling by default
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    refetchInterval: undefined,
     
     // Client retry — ONLY for transient/network errors
     retry: {
       schedule: Schedule.exponential(Duration.seconds(1)).pipe(
         Schedule.compose(Schedule.recurs(3))
       ),
-      when: isTransientError,  // Don't retry typed business errors
+      when: isTransientError,
     },
   },
 })
 
-// Provider wraps your app
+// Provider accepts Transport layer — swap for testing/mocking
 export function ApiProvider({ children }: { children: React.ReactNode }) {
-  return <api.Provider>{children}</api.Provider>
+  return (
+    <Client.Provider layer={Transport.http("/api/trpc")}>
+      {children}
+    </Client.Provider>
+  )
 }
+
+// For testing/Storybook — same components, different transport
+export function MockApiProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <Client.Provider layer={mockTransport}>
+      {children}
+    </Client.Provider>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. SERVER CLIENT (Server Components, API routes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// For RSC — provide transport via Effect
+const serverProgram = Effect.gen(function* () {
+  const api = yield* Client.make<AppRouter>()
+  const users = yield* api.user.list.run
+  return users
+}).pipe(Effect.provide(Transport.http("/api/trpc")))
+
+// Or use unsafeMake for simple cases
+const serverApi = Client.unsafeMake<AppRouter>()
+// Then provide transport when running:
+// serverApi.user.list.run.pipe(Effect.provide(Transport.http("/api/trpc")))
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 8. USAGE IN COMPONENTS
