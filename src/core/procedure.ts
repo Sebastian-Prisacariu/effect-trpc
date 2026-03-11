@@ -1,13 +1,13 @@
 /**
  * @module effect-trpc/core/procedure
  * 
- * Procedure builder API with proper type separation for queries vs mutations.
+ * Declarative procedure definitions — query() and mutation() wrappers.
  */
 
 import * as Schema from "effect/Schema"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Definition Types (Discriminated Union)
+// Definition Types
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface ProcedureMeta {
@@ -17,31 +17,31 @@ export interface ProcedureMeta {
 }
 
 /**
- * Query definition — read-only, cacheable, no invalidation.
+ * Query definition — read-only, cacheable.
  */
-export interface QueryDefinition<TInput = unknown, TOutput = unknown> {
+export interface QueryDefinition<TInput = void, TOutput = unknown> {
   readonly _tag: "QueryDefinition"
   readonly type: "query"
-  readonly inputSchema: Schema.Schema<TInput, unknown> | undefined
-  readonly outputSchema: Schema.Schema<TOutput, unknown> | undefined
+  readonly input: Schema.Schema<TInput, unknown> | undefined
+  readonly output: Schema.Schema<TOutput, unknown>
   readonly meta: ProcedureMeta
-  readonly invalidates?: never // Discriminant: queries never invalidate
+  readonly invalidates?: never
 }
 
 /**
  * Mutation definition — write operation, can invalidate queries.
  */
-export interface MutationDefinition<TInput = unknown, TOutput = unknown> {
+export interface MutationDefinition<TInput = void, TOutput = unknown> {
   readonly _tag: "MutationDefinition"
   readonly type: "mutation"
-  readonly inputSchema: Schema.Schema<TInput, unknown> | undefined
-  readonly outputSchema: Schema.Schema<TOutput, unknown> | undefined
+  readonly input: Schema.Schema<TInput, unknown> | undefined
+  readonly output: Schema.Schema<TOutput, unknown>
   readonly meta: ProcedureMeta
   readonly invalidates: ReadonlyArray<string>
 }
 
 /**
- * A procedure definition — discriminated union of query or mutation.
+ * A procedure definition.
  */
 export type ProcedureDefinition<TInput = unknown, TOutput = unknown> =
   | QueryDefinition<TInput, TOutput>
@@ -65,125 +65,96 @@ export type IsQuery<T> = T extends QueryDefinition<any, any> ? true : false
 export type IsMutation<T> = T extends MutationDefinition<any, any> ? true : false
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Builder Types
+// Config Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Initial procedure builder — can become either query or mutation.
- */
-export interface ProcedureBuilder<TInput = void, TOutput = void> {
-  /**
-   * Define the input schema.
-   */
-  input<I>(schema: Schema.Schema<I, unknown>): ProcedureBuilder<I, TOutput>
-  
-  /**
-   * Define the output schema.
-   */
-  output<O>(schema: Schema.Schema<O, unknown>): ProcedureBuilder<TInput, O>
-  
-  /**
-   * Add metadata.
-   */
-  meta(meta: ProcedureMeta): ProcedureBuilder<TInput, TOutput>
-  
-  /**
-   * Finalize as a query (read-only, cacheable).
-   */
-  query(): QueryDefinition<TInput, TOutput>
-  
-  /**
-   * Transition to mutation builder (allows invalidates).
-   */
-  mutation(): MutationBuilder<TInput, TOutput>
+export interface QueryConfig<TInput, TOutput> {
+  readonly input?: Schema.Schema<TInput, unknown>
+  readonly output: Schema.Schema<TOutput, unknown>
+  readonly meta?: ProcedureMeta
 }
 
-/**
- * Mutation builder — available after calling mutation().
- * Has access to invalidates() which queries don't have.
- */
-export interface MutationBuilder<TInput = void, TOutput = void> {
-  /**
-   * Specify which query keys this mutation invalidates.
-   */
-  invalidates(keys: ReadonlyArray<string>): MutationBuilder<TInput, TOutput>
-  
-  /**
-   * Finalize the mutation definition.
-   */
-  build(): MutationDefinition<TInput, TOutput>
+export interface MutationConfig<TInput, TOutput> {
+  readonly input?: Schema.Schema<TInput, unknown>
+  readonly output: Schema.Schema<TOutput, unknown>
+  readonly invalidates?: ReadonlyArray<string>
+  readonly meta?: ProcedureMeta
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Implementation
+// Procedure Factories
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface BuilderState {
-  readonly inputSchema: Schema.Schema<any, unknown> | undefined
-  readonly outputSchema: Schema.Schema<any, unknown> | undefined
-  readonly meta: ProcedureMeta
-}
-
-interface MutationBuilderState extends BuilderState {
-  readonly invalidates: ReadonlyArray<string>
-}
-
-const createMutationBuilder = (state: MutationBuilderState): MutationBuilder<any, any> => ({
-  invalidates: (keys) => createMutationBuilder({ 
-    ...state, 
-    invalidates: [...state.invalidates, ...keys] 
-  }),
-  
-  build: () => ({
-    _tag: "MutationDefinition",
-    type: "mutation",
-    inputSchema: state.inputSchema,
-    outputSchema: state.outputSchema,
-    meta: state.meta,
-    invalidates: state.invalidates,
-  }),
-})
-
-const createProcedureBuilder = (state: BuilderState): ProcedureBuilder<any, any> => ({
-  input: (schema) => createProcedureBuilder({ ...state, inputSchema: schema }),
-  output: (schema) => createProcedureBuilder({ ...state, outputSchema: schema }),
-  meta: (meta) => createProcedureBuilder({ ...state, meta: { ...state.meta, ...meta } }),
-  
-  query: () => ({
-    _tag: "QueryDefinition",
-    type: "query",
-    inputSchema: state.inputSchema,
-    outputSchema: state.outputSchema,
-    meta: state.meta,
-  }),
-  
-  mutation: () => createMutationBuilder({
-    ...state,
-    invalidates: [],
-  }),
-})
-
 /**
- * Create a new procedure.
+ * Define a query procedure (read-only, cacheable).
  * 
  * @example
  * ```ts
- * // Query — no invalidates available
- * const list = procedure
- *   .output(Schema.Array(User))
- *   .query()
+ * const list = query({
+ *   output: Schema.Array(User),
+ * })
  * 
- * // Mutation — invalidates available after mutation()
- * const create = procedure
- *   .input(CreateUserSchema)
- *   .output(User)
- *   .mutation()
- *   .invalidates(["user.list"])
- *   .build()
+ * const byId = query({
+ *   input: Schema.Struct({ id: Schema.String }),
+ *   output: User,
+ * })
  * ```
  */
-export const procedure: ProcedureBuilder<void, void> = createProcedureBuilder({
-  inputSchema: undefined,
-  outputSchema: undefined,
-  meta: {},
-})
+export function query<TOutput>(
+  config: QueryConfig<void, TOutput>
+): QueryDefinition<void, TOutput>
+
+export function query<TInput, TOutput>(
+  config: QueryConfig<TInput, TOutput> & { input: Schema.Schema<TInput, unknown> }
+): QueryDefinition<TInput, TOutput>
+
+export function query<TInput, TOutput>(
+  config: QueryConfig<TInput, TOutput>
+): QueryDefinition<TInput, TOutput> {
+  return {
+    _tag: "QueryDefinition",
+    type: "query",
+    input: config.input,
+    output: config.output,
+    meta: config.meta ?? {},
+  }
+}
+
+/**
+ * Define a mutation procedure (write operation).
+ * 
+ * @example
+ * ```ts
+ * const create = mutation({
+ *   input: CreateUserSchema,
+ *   output: User,
+ *   invalidates: ["user.list"],
+ * })
+ * 
+ * const deleteUser = mutation({
+ *   input: Schema.Struct({ id: Schema.String }),
+ *   output: Schema.Void,
+ *   invalidates: ["user.list", "user.byId"],
+ * })
+ * ```
+ */
+export function mutation<TOutput>(
+  config: MutationConfig<void, TOutput>
+): MutationDefinition<void, TOutput>
+
+export function mutation<TInput, TOutput>(
+  config: MutationConfig<TInput, TOutput> & { input: Schema.Schema<TInput, unknown> }
+): MutationDefinition<TInput, TOutput>
+
+export function mutation<TInput, TOutput>(
+  config: MutationConfig<TInput, TOutput>
+): MutationDefinition<TInput, TOutput> {
+  return {
+    _tag: "MutationDefinition",
+    type: "mutation",
+    input: config.input,
+    output: config.output,
+    meta: config.meta ?? {},
+    invalidates: config.invalidates ?? [],
+  }
+}

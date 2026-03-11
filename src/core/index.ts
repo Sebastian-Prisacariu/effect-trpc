@@ -3,9 +3,10 @@
  */
 
 export {
-  procedure,
-  type ProcedureBuilder,
-  type MutationBuilder,
+  query,
+  mutation,
+  type QueryConfig,
+  type MutationConfig,
   type ProcedureDefinition,
   type QueryDefinition,
   type MutationDefinition,
