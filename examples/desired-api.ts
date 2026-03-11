@@ -271,10 +271,30 @@ export const { POST } = createRouteHandler({
 // 7. CLIENT (React)
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { createClient, Result } from "effect-trpc/client"
+import { createClient, Result, isTransientError } from "effect-trpc/client"
+import { Duration, Schedule } from "effect"
 
 export const api = createClient<AppRouter>({
   url: "/api/trpc",
+  defaults: {
+    // Cache behavior
+    idleTTL: Duration.minutes(5),           // Keep cached 5 min after unmount
+    staleTime: Duration.minutes(1),         // Consider fresh for 1 min
+    keepAlive: false,                       // Don't keep forever by default
+    
+    // Revalidation triggers
+    refetchOnWindowFocus: true,             // Refetch when tab regains focus
+    refetchOnReconnect: true,               // Refetch when back online
+    refetchInterval: undefined,             // No polling by default
+    
+    // Client retry — ONLY for transient/network errors
+    retry: {
+      schedule: Schedule.exponential(Duration.seconds(1)).pipe(
+        Schedule.compose(Schedule.recurs(3))
+      ),
+      when: isTransientError,  // Don't retry typed business errors
+    },
+  },
 })
 
 // Provider wraps your app
@@ -349,6 +369,69 @@ function CreateUserForm() {
         </div>
       )}
     </form>
+  )
+}
+
+// ─── Query Options ───
+
+function ActiveUsersDashboard() {
+  // Override defaults for this query
+  const query = api.user.list.useQuery({
+    staleTime: Duration.seconds(30),        // Shorter stale time
+    idleTTL: Duration.minutes(10),          // Keep longer in cache
+    refetchOnWindowFocus: true,
+  })
+
+  return <UserTable users={query.data ?? []} />
+}
+
+function RealtimeUserList() {
+  // Polling with Duration
+  const query = api.user.list.useQuery({
+    refetchInterval: Duration.seconds(10),  // Simple polling
+  })
+
+  return <UserTable users={query.data ?? []} />
+}
+
+function SmartPollingUserList() {
+  // Polling with Schedule (advanced control)
+  const query = api.user.list.useQuery({
+    refetchInterval: Schedule.spaced(Duration.seconds(10)).pipe(
+      // Only poll when tab is visible
+      Schedule.whileOutput(() => document.visibilityState === "visible")
+    ),
+  })
+
+  return <UserTable users={query.data ?? []} />
+}
+
+function CriticalDataDisplay() {
+  // Aggressive retry for critical data
+  const query = api.user.list.useQuery({
+    keepAlive: true,  // Never garbage collect
+    retry: {
+      schedule: Schedule.exponential(Duration.millis(500)).pipe(
+        Schedule.compose(Schedule.recurs(5))  // 5 retries
+      ),
+      when: isTransientError,
+    },
+  })
+
+  return <UserTable users={query.data ?? []} />
+}
+
+function UserListWithRefresh() {
+  const query = api.user.list.useQuery()
+  const refresh = api.user.list.useRefresh()  // Manual refresh hook
+
+  return (
+    <div>
+      <button onClick={() => refresh()}>Refresh</button>
+      {/* Or use query.refresh() directly */}
+      <button onClick={() => query.refresh()}>Refresh (alt)</button>
+      <UserTable users={query.data ?? []} />
+    </div>
   )
 }
 
