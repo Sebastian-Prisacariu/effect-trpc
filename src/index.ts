@@ -8,6 +8,11 @@ export * as Procedure from "./Procedure/index.js"
 export * as Router from "./Router/index.js"
 export * as Client from "./Client/index.js"
 export * as Transport from "./Transport/index.js"
+export * as Result from "./Result/index.js"
+export * as Middleware from "./Middleware/index.js"
 
 // Re-export commonly used types
-export type { QueryResult, DehydratedState } from "./Client/index.js"
+export type { QueryResult } from "./Client/index.js"
+
+// Re-export utility
+export { isTransientError } from "./Transport/index.js"

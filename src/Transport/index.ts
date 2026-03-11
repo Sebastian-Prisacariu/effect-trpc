@@ -5,10 +5,11 @@
  * @module
  */
 
-import { Context, Layer, Stream, Duration } from "effect"
+import { Context, Effect, Layer, Stream, Duration } from "effect"
 import { httpTransport } from "./internal/http.js"
 import { webSocketTransport } from "./internal/websocket.js"
-import type { TransportError } from "./internal/error.js"
+import { mockTransport } from "./internal/mock.js"
+import type * as Router from "../Router/index.js"
 
 // =============================================================================
 // Service (the only thing that crosses module boundaries)
@@ -56,6 +57,7 @@ export type TransportResponse =
   | { readonly _tag: "End"; readonly id: string }
 
 export { TransportError } from "./internal/error.js"
+import { TransportError } from "./internal/error.js"
 
 // =============================================================================
 // Constructors
@@ -116,12 +118,86 @@ export const webSocket = (
   webSocketTransport(url, options)
 
 /**
- * Create a custom transport
+ * Create a custom transport from a service implementation
  * 
  * @since 1.0.0
  * @category constructors
  */
-export const make = (
+export const fromService = (
   service: TransportService
 ): Layer.Layer<Transport, never, never> =>
   Layer.succeed(Transport, service)
+
+/**
+ * Handler map for mock transport
+ * Maps procedure paths to their implementations
+ */
+export type MockHandlers<D extends Router.Definition> = {
+  [K in PathsOf<Router.FlattenDefinition<D>>]: (
+    payload: PayloadFor<Router.FlattenDefinition<D>, K>
+  ) => Effect.Effect<SuccessFor<Router.FlattenDefinition<D>, K>, ErrorFor<Router.FlattenDefinition<D>, K>>
+}
+
+// Type helpers for extracting paths and types from router
+type PathsOf<D, Prefix extends string = ""> = D extends object
+  ? {
+      [K in keyof D & string]: D[K] extends { readonly _tag: "Query" | "Mutation" | "Stream" }
+        ? Prefix extends "" ? K : `${Prefix}.${K}`
+        : PathsOf<D[K], Prefix extends "" ? K : `${Prefix}.${K}`>
+    }[keyof D & string]
+  : never
+
+type GetAtPath<D, Path extends string> = Path extends `${infer Head}.${infer Tail}`
+  ? Head extends keyof D
+    ? GetAtPath<D[Head], Tail>
+    : never
+  : Path extends keyof D
+    ? D[Path]
+    : never
+
+type PayloadFor<D, Path extends string> = GetAtPath<D, Path> extends { readonly payload: infer P }
+  ? P extends { readonly Type: infer T } ? T : unknown
+  : void
+
+type SuccessFor<D, Path extends string> = GetAtPath<D, Path> extends { readonly success: infer S }
+  ? S extends { readonly Type: infer T } ? T : unknown
+  : unknown
+
+type ErrorFor<D, Path extends string> = GetAtPath<D, Path> extends { readonly error: infer E }
+  ? E extends { readonly Type: infer T } ? T : unknown
+  : never
+
+/**
+ * Create a type-safe mock transport
+ * 
+ * @since 1.0.0
+ * @category constructors
+ * @example
+ * ```ts
+ * const mockLayer = Transport.make<AppRouter>({
+ *   "user.list": () => Effect.succeed([...]),
+ *   "user.byId": ({ id }) => Effect.succeed({ id, name: "Mock" }),
+ * })
+ * ```
+ */
+export const make = <D extends Router.Definition>(
+  handlers: MockHandlers<D>
+): Layer.Layer<Transport, never, never> =>
+  mockTransport(handlers as Record<string, (payload: unknown) => Effect.Effect<unknown, unknown>>)
+
+// =============================================================================
+// Utilities
+// =============================================================================
+
+/**
+ * Check if an error is transient (retry-able)
+ * 
+ * @since 1.0.0
+ * @category utilities
+ */
+export const isTransientError = (error: unknown): boolean => {
+  if (error instanceof TransportError) {
+    return error.reason === "Network" || error.reason === "Timeout"
+  }
+  return false
+}

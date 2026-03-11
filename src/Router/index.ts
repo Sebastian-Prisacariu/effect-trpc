@@ -12,13 +12,29 @@ import type * as Procedure from "../Procedure/index.js"
 // =============================================================================
 
 /**
- * A record of procedures or nested routers
+ * A record of procedures, families, or nested routers
  * 
  * @since 1.0.0
  * @category models
  */
-export interface Definition {
-  readonly [key: string]: Procedure.AnyDef | Definition
+export type Definition = {
+  readonly [key: string]: 
+    | Procedure.AnyDef 
+    | Procedure.Family<string, any>
+    | Definition
+}
+
+/**
+ * Flatten a definition (resolve families to their procedures)
+ */
+export type FlattenDefinition<D extends Definition> = {
+  readonly [K in keyof D]: D[K] extends Procedure.Family<string, infer P>
+    ? P
+    : D[K] extends Procedure.AnyDef
+      ? D[K]
+      : D[K] extends Definition
+        ? FlattenDefinition<D[K]>
+        : never
 }
 
 /**
@@ -30,6 +46,7 @@ export interface Definition {
 export interface Router<D extends Definition> {
   readonly _tag: "Router"
   readonly definition: D
+  readonly flattened: FlattenDefinition<D>
 }
 
 // =============================================================================
@@ -45,23 +62,45 @@ export interface Router<D extends Definition> {
  * ```ts
  * import { Router, Procedure } from "effect-trpc"
  * 
- * const UserRouter = Router.make({
- *   list: Procedure.query({
- *     success: Schema.Array(User),
- *     handler: () => UserService.findAll()
- *   }),
- *   byId: Procedure.query({
- *     payload: Schema.Struct({ id: Schema.String }),
- *     success: User,
- *     handler: ({ id }) => UserService.findById(id)
- *   }),
+ * const UserProcedures = Procedure.family("user", {
+ *   list: Procedure.query({ ... }),
+ * })
+ * 
+ * const AppRouter = Router.make({
+ *   user: UserProcedures,
+ *   post: PostProcedures,
  * })
  * ```
  */
-export const make = <D extends Definition>(definition: D): Router<D> => ({
-  _tag: "Router",
-  definition,
-})
+export const make = <D extends Definition>(definition: D): Router<D> => {
+  const flattened = flattenDefinition(definition)
+  return {
+    _tag: "Router",
+    definition,
+    flattened: flattened as FlattenDefinition<D>,
+  }
+}
+
+const flattenDefinition = (def: Definition): any => {
+  const result: Record<string, any> = {}
+  
+  for (const key of Object.keys(def)) {
+    const value = def[key]
+    
+    if (isFamily(value)) {
+      // Family: use its procedures directly
+      result[key] = value.procedures
+    } else if (isProcedure(value)) {
+      // Procedure: use as-is
+      result[key] = value
+    } else {
+      // Nested definition: recurse
+      result[key] = flattenDefinition(value as Definition)
+    }
+  }
+  
+  return result
+}
 
 /**
  * Merge multiple routers into one
@@ -102,20 +141,20 @@ type UnionToIntersection<U> = (
 export const paths = <D extends Definition>(router: Router<D>): ReadonlyArray<string> => {
   const result: string[] = []
 
-  const walk = (def: Definition, prefix: string) => {
+  const walk = (def: any, prefix: string) => {
     for (const key of Object.keys(def)) {
       const value = def[key]
       const path = prefix ? `${prefix}.${key}` : key
 
       if (isProcedure(value)) {
         result.push(path)
-      } else {
-        walk(value as Definition, path)
+      } else if (typeof value === "object" && value !== null) {
+        walk(value, path)
       }
     }
   }
 
-  walk(router.definition, "")
+  walk(router.flattened, "")
   return result
 }
 
@@ -130,7 +169,7 @@ export const get = <D extends Definition>(
   path: string
 ): Procedure.AnyDef | undefined => {
   const parts = path.split(".")
-  let current: any = router.definition
+  let current: any = router.flattened
 
   for (const part of parts) {
     if (current === undefined) return undefined
@@ -145,3 +184,9 @@ const isProcedure = (value: unknown): value is Procedure.AnyDef =>
   value !== null &&
   "_tag" in value &&
   (value._tag === "Query" || value._tag === "Mutation" || value._tag === "Stream")
+
+const isFamily = (value: unknown): value is Procedure.Family<string, any> =>
+  typeof value === "object" &&
+  value !== null &&
+  "_tag" in value &&
+  value._tag === "Family"

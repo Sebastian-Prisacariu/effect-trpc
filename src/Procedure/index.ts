@@ -26,7 +26,7 @@ export interface QueryDef<Payload, Success, Error, Requirements> {
   readonly payload: Schema.Schema<Payload, unknown>
   readonly success: Schema.Schema<Success, unknown>
   readonly error: Schema.Schema<Error, unknown>
-  readonly handler: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
+  readonly handler: ((payload: Payload) => Effect.Effect<Success, Error, Requirements>) | undefined
 }
 
 /**
@@ -39,7 +39,18 @@ export interface MutationDef<Payload, Success, Error, Requirements> {
   readonly success: Schema.Schema<Success, unknown>
   readonly error: Schema.Schema<Error, unknown>
   readonly invalidates: ReadonlyArray<string>
-  readonly handler: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
+  readonly optimistic?: OptimisticConfig<any, Payload, Success>
+  readonly handler: ((payload: Payload) => Effect.Effect<Success, Error, Requirements>) | undefined
+}
+
+/**
+ * @since 1.0.0
+ * @category models
+ */
+export interface OptimisticConfig<Target, Payload, Success> {
+  readonly target: string
+  readonly reducer: (current: Target, payload: Payload) => Target
+  readonly reconcile?: (current: Target, payload: Payload, result: Success) => Target
 }
 
 /**
@@ -51,7 +62,7 @@ export interface StreamDef<Payload, Success, Error, Requirements> {
   readonly payload: Schema.Schema<Payload, unknown>
   readonly success: Schema.Schema<Success, unknown>
   readonly error: Schema.Schema<Error, unknown>
-  readonly handler: (payload: Payload) => Stream.Stream<Success, Error, Requirements>
+  readonly handler: ((payload: Payload) => Stream.Stream<Success, Error, Requirements>) | undefined
 }
 
 /**
@@ -62,6 +73,20 @@ export type AnyDef =
   | QueryDef<any, any, any, any>
   | MutationDef<any, any, any, any>
   | StreamDef<any, any, any, any>
+
+/**
+ * A family of procedures with a namespace
+ * @since 1.0.0
+ */
+export interface Family<Name extends string, Procedures extends Record<string, AnyDef>> {
+  readonly _tag: "Family"
+  readonly name: Name
+  readonly procedures: Procedures
+  readonly middleware: ReadonlyArray<unknown>
+  
+  /** Apply middleware to all procedures in this family */
+  readonly withMiddleware: <M>(middleware: M) => Family<Name, Procedures>
+}
 
 // =============================================================================
 // Constructors
@@ -75,7 +100,7 @@ export interface QueryOptions<Payload, Success, Error, Requirements> {
   readonly payload?: Schema.Schema<Payload, unknown>
   readonly success: Schema.Schema<Success, unknown>
   readonly error?: Schema.Schema<Error, unknown>
-  readonly handler: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
+  readonly handler?: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
 }
 
 /**
@@ -103,12 +128,13 @@ export const query = <
  * @since 1.0.0
  * @category models
  */
-export interface MutationOptions<Payload, Success, Error, Requirements> {
+export interface MutationOptions<Payload, Success, Error, Requirements, Target = unknown> {
   readonly payload?: Schema.Schema<Payload, unknown>
   readonly success: Schema.Schema<Success, unknown>
   readonly error?: Schema.Schema<Error, unknown>
   readonly invalidates: ReadonlyArray<string>
-  readonly handler: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
+  readonly optimistic?: OptimisticConfig<Target, Payload, Success>
+  readonly handler?: (payload: Payload) => Effect.Effect<Success, Error, Requirements>
 }
 
 /**
@@ -121,15 +147,17 @@ export const mutation = <
   Payload = void,
   Success = unknown,
   Error = never,
-  Requirements = never
+  Requirements = never,
+  Target = unknown
 >(
-  options: MutationOptions<Payload, Success, Error, Requirements>
+  options: MutationOptions<Payload, Success, Error, Requirements, Target>
 ): MutationDef<Payload, Success, Error, Requirements> => ({
   _tag: "Mutation",
   payload: (options.payload ?? Schema.Void) as Schema.Schema<Payload, unknown>,
   success: options.success,
   error: (options.error ?? Schema.Never) as Schema.Schema<Error, unknown>,
   invalidates: options.invalidates,
+  optimistic: options.optimistic,
   handler: options.handler,
 })
 
@@ -141,7 +169,7 @@ export interface StreamOptions<Payload, Success, Error, Requirements> {
   readonly payload?: Schema.Schema<Payload, unknown>
   readonly success: Schema.Schema<Success, unknown>
   readonly error?: Schema.Schema<Error, unknown>
-  readonly handler: (payload: Payload) => Stream.Stream<Success, Error, Requirements>
+  readonly handler?: (payload: Payload) => Stream.Stream<Success, Error, Requirements>
 }
 
 /**
@@ -164,6 +192,42 @@ export const stream = <
   error: (options.error ?? Schema.Never) as Schema.Schema<Error, unknown>,
   handler: options.handler,
 })
+
+/**
+ * Create a family of procedures with a namespace
+ * 
+ * @since 1.0.0
+ * @category constructors
+ * @example
+ * ```ts
+ * const UserProcedures = Procedure.family("user", {
+ *   list: Procedure.query({ ... }),
+ *   create: Procedure.mutation({ ... }),
+ * })
+ * ```
+ */
+export const family = <
+  Name extends string,
+  Procedures extends Record<string, AnyDef>
+>(
+  name: Name,
+  procedures: Procedures
+): Family<Name, Procedures> => ({
+  _tag: "Family",
+  name,
+  procedures,
+  middleware: [],
+  withMiddleware: <M>(middleware: M) => ({
+    _tag: "Family" as const,
+    name,
+    procedures,
+    middleware: [...[], middleware],
+    withMiddleware: (m: any) => family(name, procedures).withMiddleware(m),
+  }),
+})
+
+// Alias for chaining
+export { family as namespace }
 
 // =============================================================================
 // Type helpers

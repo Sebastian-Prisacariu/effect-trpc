@@ -6,4 +6,7 @@
 
 export * as Client from "./Client/index.js"
 export * as Transport from "./Transport/index.js"
-export type { QueryResult, DehydratedState } from "./Client/index.js"
+export * as Result from "./Result/index.js"
+
+// Re-export utilities
+export { isTransientError } from "./Transport/index.js"
