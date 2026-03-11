@@ -5,6 +5,10 @@
  */
 
 import { Schema, Effect, Context, Layer } from "effect"
+import { Headers } from "@effect/platform"
+
+// Helper for client-side token storage
+declare const getStoredToken: () => Effect.Effect<string>
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. SCHEMAS
@@ -43,7 +47,26 @@ class ValidationError extends Schema.TaggedError<ValidationError>("ValidationErr
 
 class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("UnauthorizedError")({
   message: Schema.String,
-}) {}
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2b. MIDDLEWARE
+// 
+// Re-exported from Effect RPC — defines what middleware provides/fails with
+// ═══════════════════════════════════════════════════════════════════════════
+
+// What the auth middleware provides
+class CurrentUser extends Context.Tag("CurrentUser")<
+  CurrentUser,
+  User
+>() {}
+
+// The middleware tag
+class Auth extends Middleware.Tag<Auth>()("Auth", {
+  provides: CurrentUser,
+  failure: UnauthorizedError,
+  requiredForClient: true,
+}) {} {}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. PROCEDURE DEFINITIONS (Contracts)
@@ -51,7 +74,7 @@ class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("Unauthori
 // Using success/error/payload to match Effect RPC conventions
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { Procedure, Router } from "effect-trpc"
+import { Procedure, Router, Middleware } from "effect-trpc"
 
 // ─── User Procedures ───
 
@@ -91,7 +114,7 @@ export const UserProcedures = Procedure.family("user", {
   create: createUser,
   delete: deleteUser,
   watch: watchUsers,
-})
+}).middleware(Auth)  // All procedures require auth, can access CurrentUser
 
 // ─── Contract Procedures (nested example) ───
 
@@ -158,29 +181,35 @@ class UserRepository extends Context.Tag("UserRepository")<
 export const UserProceduresLive = UserProcedures.implement({
   list: () =>
     Effect.gen(function* () {
+      const currentUser = yield* CurrentUser  // Available from Auth middleware!
       const repo = yield* UserRepository
+      console.log(`User ${currentUser.name} is listing users`)
       return yield* repo.findAll()
     }),
 
   byId: ({ id }) =>
     Effect.gen(function* () {
+      const currentUser = yield* CurrentUser
       const repo = yield* UserRepository
       return yield* repo.findById(id)
     }),
 
   create: (input) =>
     Effect.gen(function* () {
+      const currentUser = yield* CurrentUser
       const repo = yield* UserRepository
       return yield* repo.create(input)
     }),
 
   delete: ({ id }) =>
     Effect.gen(function* () {
+      const currentUser = yield* CurrentUser
       const repo = yield* UserRepository
       yield* repo.delete(id)
     }),
 })
 // Type: Layer<UserProcedures.Service, never, UserRepository>
+// Note: CurrentUser is provided by Auth middleware, not a requirement here
 
 // 5c. Create the actual repository implementation (Live layer)
 export const UserRepositoryLive = Layer.succeed(UserRepository, {
@@ -190,6 +219,31 @@ export const UserRepositoryLive = Layer.succeed(UserRepository, {
   delete: (_id) => Effect.succeed(undefined),
 })
 
+// 5d. Implement the auth middleware
+export const AuthLive = Layer.succeed(Auth,
+  Auth.of(({ headers }) =>
+    Effect.gen(function* () {
+      const token = headers.get("authorization")
+      if (!token) {
+        return yield* Effect.fail(new UnauthorizedError({ message: "No token" }))
+      }
+      // In reality: verify JWT, lookup user, etc.
+      return new User({ id: "123", name: "Authenticated User", email: "auth@example.com" })
+    })
+  )
+)
+
+// 5e. Client-side middleware (adds auth header to requests)
+export const AuthClientLive = Middleware.layerClient(Auth, ({ request, rpc }) =>
+  Effect.gen(function* () {
+    const token = yield* getStoredToken()  // Get from localStorage, etc.
+    return {
+      ...request,
+      headers: Headers.set(request.headers, "authorization", `Bearer ${token}`)
+    }
+  })
+)
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 6. ROUTE HANDLER (Next.js)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -197,7 +251,8 @@ export const UserRepositoryLive = Layer.succeed(UserRepository, {
 import { createRouteHandler } from "effect-trpc/server"
 
 const FullLive = UserProceduresLive.pipe(
-  Layer.provide(UserRepositoryLive)
+  Layer.provide(UserRepositoryLive),
+  Layer.provide(AuthLive),
 )
 
 export const { POST } = createRouteHandler({
