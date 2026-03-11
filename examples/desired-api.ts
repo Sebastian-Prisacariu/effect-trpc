@@ -4,7 +4,7 @@
  * This is the target. We'll build the implementation to make this work.
  */
 
-import { Schema, Effect, Context } from "effect"
+import { Schema, Effect, Context, Layer } from "effect"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. SCHEMAS
@@ -21,65 +21,125 @@ class CreateUserInput extends Schema.Class<CreateUserInput>("CreateUserInput")({
   email: Schema.String,
 }) {}
 
+class Contract extends Schema.Class<Contract>("Contract")({
+  id: Schema.String,
+  title: Schema.String,
+  userId: Schema.String,
+}) {}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. PROCEDURE DEFINITIONS (Contracts)
+// 2. ERRORS
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { query, mutation, procedures } from "effect-trpc"
+class NotFoundError extends Schema.TaggedError<NotFoundError>("NotFoundError")({
+  entity: Schema.String,
+  id: Schema.String,
+}) {}
 
-// Define individual procedures
-const list = query({
-  output: Schema.Array(User),
+class ValidationError extends Schema.TaggedError<ValidationError>("ValidationError")({
+  field: Schema.String,
+  message: Schema.String,
+}) {}
+
+class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("UnauthorizedError")({
+  message: Schema.String,
+}) {}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. PROCEDURE DEFINITIONS (Contracts)
+// 
+// Using success/error/payload to match Effect RPC conventions
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { query, mutation, procedures, Router } from "effect-trpc"
+
+// ─── User Procedures ───
+
+const listUsers = query({
+  success: Schema.Array(User),
 })
 
-const byId = query({
-  input: Schema.Struct({ id: Schema.String }),
-  output: User,
+const getUserById = query({
+  payload: Schema.Struct({ id: Schema.String }),
+  success: User,
+  error: NotFoundError,
 })
 
-const create = mutation({
-  input: CreateUserInput,
-  output: User,
+const createUser = mutation({
+  payload: CreateUserInput,
+  success: User,
+  error: ValidationError,
   invalidates: ["user.list"],
 })
 
 const deleteUser = mutation({
-  input: Schema.Struct({ id: Schema.String }),
-  output: Schema.Void,
+  payload: Schema.Struct({ id: Schema.String }),
+  success: Schema.Void,
+  error: NotFoundError,
   invalidates: ["user.list", "user.byId"],
 })
 
-// Group them
 export const UserProcedures = procedures("user", {
-  list,
-  byId,
-  create,
+  list: listUsers,
+  byId: getUserById,
+  create: createUser,
   delete: deleteUser,
 })
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 3. ROUTER
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Contract Procedures (nested example) ───
 
-import { Router } from "effect-trpc"
+const listPublicContracts = query({
+  success: Schema.Array(Contract),
+})
+
+const getPublicContract = query({
+  payload: Schema.Struct({ id: Schema.String }),
+  success: Contract,
+  error: NotFoundError,
+})
+
+const PublicContractProcedures = procedures("public", {
+  list: listPublicContracts,
+  get: getPublicContract,
+})
+
+const listPrivateContracts = query({
+  payload: Schema.Struct({ userId: Schema.String }),
+  success: Schema.Array(Contract),
+  error: UnauthorizedError,
+})
+
+const PrivateContractProcedures = procedures("private", {
+  list: listPrivateContracts,
+})
+
+// Nested router for contracts
+const ContractsRouter = Router.make({
+  public: PublicContractProcedures,
+  private: PrivateContractProcedures,
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. ROUTER (with nesting)
+// ═══════════════════════════════════════════════════════════════════════════
 
 export const appRouter = Router.make({
   user: UserProcedures,
-  // post: PostProcedures,
+  contracts: ContractsRouter,  // Nested router!
 })
 
 export type AppRouter = typeof appRouter
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. SERVER — Interface-First Implementation
+// 5. SERVER — Interface-First Implementation
 // ═══════════════════════════════════════════════════════════════════════════
 
-// 4a. Define service contracts (interfaces only)
+// 5a. Define service contracts (interfaces only)
 interface UserRepositoryService {
   readonly findAll: () => Effect.Effect<User[]>
-  readonly findById: (id: string) => Effect.Effect<User, UserNotFoundError>
-  readonly create: (input: CreateUserInput) => Effect.Effect<User>
-  readonly delete: (id: string) => Effect.Effect<void, UserNotFoundError>
+  readonly findById: (id: string) => Effect.Effect<User, NotFoundError>
+  readonly create: (input: CreateUserInput) => Effect.Effect<User, ValidationError>
+  readonly delete: (id: string) => Effect.Effect<void, NotFoundError>
 }
 
 class UserRepository extends Context.Tag("UserRepository")<
@@ -87,11 +147,7 @@ class UserRepository extends Context.Tag("UserRepository")<
   UserRepositoryService
 >() {}
 
-class UserNotFoundError extends Schema.TaggedError<UserNotFoundError>("UserNotFoundError")({
-  id: Schema.String,
-}) {}
-
-// 4b. Implement the procedures (using contracts, not implementations)
+// 5b. Implement the procedures (using contracts, not implementations)
 export const UserProceduresLive = UserProcedures.implement({
   list: () =>
     Effect.gen(function* () {
@@ -119,23 +175,20 @@ export const UserProceduresLive = UserProcedures.implement({
 })
 // Type: Layer<UserProcedures.Service, never, UserRepository>
 
-// 4c. Create the actual repository implementation (Live layer)
-// This is where the real I/O happens
+// 5c. Create the actual repository implementation (Live layer)
 export const UserRepositoryLive = Layer.succeed(UserRepository, {
-  findAll: () => Effect.succeed([]), // Real: db.query(...)
-  findById: (id) => Effect.fail(new UserNotFoundError({ id })), // Real: db.findOne(...)
+  findAll: () => Effect.succeed([]),
+  findById: (id) => Effect.fail(new NotFoundError({ entity: "User", id })),
   create: (input) => Effect.succeed(new User({ id: "1", ...input })),
-  delete: (id) => Effect.succeed(undefined),
+  delete: (_id) => Effect.succeed(undefined),
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. ROUTE HANDLER (Next.js)
+// 6. ROUTE HANDLER (Next.js)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createRouteHandler } from "effect-trpc/server"
-import { Layer } from "effect"
 
-// Wire everything together
 const FullLive = UserProceduresLive.pipe(
   Layer.provide(UserRepositoryLive)
 )
@@ -146,7 +199,7 @@ export const { POST } = createRouteHandler({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. CLIENT (React)
+// 7. CLIENT (React)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createClient, Result } from "effect-trpc/client"
@@ -155,7 +208,15 @@ export const api = createClient<AppRouter>({
   url: "/api/trpc",
 })
 
-// In components:
+// Provider wraps your app
+export function ApiProvider({ children }: { children: React.ReactNode }) {
+  return <api.Provider>{children}</api.Provider>
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. USAGE IN COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
 function UserList() {
   const query = api.user.list.useQuery()
 
@@ -173,6 +234,28 @@ function UserList() {
   })
 }
 
+function UserDetail({ id }: { id: string }) {
+  const query = api.user.byId.useQuery({ id })
+
+  return Result.match(query.result, {
+    onInitial: () => <div>Loading...</div>,
+    onWaiting: () => <div>Loading user...</div>,
+    onSuccess: (user) => (
+      <div>
+        <h2>{user.name}</h2>
+        <p>{user.email}</p>
+      </div>
+    ),
+    onFailure: (error) => {
+      // Typed error handling!
+      if (error._tag === "NotFoundError") {
+        return <div>User {error.id} not found</div>
+      }
+      return <div>Error: {String(error)}</div>
+    },
+  })
+}
+
 function CreateUserForm() {
   const mutation = api.user.create.useMutation()
 
@@ -181,12 +264,44 @@ function CreateUserForm() {
       onSubmit={(e) => {
         e.preventDefault()
         mutation.mutate({ name: "New User", email: "new@example.com" })
-        // Automatically invalidates user.list based on procedure definition!
+        // Automatically invalidates user.list!
       }}
     >
       <button disabled={mutation.isLoading}>
         {mutation.isLoading ? "Creating..." : "Create User"}
       </button>
+      
+      {mutation.isError && mutation.error._tag === "ValidationError" && (
+        <div className="error">
+          {mutation.error.field}: {mutation.error.message}
+        </div>
+      )}
     </form>
   )
+}
+
+// ─── Nested Router Usage ───
+
+function PublicContractList() {
+  // Deeply nested: api.contracts.public.list
+  const query = api.contracts.public.list.useQuery()
+
+  return Result.match(query.result, {
+    onInitial: () => <div>Loading contracts...</div>,
+    onWaiting: () => <div>Refreshing...</div>,
+    onSuccess: (contracts) => (
+      <ul>
+        {contracts.map((c) => (
+          <li key={c.id}>{c.title}</li>
+        ))}
+      </ul>
+    ),
+    onFailure: (error) => <div>Error: {String(error)}</div>,
+  })
+}
+
+function ContractDetail({ id }: { id: string }) {
+  // api.contracts.public.get
+  const query = api.contracts.public.get.useQuery({ id })
+  // ...
 }
