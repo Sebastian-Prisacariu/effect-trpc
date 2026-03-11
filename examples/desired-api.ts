@@ -95,7 +95,10 @@ const createUser = Procedure.mutation({
   invalidates: ["user.list"],
   optimistic: {
     target: "user.list",
+    // Immediately apply (before server responds)
     reducer: (users, input) => [...users, { ...input, id: `temp-${Date.now()}` } as User],
+    // Optional: merge server response (use if no invalidates, or for surgical updates)
+    // reconcile: (users, input, result) => users.map(u => u.id.startsWith("temp") ? result : u),
   },
 })
 
