@@ -268,12 +268,25 @@ export const { POST } = createRouteHandler({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. CLIENT (React)
+// 7a. SERVER CLIENT (Server Components, API routes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { createServerClient } from "effect-trpc/server"
+
+// No React hooks — safe for RSC
+export const serverApi = createServerClient<AppRouter>({
+  url: "/api/trpc",
+})
+// Only exposes: .run, .runPromise, .runPromiseExit, .prefetch, .prefetchPromise
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7b. CLIENT (React Client Components)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createClient, Result, isTransientError } from "effect-trpc/client"
 import { Duration, Schedule } from "effect"
 
+// Has React hooks — use in client components only
 export const api = createClient<AppRouter>({
   url: "/api/trpc",
   defaults: {
@@ -472,6 +485,46 @@ function UserListPage() {
       </Suspense>
     </ErrorBoundary>
   )
+}
+
+// ─── Server Components (RSC) ───
+
+// Use serverApi (no React hooks) in Server Components
+async function UsersServerComponent() {
+  // Direct async/await in RSC
+  const users = await serverApi.user.list.runPromise()
+  
+  return (
+    <ul>
+      {users.map(user => (
+        <li key={user.id}>{user.name}</li>
+      ))}
+    </ul>
+  )
+}
+
+// With error handling in RSC
+async function UserDetailServerComponent({ id }: { id: string }) {
+  const result = await serverApi.user.byId.prefetchPromise({ id })
+  
+  return Result.match(result, {
+    onSuccess: (user) => <UserProfile user={user} />,
+    onFailure: (error) => {
+      if (error._tag === "NotFoundError") {
+        notFound()  // Next.js notFound()
+      }
+      throw error
+    },
+  })
+}
+
+// Hybrid: RSC fetches, Client Component for interactivity
+async function UsersPageHybrid() {
+  // Server: fetch data
+  await serverApi.user.list.prefetchPromise()
+  
+  // Client: render with hooks (data already cached)
+  return <UserListClientComponent />
 }
 
 // ─── Imperative API (non-React) ───
