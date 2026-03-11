@@ -79,11 +79,18 @@ const deleteUser = Procedure.mutation({
   invalidates: ["user.list", "user.byId"],
 })
 
+// Stream procedure — returns a stream of values (SSE)
+const watchUsers = Procedure.stream({
+  success: User,  // Each chunk is a User
+  error: UnauthorizedError,
+})
+
 export const UserProcedures = Procedure.family("user", {
   list: listUsers,
   byId: getUserById,
   create: createUser,
   delete: deleteUser,
+  watch: watchUsers,
 })
 
 // ─── Contract Procedures (nested example) ───
@@ -277,6 +284,24 @@ function CreateUserForm() {
         </div>
       )}
     </form>
+  )
+}
+
+// ─── Stream Usage ───
+
+function UserActivityFeed() {
+  // Stream returns chunks over time (SSE)
+  const stream = api.user.watch.useStream()
+
+  return (
+    <div>
+      <h3>Live Activity</h3>
+      {stream.chunks.map((user, i) => (
+        <div key={i}>User updated: {user.name}</div>
+      ))}
+      {stream.isConnected && <span>🟢 Connected</span>}
+      {stream.error && <span>Error: {String(stream.error)}</span>}
+    </div>
   )
 }
 
