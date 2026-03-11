@@ -1,6 +1,6 @@
-# Cancellation
+# Cancellation & Concurrency
 
-Cancel in-flight requests.
+Cancel in-flight requests and control concurrent mutations.
 
 ---
 
@@ -226,6 +226,116 @@ const query = api.user.byId.useQuery({ id: selectedUserId })
 
 ---
 
+---
+
+## Mutation Concurrency
+
+When a mutation fires while another is in progress, use `mode` to control behavior.
+
+### Parallel (Default)
+
+Both run simultaneously:
+
+```typescript
+const mutation = api.user.create.useMutation()
+
+// Click button twice quickly
+mutation.mutate({ name: "A" })  // Running...
+mutation.mutate({ name: "B" })  // Also running...
+// Both complete independently
+```
+
+### Replace
+
+Cancel previous, start new:
+
+```typescript
+const mutation = api.user.create.useMutation({
+  mode: "replace",
+})
+
+mutation.mutate({ name: "A" })  // Running...
+mutation.mutate({ name: "B" })  // A cancelled, B starts
+```
+
+Good for: search-as-you-type, only latest matters.
+
+### Queue
+
+Wait for previous to finish:
+
+```typescript
+const mutation = api.user.create.useMutation({
+  mode: "queue",
+})
+
+mutation.mutate({ name: "A" })  // Running...
+mutation.mutate({ name: "B" })  // Queued, runs after A completes
+```
+
+Good for: ordered operations, optimistic updates.
+
+### Reject
+
+Ignore new calls while one is running:
+
+```typescript
+const mutation = api.user.create.useMutation({
+  mode: "reject",
+})
+
+mutation.mutate({ name: "A" })  // Running...
+mutation.mutate({ name: "B" })  // Ignored (no-op)
+```
+
+Good for: form submissions, prevent double-submit.
+
+**Or just disable the button:**
+```tsx
+<button 
+  onClick={() => mutation.mutate(data)} 
+  disabled={mutation.isLoading}
+>
+  Submit
+</button>
+```
+
+---
+
+### Optimistic Updates & Concurrency
+
+With optimistic updates, order matters:
+
+```typescript
+// Problem with parallel:
+mutation.mutate({ name: "A" })  // Optimistic: list = [..., A]
+mutation.mutate({ name: "B" })  // Optimistic: list = [..., A, B]
+// If B finishes before A → potential inconsistency
+
+// Solution: use queue mode
+const mutation = api.user.create.useMutation({
+  mode: "queue",
+  optimistic: {
+    target: "user.list",
+    reducer: (users, input) => [...users, { ...input, id: "temp" }],
+  },
+})
+// Mutations complete in order, optimistic state stays consistent
+```
+
+---
+
+### Mode Summary
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `parallel` | Run simultaneously (default) | Independent operations |
+| `replace` | Cancel previous, run new | Search, typeahead |
+| `queue` | FIFO, wait for previous | Optimistic updates, ordered ops |
+| `reject` | Ignore while running | Forms, prevent double-submit |
+
+---
+
 ## Summary
 
 | Scenario | Cancellation | Code |
@@ -236,3 +346,4 @@ const query = api.user.byId.useQuery({ id: selectedUserId })
 | Timeout | `Effect.timeout(duration)` | Manual |
 | External control | `AbortController` | Manual |
 | Fiber control | `Fiber.interrupt(fiber)` | Manual |
+| Concurrent mutations | `mode: "parallel" \| "replace" \| "queue" \| "reject"` | Option |
