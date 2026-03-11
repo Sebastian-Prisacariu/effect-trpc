@@ -435,6 +435,73 @@ function UserListWithRefresh() {
   )
 }
 
+// ─── Suspense ───
+
+// In loader (handle errors before component renders)
+async function userListLoader() {
+  const result = await api.user.list.prefetchPromise()
+  
+  return Result.match(result, {
+    onSuccess: () => ({ ok: true }),
+    onFailure: (error) => {
+      // Handle errors HERE, before component
+      if (error._tag === "UnauthorizedError") {
+        return redirect("/login")
+      }
+      // Unknown error - let it bubble to ErrorBoundary
+      throw error
+    },
+  })
+}
+
+// In component — errors already handled in loader
+function UserListSuspense() {
+  // Returns User[] directly (not Result)
+  // Throws if error wasn't handled in prefetch
+  const users = api.user.list.useSuspenseQuery()
+  
+  return <ul>{users.map(u => <li key={u.id}>{u.name}</li>)}</ul>
+}
+
+// Wrap with boundaries
+function UserListPage() {
+  return (
+    <ErrorBoundary fallback={<ErrorFallback />}>
+      <Suspense fallback={<Loading />}>
+        <UserListSuspense />
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+
+// ─── Imperative API (non-React) ───
+
+// Use .run for Effect composition
+const program = Effect.gen(function* () {
+  const users = yield* api.user.list.run
+  const newUser = yield* api.user.create.run({ name: "Test", email: "test@example.com" })
+  
+  // Invalidate React queries from outside React
+  yield* api.invalidate(["user.list"])
+  
+  return newUser
+})
+
+// Run outside React (doesn't update React state)
+Effect.runPromise(program)
+
+// For bridging back to React, use explicit invalidation
+async function syncUsersFromExternalSource() {
+  const externalUsers = await fetchFromExternalApi()
+  
+  for (const user of externalUsers) {
+    await api.user.create.runPromise(user)
+  }
+  
+  // NOW tell React to refetch
+  api.invalidate(["user.list"])
+}
+
 // ─── Stream Usage ───
 
 function UserActivityFeed() {
