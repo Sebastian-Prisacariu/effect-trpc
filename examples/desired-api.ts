@@ -279,7 +279,8 @@ const httpTransport = Transport.http("/api/trpc")
 
 // ─── Mock Transport (type-safe!) ───
 // TypeScript enforces all routes with correct input/output types
-const mockTransport = Transport.make<typeof appRouter>({
+// Type is inferred when used with api.Provider, but can be explicit for standalone
+const mockTransport = Transport.make<AppRouter>({
   "user.list": () => Effect.succeed([
     new User({ id: "1", name: "Mock User", email: "mock@example.com" }),
   ]),
@@ -341,9 +342,23 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
 // For testing/Storybook — same components, different transport
 export function MockApiProvider({ children }: { children: React.ReactNode }) {
   return (
-    <Client.Provider layer={mockTransport}>
+    // Type inferred from api — no need for Transport.make<AppRouter>
+    <api.Provider layer={Transport.make({
+      "user.list": () => Effect.succeed([
+        new User({ id: "1", name: "Mock User", email: "mock@example.com" }),
+      ]),
+      "user.byId": ({ id }) => Effect.succeed(
+        new User({ id, name: `User ${id}`, email: `${id}@example.com` })
+      ),
+      "user.create": (input) => Effect.succeed(new User({ id: "new-1", ...input })),
+      "user.delete": () => Effect.void,
+      "user.watch": () => Effect.succeed(new User({ id: "1", name: "Watched", email: "w@e.com" })),
+      "contracts.public.list": () => Effect.succeed([]),
+      "contracts.public.get": ({ id }) => Effect.succeed(new Contract({ id, title: "Mock", userId: "1" })),
+      "contracts.private.list": () => Effect.succeed([]),
+    })}>
       {children}
-    </Client.Provider>
+    </api.Provider>
   )
 }
 

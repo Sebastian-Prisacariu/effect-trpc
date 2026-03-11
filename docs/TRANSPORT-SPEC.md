@@ -169,23 +169,28 @@ api.user.list.run  // Effect<User[], Error, Transport.Transport>
 
 ## React Provider
 
-Provider accepts a Transport layer:
+Provider accepts a Transport layer. **Type is inferred from `api`** — no need to specify `<AppRouter>`:
 
 ```typescript
+const api = Client.unsafeMake<AppRouter>()
+
 // Production
-<Client.Provider layer={Transport.http("/api/trpc")}>
+<api.Provider layer={Transport.http("/api/trpc")}>
   <App />
-</Client.Provider>
+</api.Provider>
 
-// Testing
-<Client.Provider layer={mockTransport}>
+// Testing — type inferred from api!
+<api.Provider layer={Transport.make({
+  "user.list": () => Effect.succeed([...]),  // TS knows what routes are needed
+  "user.byId": ({ id }) => Effect.succeed({...}),
+})}>
   <App />  {/* Same components! */}
-</Client.Provider>
+</api.Provider>
 
-// Storybook
-<Client.Provider layer={storybookTransport}>
+// Pre-defined transport also works
+<api.Provider layer={mockTransport}>
   <App />
-</Client.Provider>
+</api.Provider>
 ```
 
 Components don't know which transport — they just use `api.user.list.useQuery()`.
