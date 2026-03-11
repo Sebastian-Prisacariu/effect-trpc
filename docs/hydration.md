@@ -1,55 +1,86 @@
 # Hydration (SSR)
 
-Transfer server-fetched data to client without re-fetching.
+Server-fetched data automatically available on client — no explicit state passing.
 
 ---
 
 ## Overview
 
-With SSR (Server-Side Rendering):
-1. **Server** fetches data and renders HTML
-2. **Server** serializes atom state
-3. **Client** receives HTML + serialized state
-4. **Client** hydrates React with existing data (no re-fetch)
+1. **Server** prefetches data
+2. **Data automatically transfers** to client (via React serialization)
+3. **Client** renders with data — no loading state
 
-Built on Effect Atom's `Hydration` module.
+No manual hydration props needed.
 
 ---
 
-## Next.js App Router
+## Setup
 
-### Server Component (Fetch + Dehydrate)
+### 1. Create API (once)
+
+```typescript
+// lib/api.ts
+import { Client, Transport } from "effect-trpc"
+import type { AppRouter } from "./router"
+
+// Server API — for Server Components
+export const serverApi = Client.make<AppRouter>()
+
+// Client API — for Client Components  
+export const api = Client.unsafeMake<AppRouter>()
+```
+
+### 2. Provider in Layout
 
 ```tsx
-// app/users/page.tsx (Server Component)
-import { serverApi } from "@/lib/server-api"
-import { Hydration } from "@effect-atom/atom"
-import { HydrationBoundary } from "effect-trpc/client"
+// app/layout.tsx
+import { api } from "@/lib/api"
+import { Transport } from "effect-trpc"
 
-export default async function UsersPage() {
-  // Fetch on server
-  const users = await serverApi.user.list.runPromise()
-  
-  // Get dehydrated state from server api's registry
-  const dehydratedState = Hydration.dehydrate(serverApi.registry)
-  
+export default function RootLayout({ children }) {
   return (
-    <HydrationBoundary state={dehydratedState}>
-      <UserListClient />
-    </HydrationBoundary>
+    <html>
+      <body>
+        <api.Provider layer={Transport.http("/api/trpc")}>
+          {children}
+        </api.Provider>
+      </body>
+    </html>
   )
 }
 ```
 
-### Client Component (Hydrate + Render)
+That's it. Hydration is automatic.
+
+---
+
+## Usage
+
+### Server Component (Prefetch)
 
 ```tsx
-// app/users/UserListClient.tsx
-"use client"
-import { api } from "@/lib/client-api"
+// app/users/page.tsx (Server Component)
+import { serverApi } from "@/lib/api"
+import { UserList } from "./UserList"
 
-export function UserListClient() {
-  // Data already available from hydration — no loading state!
+export default async function UsersPage() {
+  // Prefetch on server
+  await serverApi.user.list.prefetch()
+  
+  // Render client component — data already available
+  return <UserList />
+}
+```
+
+### Client Component (Use Data)
+
+```tsx
+// app/users/UserList.tsx (Client Component)
+"use client"
+import { api } from "@/lib/api"
+
+export function UserList() {
+  // Data from server prefetch — no loading state!
   const query = api.user.list.useQuery()
   
   return (
@@ -64,43 +95,22 @@ export function UserListClient() {
 
 ---
 
-## HydrationBoundary
-
-The `HydrationBoundary` component:
-1. Receives serialized state from server
-2. Hydrates the client registry on mount
-3. Children immediately have access to data
+## Multiple Prefetches
 
 ```tsx
-import { HydrationBoundary } from "effect-trpc/client"
+// app/dashboard/page.tsx
+import { serverApi } from "@/lib/api"
+import { Dashboard } from "./Dashboard"
 
-<HydrationBoundary state={dehydratedState}>
-  {/* All queries inside have access to hydrated data */}
-  <App />
-</HydrationBoundary>
-```
-
----
-
-## Prefetch Multiple Queries
-
-```tsx
-// Server Component
 export default async function DashboardPage() {
-  // Prefetch multiple queries
+  // Prefetch multiple queries in parallel
   await Promise.all([
-    serverApi.user.list.prefetchPromise(),
-    serverApi.stats.overview.prefetchPromise(),
-    serverApi.notifications.list.prefetchPromise(),
+    serverApi.user.list.prefetch(),
+    serverApi.stats.overview.prefetch(),
+    serverApi.notifications.list.prefetch(),
   ])
   
-  const dehydratedState = Hydration.dehydrate(serverApi.registry)
-  
-  return (
-    <HydrationBoundary state={dehydratedState}>
-      <Dashboard />
-    </HydrationBoundary>
-  )
+  return <Dashboard />
 }
 ```
 
@@ -110,137 +120,26 @@ export default async function DashboardPage() {
 
 ```tsx
 // app/users/[id]/page.tsx
+import { serverApi } from "@/lib/api"
+import { UserDetail } from "./UserDetail"
+
 export default async function UserPage({ params }: { params: { id: string } }) {
   // Prefetch with params
-  await serverApi.user.byId.prefetchPromise({ id: params.id })
+  await serverApi.user.byId.prefetch({ id: params.id })
   
-  const dehydratedState = Hydration.dehydrate(serverApi.registry)
-  
-  return (
-    <HydrationBoundary state={dehydratedState}>
-      <UserDetail id={params.id} />
-    </HydrationBoundary>
-  )
+  return <UserDetail id={params.id} />
 }
+```
 
-// Client Component
-function UserDetail({ id }: { id: string }) {
-  // Same params — uses hydrated data
+```tsx
+// UserDetail.tsx
+"use client"
+
+export function UserDetail({ id }: { id: string }) {
+  // Same params = uses prefetched data
   const query = api.user.byId.useQuery({ id })
-  // No loading state on initial render!
-}
-```
-
----
-
-## How It Works
-
-### Dehydrate (Server)
-
-```typescript
-import { Hydration } from "@effect-atom/atom"
-
-// Serialize all atom values in registry
-const dehydratedState = Hydration.dehydrate(registry, {
-  encodeInitialAs: "ignore",  // Skip atoms still loading
-})
-
-// Returns array of { key, value, dehydratedAt }
-```
-
-### Hydrate (Client)
-
-```typescript
-import { Hydration } from "@effect-atom/atom"
-
-// Restore atom values from serialized state
-Hydration.hydrate(registry, dehydratedState)
-
-// Atoms now have values without fetching
-```
-
----
-
-## Provider Integration
-
-The client Provider handles hydration:
-
-```tsx
-// Conceptual implementation
-function HydrationBoundary({ state, children }) {
-  const registry = useAtomRegistry()
   
-  // Hydrate on mount (before children render)
-  useLayoutEffect(() => {
-    if (state) {
-      Hydration.hydrate(registry, state)
-    }
-  }, [])
-  
-  return children
-}
-```
-
----
-
-## Stale Data Handling
-
-Hydrated data might be stale by the time client renders. Options:
-
-### 1. Refetch After Hydration
-
-```typescript
-const query = api.user.list.useQuery({
-  refetchOnMount: true,  // Refetch even if hydrated
-})
-```
-
-### 2. Stale Time
-
-```typescript
-const query = api.user.list.useQuery({
-  staleTime: Duration.minutes(1),  // Consider fresh for 1 min
-})
-// If dehydrated < 1 min ago, don't refetch
-```
-
-### 3. Always Trust Server
-
-```typescript
-const query = api.user.list.useQuery({
-  refetchOnMount: false,  // Trust hydrated data
-})
-```
-
----
-
-## Streaming SSR
-
-For React 18 streaming with Suspense:
-
-```tsx
-// Server Component
-export default async function Page() {
-  // Start fetching (don't await)
-  const usersPromise = serverApi.user.list.runPromise()
-  
-  return (
-    <Suspense fallback={<Loading />}>
-      <UsersLoader promise={usersPromise} />
-    </Suspense>
-  )
-}
-
-// Server Component that awaits
-async function UsersLoader({ promise }) {
-  const users = await promise
-  const state = Hydration.dehydrate(serverApi.registry)
-  
-  return (
-    <HydrationBoundary state={state}>
-      <UserListClient />
-    </HydrationBoundary>
-  )
+  return <div>{query.data?.name}</div>
 }
 ```
 
@@ -248,39 +147,126 @@ async function UsersLoader({ promise }) {
 
 ## Error Handling
 
-If server fetch fails, handle before hydration:
+Handle errors on the server before rendering:
 
 ```tsx
+// app/users/page.tsx
+import { serverApi } from "@/lib/api"
+import { redirect, notFound } from "next/navigation"
+
 export default async function UsersPage() {
-  const result = await serverApi.user.list.prefetchPromise()
+  const result = await serverApi.user.list.prefetchResult()
   
-  return Result.match(result, {
-    onSuccess: () => {
-      const state = Hydration.dehydrate(serverApi.registry)
-      return (
-        <HydrationBoundary state={state}>
-          <UserListClient />
-        </HydrationBoundary>
-      )
-    },
-    onFailure: (error) => {
-      if (error._tag === "UnauthorizedError") {
-        redirect("/login")
-      }
-      return <ErrorPage error={error} />
-    },
-  })
+  if (result._tag === "Failure") {
+    if (result.error._tag === "UnauthorizedError") {
+      redirect("/login")
+    }
+    if (result.error._tag === "NotFoundError") {
+      notFound()
+    }
+    throw result.error
+  }
+  
+  return <UserList />
 }
+```
+
+---
+
+## Streaming with Suspense
+
+For React 18 streaming SSR:
+
+```tsx
+// app/users/page.tsx
+import { Suspense } from "react"
+import { UserList } from "./UserList"
+
+export default function UsersPage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <UserListLoader />
+    </Suspense>
+  )
+}
+
+async function UserListLoader() {
+  await serverApi.user.list.prefetch()
+  return <UserList />
+}
+```
+
+Multiple streams:
+
+```tsx
+export default function DashboardPage() {
+  return (
+    <div>
+      <Suspense fallback={<StatsSkeleton />}>
+        <StatsLoader />
+      </Suspense>
+      
+      <Suspense fallback={<UsersSkeleton />}>
+        <UsersLoader />
+      </Suspense>
+    </div>
+  )
+}
+```
+
+---
+
+## How It Works
+
+1. **serverApi.prefetch()** fetches data and stores in registry
+2. **Provider** serializes registry state to HTML
+3. **Client hydration** reads serialized state
+4. **useQuery()** finds data already cached
+
+```
+Server                           Client
+──────                           ──────
+serverApi.prefetch()
+    │
+    ▼
+Registry stores data
+    │
+    ▼
+Provider serializes ─────────►  Provider hydrates
+                                    │
+                                    ▼
+                                useQuery() → data ready
+```
+
+---
+
+## Disable Hydration
+
+If needed, opt out per-query:
+
+```typescript
+const query = api.user.list.useQuery({
+  hydrate: false,  // Always fetch fresh, ignore server data
+})
+```
+
+Or disable at Provider level:
+
+```tsx
+<api.Provider 
+  layer={Transport.http("/api/trpc")}
+  hydrate={false}
+>
 ```
 
 ---
 
 ## Summary
 
-| Step | Where | What |
-|------|-------|------|
-| Fetch | Server | `serverApi.user.list.runPromise()` |
-| Dehydrate | Server | `Hydration.dehydrate(registry)` |
-| Transfer | HTML | `<script>__HYDRATION_STATE__=...</script>` |
-| Hydrate | Client | `<HydrationBoundary state={...}>` |
-| Render | Client | `useQuery()` returns data immediately |
+| Step | Code | Where |
+|------|------|-------|
+| Setup Provider | `<api.Provider layer={...}>` | Root layout |
+| Prefetch | `await serverApi.user.list.prefetch()` | Server Component |
+| Use data | `api.user.list.useQuery()` | Client Component |
+
+No manual state passing. No explicit hydration boundaries. Just works.
