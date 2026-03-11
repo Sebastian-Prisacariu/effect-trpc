@@ -93,6 +93,10 @@ const createUser = Procedure.mutation({
   success: User,
   error: ValidationError,
   invalidates: ["user.list"],
+  optimistic: {
+    target: "user.list",
+    reducer: (users, input) => [...users, { ...input, id: `temp-${Date.now()}` } as User],
+  },
 })
 
 const deleteUser = Procedure.mutation({
@@ -326,7 +330,10 @@ function CreateUserForm() {
       onSubmit={(e) => {
         e.preventDefault()
         mutation.mutate({ name: "New User", email: "new@example.com" })
-        // Automatically invalidates user.list!
+        // 1. Optimistic: user.list updates IMMEDIATELY with temp user
+        // 2. Mutation runs in background
+        // 3. On success: invalidates user.list, refetch replaces temp with real
+        // 4. On failure: optimistic update rolls back
       }}
     >
       <button disabled={mutation.isLoading}>
