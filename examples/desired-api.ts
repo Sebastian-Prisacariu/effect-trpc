@@ -66,7 +66,7 @@ class Auth extends Middleware.Tag<Auth>()("Auth", {
   provides: CurrentUser,
   failure: UnauthorizedError,
   requiredForClient: true,
-}) {} {}
+}) {}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. PROCEDURE DEFINITIONS (Contracts)
