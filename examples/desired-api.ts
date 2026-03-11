@@ -51,35 +51,35 @@ class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("Unauthori
 // Using success/error/payload to match Effect RPC conventions
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { query, mutation, procedures, Router } from "effect-trpc"
+import { Procedure, Router } from "effect-trpc"
 
 // ─── User Procedures ───
 
-const listUsers = query({
+const listUsers = Procedure.query({
   success: Schema.Array(User),
 })
 
-const getUserById = query({
+const getUserById = Procedure.query({
   payload: Schema.Struct({ id: Schema.String }),
   success: User,
   error: NotFoundError,
 })
 
-const createUser = mutation({
+const createUser = Procedure.mutation({
   payload: CreateUserInput,
   success: User,
   error: ValidationError,
   invalidates: ["user.list"],
 })
 
-const deleteUser = mutation({
+const deleteUser = Procedure.mutation({
   payload: Schema.Struct({ id: Schema.String }),
   success: Schema.Void,
   error: NotFoundError,
   invalidates: ["user.list", "user.byId"],
 })
 
-export const UserProcedures = procedures("user", {
+export const UserProcedures = Procedure.family("user", {
   list: listUsers,
   byId: getUserById,
   create: createUser,
@@ -88,28 +88,28 @@ export const UserProcedures = procedures("user", {
 
 // ─── Contract Procedures (nested example) ───
 
-const listPublicContracts = query({
+const listPublicContracts = Procedure.query({
   success: Schema.Array(Contract),
 })
 
-const getPublicContract = query({
+const getPublicContract = Procedure.query({
   payload: Schema.Struct({ id: Schema.String }),
   success: Contract,
   error: NotFoundError,
 })
 
-const PublicContractProcedures = procedures("public", {
+const PublicContractProcedures = Procedure.family("public", {
   list: listPublicContracts,
   get: getPublicContract,
 })
 
-const listPrivateContracts = query({
+const listPrivateContracts = Procedure.query({
   payload: Schema.Struct({ userId: Schema.String }),
   success: Schema.Array(Contract),
   error: UnauthorizedError,
 })
 
-const PrivateContractProcedures = procedures("private", {
+const PrivateContractProcedures = Procedure.family("private", {
   list: listPrivateContracts,
 })
 
