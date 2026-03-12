@@ -1,11 +1,10 @@
 /**
  * Middleware Module Tests
  * 
- * Tests for middleware definition, composition with procedures,
- * and type flow across client/server.
+ * Tests for middleware definition, composition, and application.
  */
 
-import { describe, it, expect, expectTypeOf } from "vitest"
+import { describe, it, expect } from "vitest"
 import { Effect, Schema, Context, Layer } from "effect"
 
 import { Procedure, Router, Middleware, Server } from "../src/index.js"
@@ -31,282 +30,206 @@ class ForbiddenError extends Schema.TaggedError<ForbiddenError>()(
 ) {}
 
 // =============================================================================
-// Test Middleware Definitions
+// Test Services and Middleware
 // =============================================================================
 
-// What auth middleware provides
 class CurrentUser extends Context.Tag("CurrentUser")<CurrentUser, User>() {}
+class AdminRole extends Context.Tag("AdminRole")<AdminRole, { readonly level: number }>() {}
 
-// Auth middleware tag
-class Auth extends Middleware.Tag<Auth>()("Auth", {
-  provides: CurrentUser,
-  failure: UnauthorizedError,
-  requiredForClient: true,
-}) {}
+const AuthMiddleware = Middleware.Tag<User, UnauthorizedError>(
+  "AuthMiddleware",
+  CurrentUser
+)
 
-// Admin middleware (requires Auth first)
-class Admin extends Middleware.Tag<Admin>()("Admin", {
-  provides: Context.Tag("AdminRole")<"AdminRole", { readonly level: number }>(),
-  failure: ForbiddenError,
-  requiredForClient: false,
-}) {}
+const AdminMiddleware = Middleware.Tag<{ readonly level: number }, ForbiddenError>(
+  "AdminMiddleware",
+  AdminRole
+)
 
 // =============================================================================
 // Middleware.Tag Tests
 // =============================================================================
 
 describe("Middleware.Tag", () => {
-  it("creates a middleware tag with provides and failure", () => {
-    expect(Auth).toBeDefined()
-    expect(Auth.provides).toBe(CurrentUser)
-    expect(Auth.failure).toBe(UnauthorizedError)
+  it("creates a middleware tag", () => {
+    expect(AuthMiddleware).toBeDefined()
+    expect(Middleware.isMiddlewareTag(AuthMiddleware)).toBe(true)
   })
 
-  it("has requiredForClient property", () => {
-    expect(Auth.requiredForClient).toBe(true)
-    expect(Admin.requiredForClient).toBe(false)
+  it("has provides property", () => {
+    expect(AuthMiddleware.provides).toBe(CurrentUser)
   })
+})
 
-  it("Auth.of creates a handler implementation", () => {
-    const handler = Auth.of(({ headers }) =>
+// =============================================================================
+// Middleware.implement Tests
+// =============================================================================
+
+describe("Middleware.implement", () => {
+  it("creates a Layer from implementation", () => {
+    const AuthLive = Middleware.implement(AuthMiddleware, (request) =>
       Effect.gen(function* () {
-        const token = headers.get("authorization")
+        const token = request.headers.get("authorization")
         if (!token) {
-          return yield* Effect.fail(
-            new UnauthorizedError({ message: "No token" })
-          )
+          return yield* Effect.fail(new UnauthorizedError({ message: "No token" }))
         }
-        return new User({ id: "1", name: "Auth User", email: "auth@example.com" })
+        return new User({ id: "1", name: "Test", email: "test@example.com" })
       })
     )
 
-    expect(handler._tag).toBe("MiddlewareHandler")
+    expect(AuthLive).toBeDefined()
+    expect(Layer.isLayer(AuthLive)).toBe(true)
   })
 })
 
 // =============================================================================
-// Procedure with Middleware Tests
+// Middleware.all Tests
 // =============================================================================
 
-describe("Procedure with middleware", () => {
-  it("family can have middleware applied", () => {
-    const userProcedures = Procedure.family("user", {
-      me: Procedure.query({ success: User }),
-      list: Procedure.query({ success: Schema.Array(User) }),
-    }).withMiddleware(Auth)
-
-    expect(userProcedures.middleware).toContain(Auth)
-  })
-
-  it("middleware provides context to handlers", () => {
-    const userProcedures = Procedure.family("user", {
-      me: Procedure.query({
-        success: User,
-        handler: () =>
-          // CurrentUser is available because Auth middleware provides it
-          Effect.flatMap(CurrentUser, (user) => Effect.succeed(user)),
-      }),
-    }).withMiddleware(Auth)
-
-    // Handler can access CurrentUser without it being a requirement
-    // because Auth middleware provides it
-  })
-
-  it("middleware errors are added to procedure errors", () => {
-    const protectedQuery = Procedure.query({
-      success: User,
-    })
-
-    const family = Procedure.family("user", {
-      me: protectedQuery,
-    }).withMiddleware(Auth)
-
-    // The procedure's effective error type should include UnauthorizedError
-    type FamilyProcedures = typeof family.procedures
-    type MeProcedure = FamilyProcedures["me"]
+describe("Middleware.all", () => {
+  it("combines multiple middlewares", () => {
+    const combined = Middleware.all(AuthMiddleware, AdminMiddleware)
     
-    // After middleware is applied, error should include UnauthorizedError
+    expect(Middleware.isCombinedMiddleware(combined)).toBe(true)
+    expect(combined.tags).toHaveLength(2)
+    expect(combined.concurrency).toBe("sequential")
   })
 
-  it("multiple middleware can be chained", () => {
-    const adminProcedures = Procedure.family("admin", {
-      dashboard: Procedure.query({ success: Schema.Struct({ stats: Schema.Number }) }),
+  it("supports concurrency option", () => {
+    const concurrent = Middleware.all(AuthMiddleware, AdminMiddleware, {
+      concurrency: "unbounded"
     })
-      .withMiddleware(Auth)
-      .withMiddleware(Admin)
+    
+    expect(concurrent.concurrency).toBe("unbounded")
+  })
 
-    expect(adminProcedures.middleware).toHaveLength(2)
+  it("supports numeric concurrency", () => {
+    const limited = Middleware.all(AuthMiddleware, AdminMiddleware, {
+      concurrency: 2
+    })
+    
+    expect(limited.concurrency).toBe(2)
   })
 })
 
 // =============================================================================
-// Router with Middleware Tests
+// Procedure.middleware Tests
 // =============================================================================
 
-describe("Router with middleware", () => {
-  it("router inherits middleware from families", () => {
-    const userProcedures = Procedure.family("user", {
-      me: Procedure.query({ success: User }),
-    }).withMiddleware(Auth)
-
-    const router = Router.make({
-      user: userProcedures,
-    })
-
-    // Router should know about middleware requirements
+describe("Procedure.middleware", () => {
+  it("adds middleware to a procedure", () => {
+    const proc = Procedure.query({ success: User })
+    const withAuth = proc.middleware(AuthMiddleware)
+    
+    expect(withAuth.middlewares).toContain(AuthMiddleware)
   })
 
-  it("different families can have different middleware", () => {
-    const publicProcedures = Procedure.family("public", {
-      list: Procedure.query({ success: Schema.Array(Schema.String) }),
-    })
-    // No middleware - public
+  it("chains multiple middleware calls", () => {
+    const proc = Procedure.query({ success: User })
+      .middleware(AuthMiddleware)
+      .middleware(AdminMiddleware)
+    
+    expect(proc.middlewares).toHaveLength(2)
+  })
 
-    const privateProcedures = Procedure.family("private", {
-      data: Procedure.query({ success: Schema.String }),
-    }).withMiddleware(Auth)
-
-    const router = Router.make({
-      public: publicProcedures,
-      private: privateProcedures,
-    })
-
-    // public.list - no auth required
-    // private.data - auth required
+  it("does not mutate original procedure", () => {
+    const original = Procedure.query({ success: User })
+    const withAuth = original.middleware(AuthMiddleware)
+    
+    expect(original.middlewares).toHaveLength(0)
+    expect(withAuth.middlewares).toHaveLength(1)
   })
 })
 
 // =============================================================================
-// Server Middleware Integration Tests
+// Router.withMiddleware Tests
 // =============================================================================
 
-describe("Server middleware integration", () => {
-  it("createRouteHandler requires middleware layers", () => {
-    const userProcedures = Procedure.family("user", {
-      me: Procedure.query({
-        success: User,
-        handler: () => CurrentUser,
-      }),
-    }).withMiddleware(Auth)
-
-    const router = Router.make({ user: userProcedures })
-
-    const AuthLive = Layer.succeed(
-      Auth,
-      Auth.of(({ headers }) =>
-        Effect.gen(function* () {
-          const token = headers.get("authorization")
-          if (!token) {
-            return yield* Effect.fail(new UnauthorizedError({ message: "No token" }))
-          }
-          return new User({ id: "1", name: "Test", email: "test@example.com" })
-        })
-      )
-    )
-
-    // Should compile - AuthLive provides Auth middleware
-    Server.createRouteHandler(router, {
-      layer: AuthLive,
-    })
-
-    // @ts-expect-error - missing Auth middleware layer
-    Server.createRouteHandler(router, {
-      layer: Layer.empty,
-    })
-  })
-
-  it("middleware runs before handler", () => {
-    // Middleware should:
-    // 1. Extract auth from headers
-    // 2. Provide CurrentUser to context
-    // 3. Then handler runs with CurrentUser available
-  })
-
-  it("middleware failure short-circuits handler", () => {
-    // If Auth middleware fails (no token), handler should not run
-  })
-})
-
-// =============================================================================
-// Client Middleware Integration Tests
-// =============================================================================
-
-describe("Client middleware integration", () => {
-  it("Middleware.layerClient creates client-side middleware", () => {
-    const AuthClientLive = Middleware.layerClient(Auth, ({ request, rpc }) =>
-      Effect.gen(function* () {
-        // Add auth header to outgoing requests
-        const token = yield* getStoredToken()
-        return {
-          ...request,
-          headers: new Headers({
-            ...Object.fromEntries(request.headers.entries()),
-            authorization: `Bearer ${token}`,
-          }),
-        }
-      })
-    )
-
-    expect(AuthClientLive).toBeDefined()
-  })
-
-  it("client middleware is provided to Client.Provider", () => {
-    // When requiredForClient: true, client must provide the middleware
-  })
-})
-
-// =============================================================================
-// Type Flow Tests
-// =============================================================================
-
-describe("Middleware type flow", () => {
-  it("CurrentUser type flows through to handlers", () => {
-    const userProcedures = Procedure.family("user", {
-      me: Procedure.query({
-        success: User,
-        handler: () =>
-          Effect.gen(function* () {
-            const currentUser = yield* CurrentUser
-            // currentUser should be typed as User
-            expectTypeOf(currentUser).toEqualTypeOf<User>()
-            return currentUser
-          }),
-      }),
-    }).withMiddleware(Auth)
-  })
-
-  it("middleware removes provided context from requirements", () => {
-    // Before middleware: handler requires CurrentUser
-    // After Auth middleware: CurrentUser is provided, not required
-
-    const handlerWithoutMiddleware = () =>
-      Effect.flatMap(CurrentUser, (user) => Effect.succeed(user))
-
-    // Type of handler: Effect<User, never, CurrentUser>
-    type HandlerReqs = Effect.Effect.Context<ReturnType<typeof handlerWithoutMiddleware>>
-    expectTypeOf<HandlerReqs>().toMatchTypeOf<CurrentUser>()
-
-    // After applying Auth middleware, CurrentUser should be satisfied
-  })
-
-  it("middleware errors combine with procedure errors", () => {
-    class NotFoundError extends Schema.TaggedError<NotFoundError>()(
-      "NotFoundError",
-      { id: Schema.String }
-    ) {}
-
-    const userProcedures = Procedure.family("user", {
-      byId: Procedure.query({
+describe("Router.withMiddleware", () => {
+  it("wraps a definition with middleware", () => {
+    const wrapped = Router.withMiddleware([AuthMiddleware], {
+      list: Procedure.query({ success: Schema.Array(User) }),
+      get: Procedure.query({ 
         payload: Schema.Struct({ id: Schema.String }),
-        success: User,
-        error: NotFoundError,
-        handler: ({ id }) => Effect.fail(new NotFoundError({ id })),
+        success: User 
       }),
-    }).withMiddleware(Auth)
+    })
+    
+    expect(wrapped.middlewares).toContain(AuthMiddleware)
+    expect(wrapped.definition.list).toBeDefined()
+    expect(wrapped.definition.get).toBeDefined()
+  })
 
-    // Effective error type should be NotFoundError | UnauthorizedError
+  it("supports multiple middlewares", () => {
+    const wrapped = Router.withMiddleware([AuthMiddleware, AdminMiddleware], {
+      delete: Procedure.mutation({ 
+        payload: Schema.Struct({ id: Schema.String }),
+        success: Schema.Boolean,
+        invalidates: ["users"]
+      }),
+    })
+    
+    expect(wrapped.middlewares).toHaveLength(2)
   })
 })
 
-// Helper
-declare const getStoredToken: () => Effect.Effect<string>
+// =============================================================================
+// Server.middleware Tests
+// =============================================================================
+
+describe("Server.middleware", () => {
+  const appRouter = Router.make("@test", {
+    users: {
+      list: Procedure.query({ success: Schema.Array(User) }),
+    },
+  })
+
+  const handlers = {
+    users: {
+      list: () => Effect.succeed([]),
+    },
+  }
+
+  it("adds middleware to server", () => {
+    const server = Server.make(appRouter, handlers)
+    const withAuth = Server.middleware(AuthMiddleware)(server)
+    
+    expect(withAuth.middlewares).toContain(AuthMiddleware)
+  })
+
+  it("chains with pipe", () => {
+    const server = Server.make(appRouter, handlers).pipe(
+      Server.middleware(AuthMiddleware),
+      Server.middleware(AdminMiddleware),
+    )
+    
+    expect(server.middlewares).toHaveLength(2)
+  })
+})
+
+// =============================================================================
+// Guard Function Tests
+// =============================================================================
+
+describe("Middleware guards", () => {
+  it("isMiddlewareTag identifies middleware tags", () => {
+    expect(Middleware.isMiddlewareTag(AuthMiddleware)).toBe(true)
+    expect(Middleware.isMiddlewareTag({})).toBe(false)
+    expect(Middleware.isMiddlewareTag(null)).toBe(false)
+  })
+
+  it("isCombinedMiddleware identifies combined middleware", () => {
+    const combined = Middleware.all(AuthMiddleware, AdminMiddleware)
+    
+    expect(Middleware.isCombinedMiddleware(combined)).toBe(true)
+    expect(Middleware.isCombinedMiddleware(AuthMiddleware)).toBe(false)
+  })
+
+  it("isApplicable identifies any applicable middleware", () => {
+    const combined = Middleware.all(AuthMiddleware, AdminMiddleware)
+    
+    expect(Middleware.isApplicable(AuthMiddleware)).toBe(true)
+    expect(Middleware.isApplicable(combined)).toBe(true)
+    expect(Middleware.isApplicable({})).toBe(false)
+  })
+})

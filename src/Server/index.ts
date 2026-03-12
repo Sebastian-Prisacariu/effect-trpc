@@ -44,6 +44,7 @@
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import { Pipeable, pipeArguments } from "effect/Pipeable"
 import * as Record from "effect/Record"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
@@ -102,7 +103,7 @@ export type Handlers<D extends Router.Definition, R = never> = {
  * @since 1.0.0
  * @category models
  */
-export interface Server<D extends Router.Definition, R = never> {
+export interface Server<D extends Router.Definition, R = never> extends Pipeable {
   readonly [ServerTypeId]: ServerTypeId
   
   /**
@@ -298,6 +299,9 @@ export const make = <D extends Router.Definition, R = never>(
     middlewares: [],
     handle,
     handleStream,
+    pipe() {
+      return pipeArguments(this, arguments)
+    },
   }
 }
 

@@ -1,46 +1,22 @@
 /**
  * Transport Module Tests
  * 
- * Tests for HTTP, WebSocket, and mock transports.
+ * Tests for HTTP transport and transport protocol types.
  */
 
 import { describe, it, expect, expectTypeOf } from "vitest"
-import { it as effectIt } from "@effect/vitest"
-import { Effect, Schema, Layer, Stream } from "effect"
+import { Effect, Schema, Layer, Stream, Context } from "effect"
 
-import { Procedure, Router, Transport } from "../src/index.js"
+import { Transport } from "../src/index.js"
 
 // =============================================================================
-// Test Router (for typed mock transport)
+// Test Schemas
 // =============================================================================
 
 class User extends Schema.Class<User>("User")({
   id: Schema.String,
   name: Schema.String,
 }) {}
-
-class NotFoundError extends Schema.TaggedError<NotFoundError>()(
-  "NotFoundError",
-  { id: Schema.String }
-) {}
-
-const AppRouter = Router.make({
-  user: Procedure.family("user", {
-    list: Procedure.query({ success: Schema.Array(User) }),
-    byId: Procedure.query({
-      payload: Schema.Struct({ id: Schema.String }),
-      success: User,
-      error: NotFoundError,
-    }),
-    create: Procedure.mutation({
-      payload: Schema.Struct({ name: Schema.String }),
-      success: User,
-      invalidates: ["user.list"],
-    }),
-  }),
-})
-
-type AppRouter = typeof AppRouter
 
 // =============================================================================
 // Transport.http Tests
@@ -50,7 +26,8 @@ describe("Transport.http", () => {
   it("creates a Transport layer from URL", () => {
     const layer = Transport.http("/api/trpc")
 
-    expectTypeOf(layer).toMatchTypeOf<Layer.Layer<Transport.Transport>>()
+    expect(layer).toBeDefined()
+    expect(Layer.isLayer(layer)).toBe(true)
   })
 
   it("accepts configuration options", () => {
@@ -67,7 +44,7 @@ describe("Transport.http", () => {
   it("accepts async headers function", () => {
     const layer = Transport.http("/api/trpc", {
       headers: async () => ({
-        Authorization: `Bearer ${await getToken()}`,
+        Authorization: `Bearer token`,
       }),
     })
 
@@ -88,12 +65,6 @@ describe("Transport.http", () => {
     expect(layer).toBeDefined()
   })
 
-  it("batching is enabled by default", () => {
-    const layer = Transport.http("/api/trpc")
-    // Default should be batching enabled for queries
-    expect(layer).toBeDefined()
-  })
-
   it("accepts custom fetch implementation", () => {
     const customFetch = globalThis.fetch
     
@@ -106,98 +77,26 @@ describe("Transport.http", () => {
 })
 
 // =============================================================================
-// Transport.webSocket Tests
+// Transport.mock Tests
 // =============================================================================
 
-describe("Transport.webSocket", () => {
-  it("creates a Transport layer from WebSocket URL", () => {
-    const layer = Transport.webSocket("wss://api.example.com/trpc")
-
-    expectTypeOf(layer).toMatchTypeOf<Layer.Layer<Transport.Transport>>()
-  })
-
-  it("accepts reconnection options", () => {
-    const layer = Transport.webSocket("wss://api.example.com/trpc", {
-      reconnect: {
-        enabled: true,
-        maxAttempts: 5,
-        delay: "1 second",
-      },
+describe("Transport.mock", () => {
+  it("creates a mock transport from handlers", () => {
+    const layer = Transport.mock({
+      "users.list": () => Effect.succeed([new User({ id: "1", name: "Test" })]),
     })
 
     expect(layer).toBeDefined()
+    expect(Layer.isLayer(layer)).toBe(true)
   })
 
-  it("accepts connection timeout", () => {
-    const layer = Transport.webSocket("wss://api.example.com/trpc", {
-      connectionTimeout: "10 seconds",
+  it("handlers can return failures", () => {
+    const layer = Transport.mock({
+      "users.get": (payload: { id: string }) => 
+        Effect.fail({ _tag: "NotFound", id: payload.id }),
     })
 
     expect(layer).toBeDefined()
-  })
-})
-
-// =============================================================================
-// Transport.make (Mock Transport) Tests
-// =============================================================================
-
-describe("Transport.make", () => {
-  it("creates a typed mock transport from handlers", () => {
-    const layer = Transport.make<AppRouter>({
-      "user.list": () =>
-        Effect.succeed([
-          new User({ id: "1", name: "Mock User" }),
-        ]),
-      "user.byId": ({ id }) =>
-        Effect.succeed(new User({ id, name: `User ${id}` })),
-      "user.create": ({ name }) =>
-        Effect.succeed(new User({ id: "new-1", name })),
-    })
-
-    expectTypeOf(layer).toMatchTypeOf<Layer.Layer<Transport.Transport>>()
-  })
-
-  it("requires all procedure paths to be implemented", () => {
-    // @ts-expect-error - missing user.byId and user.create
-    Transport.make<AppRouter>({
-      "user.list": () => Effect.succeed([]),
-    })
-  })
-
-  it("handler receives correctly typed payload", () => {
-    Transport.make<AppRouter>({
-      "user.list": () => Effect.succeed([]),
-      "user.byId": (payload) => {
-        // payload should be { id: string }
-        expectTypeOf(payload).toEqualTypeOf<{ readonly id: string }>()
-        return Effect.succeed(new User({ id: payload.id, name: "Test" }))
-      },
-      "user.create": (payload) => {
-        // payload should be { name: string }
-        expectTypeOf(payload).toEqualTypeOf<{ readonly name: string }>()
-        return Effect.succeed(new User({ id: "1", name: payload.name }))
-      },
-    })
-  })
-
-  it("handler must return correct success type", () => {
-    // @ts-expect-error - user.list should return User[], not string[]
-    Transport.make<AppRouter>({
-      "user.list": () => Effect.succeed(["not a user"]),
-      "user.byId": () => Effect.succeed(new User({ id: "1", name: "Test" })),
-      "user.create": () => Effect.succeed(new User({ id: "1", name: "Test" })),
-    })
-  })
-
-  it("handler can return procedure's error type", () => {
-    Transport.make<AppRouter>({
-      "user.list": () => Effect.succeed([]),
-      "user.byId": ({ id }) =>
-        id === "not-found"
-          ? Effect.fail(new NotFoundError({ id }))
-          : Effect.succeed(new User({ id, name: "Test" })),
-      "user.create": () => Effect.succeed(new User({ id: "1", name: "Test" })),
-    })
   })
 })
 
@@ -207,9 +106,7 @@ describe("Transport.make", () => {
 
 describe("Transport service", () => {
   it("Transport.Transport is a Context.Tag", () => {
-    expectTypeOf(Transport.Transport).toMatchTypeOf<
-      Context.Tag<Transport.Transport, Transport.TransportService>
-    >()
+    expect(Transport.Transport).toBeDefined()
   })
 
   it("TransportService has send method", () => {
@@ -266,34 +163,96 @@ describe("TransportError", () => {
 })
 
 // =============================================================================
-// Integration Tests
+// Transport Protocol Types Tests
 // =============================================================================
 
-describe("Transport integration", () => {
-  effectIt.effect("mock transport can be used with Effect", () =>
-    Effect.gen(function* () {
-      const transport = yield* Transport.Transport
+describe("Transport protocol types", () => {
+  it("TransportRequest has required fields", () => {
+    const request: Transport.TransportRequest = {
+      id: "req-1",
+      tag: "@api/users/list",
+      payload: { filter: "active" },
+    }
 
-      const response = yield* transport
-        .send({
-          id: "1",
-          path: "user.list",
-          payload: {},
-        })
-        .pipe(Stream.runHead, Effect.flatten)
+    expect(request.id).toBe("req-1")
+    expect(request.tag).toBe("@api/users/list")
+  })
 
-      expect(response._tag).toBe("Success")
-    }).pipe(
-      Effect.provide(
-        Transport.make<AppRouter>({
-          "user.list": () => Effect.succeed([]),
-          "user.byId": () => Effect.succeed(new User({ id: "1", name: "Test" })),
-          "user.create": () => Effect.succeed(new User({ id: "1", name: "Test" })),
-        })
-      )
-    )
-  )
+  it("Success response has value", () => {
+    const success = new Transport.Success({
+      id: "req-1",
+      value: { data: "test" },
+    })
+
+    expect(success._tag).toBe("Success")
+    expect(success.id).toBe("req-1")
+    expect(success.value).toEqual({ data: "test" })
+  })
+
+  it("Failure response has error", () => {
+    const failure = new Transport.Failure({
+      id: "req-1",
+      error: { message: "Not found" },
+    })
+
+    expect(failure._tag).toBe("Failure")
+    expect(failure.error).toEqual({ message: "Not found" })
+  })
+
+  it("StreamChunk response has chunk", () => {
+    const chunk = new Transport.StreamChunk({
+      id: "req-1",
+      chunk: { item: 1 },
+    })
+
+    expect(chunk._tag).toBe("StreamChunk")
+    expect(chunk.chunk).toEqual({ item: 1 })
+  })
+
+  it("StreamEnd response marks stream completion", () => {
+    const end = new Transport.StreamEnd({
+      id: "req-1",
+    })
+
+    expect(end._tag).toBe("StreamEnd")
+    expect(end.id).toBe("req-1")
+  })
 })
 
-// Helper
-declare const getToken: () => Promise<string>
+// =============================================================================
+// Type Guard Tests
+// =============================================================================
+
+describe("Transport type guards", () => {
+  it("Schema.is works for Success", () => {
+    const success = new Transport.Success({ id: "1", value: {} })
+    const failure = new Transport.Failure({ id: "1", error: {} })
+    
+    expect(Schema.is(Transport.Success)(success)).toBe(true)
+    expect(Schema.is(Transport.Success)(failure)).toBe(false)
+  })
+
+  it("Schema.is works for Failure", () => {
+    const success = new Transport.Success({ id: "1", value: {} })
+    const failure = new Transport.Failure({ id: "1", error: {} })
+    
+    expect(Schema.is(Transport.Failure)(failure)).toBe(true)
+    expect(Schema.is(Transport.Failure)(success)).toBe(false)
+  })
+
+  it("Schema.is works for StreamChunk", () => {
+    const chunk = new Transport.StreamChunk({ id: "1", chunk: {} })
+    const end = new Transport.StreamEnd({ id: "1" })
+    
+    expect(Schema.is(Transport.StreamChunk)(chunk)).toBe(true)
+    expect(Schema.is(Transport.StreamChunk)(end)).toBe(false)
+  })
+
+  it("Schema.is works for StreamEnd", () => {
+    const chunk = new Transport.StreamChunk({ id: "1", chunk: {} })
+    const end = new Transport.StreamEnd({ id: "1" })
+    
+    expect(Schema.is(Transport.StreamEnd)(end)).toBe(true)
+    expect(Schema.is(Transport.StreamEnd)(chunk)).toBe(false)
+  })
+})

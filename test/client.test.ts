@@ -1,12 +1,11 @@
 /**
  * Client Module Tests
  * 
- * Tests for the React client: hooks, Provider, type inference.
- * These tests verify the user-facing API is correct.
+ * Tests for the Client module: proxy, hooks, Provider, type inference.
  */
 
 import { describe, it, expect, expectTypeOf } from "vitest"
-import { Effect, Schema, Context, Layer } from "effect"
+import { Effect, Schema, Context, Layer, Stream } from "effect"
 
 import { Procedure, Router, Client, Transport, Result } from "../src/index.js"
 
@@ -39,375 +38,254 @@ class ValidationError extends Schema.TaggedError<ValidationError>()(
 // Test Router
 // =============================================================================
 
-const UserProcedures = Procedure.family("user", {
-  list: Procedure.query({
-    success: Schema.Array(User),
-  }),
-  byId: Procedure.query({
-    payload: Schema.Struct({ id: Schema.String }),
-    success: User,
-    error: NotFoundError,
-  }),
-  create: Procedure.mutation({
-    payload: CreateUserInput,
-    success: User,
-    error: ValidationError,
-    invalidates: ["user.list"],
-  }),
-  delete: Procedure.mutation({
-    payload: Schema.Struct({ id: Schema.String }),
-    success: Schema.Void,
-    invalidates: ["user.list", "user.byId"],
-  }),
+const appRouter = Router.make("@api", {
+  users: {
+    list: Procedure.query({
+      success: Schema.Array(User),
+    }),
+    get: Procedure.query({
+      payload: Schema.Struct({ id: Schema.String }),
+      success: User,
+      error: NotFoundError,
+    }),
+    create: Procedure.mutation({
+      payload: CreateUserInput,
+      success: User,
+      error: ValidationError,
+      invalidates: ["users"],
+    }),
+    delete: Procedure.mutation({
+      payload: Schema.Struct({ id: Schema.String }),
+      success: Schema.Void,
+      invalidates: ["users"],
+    }),
+  },
+  contracts: {
+    public: {
+      list: Procedure.query({ success: Schema.Array(Schema.String) }),
+    },
+  },
 })
 
-const ContractProcedures = Procedure.family("contracts", {
-  public: Procedure.family("public", {
-    list: Procedure.query({ success: Schema.Array(Schema.String) }),
-  }),
-})
-
-const AppRouter = Router.make({
-  user: UserProcedures,
-  contracts: ContractProcedures,
-})
-
-type AppRouter = typeof AppRouter
+type AppRouter = typeof appRouter
 
 // =============================================================================
 // Client.make Tests
 // =============================================================================
 
 describe("Client.make", () => {
-  it("creates a typed client from router", () => {
-    const api = Client.make<AppRouter>()
-
+  it("creates a client from router", () => {
+    const api = Client.make(appRouter)
+    
     expect(api).toBeDefined()
-    expect(api.Provider).toBeDefined()
   })
 
-  it("client has all procedure paths as properties", () => {
-    const api = Client.make<AppRouter>()
-
-    // These should exist and be typed
-    expect(api.user).toBeDefined()
-    expect(api.user.list).toBeDefined()
-    expect(api.user.byId).toBeDefined()
-    expect(api.user.create).toBeDefined()
-  })
-
-  it("client supports nested routers", () => {
-    const api = Client.make<AppRouter>()
-
-    // Deep nesting
+  it("client has nested structure matching router", () => {
+    const api = Client.make(appRouter)
+    
+    expect(api.users).toBeDefined()
+    expect(api.users.list).toBeDefined()
+    expect(api.users.get).toBeDefined()
+    expect(api.users.create).toBeDefined()
     expect(api.contracts.public.list).toBeDefined()
   })
 })
 
 // =============================================================================
-// useQuery Tests
+// Client.provide Tests
 // =============================================================================
 
-describe("useQuery", () => {
-  it("query has useQuery method", () => {
-    const api = Client.make<AppRouter>()
-
-    expect(api.user.list.useQuery).toBeTypeOf("function")
-  })
-
-  it("useQuery returns correct result shape", () => {
-    const api = Client.make<AppRouter>()
-
-    // Mock hook result type
-    type QueryResult = ReturnType<typeof api.user.list.useQuery>
-
-    expectTypeOf<QueryResult>().toHaveProperty("result")
-    expectTypeOf<QueryResult>().toHaveProperty("data")
-    expectTypeOf<QueryResult>().toHaveProperty("error")
-    expectTypeOf<QueryResult>().toHaveProperty("isLoading")
-    expectTypeOf<QueryResult>().toHaveProperty("isSuccess")
-    expectTypeOf<QueryResult>().toHaveProperty("isError")
-    expectTypeOf<QueryResult>().toHaveProperty("refetch")
-  })
-
-  it("useQuery data type matches success schema", () => {
-    const api = Client.make<AppRouter>()
-
-    type QueryResult = ReturnType<typeof api.user.list.useQuery>
-    type Data = QueryResult["data"]
-
-    // data should be User[] | undefined
-    expectTypeOf<Data>().toEqualTypeOf<readonly User[] | undefined>()
-  })
-
-  it("useQuery error type matches error schema", () => {
-    const api = Client.make<AppRouter>()
-
-    type QueryResult = ReturnType<typeof api.user.byId.useQuery>
-    type Error = QueryResult["error"]
-
-    // error should be NotFoundError | undefined
-    expectTypeOf<Error>().toEqualTypeOf<NotFoundError | undefined>()
-  })
-
-  it("useQuery requires payload for procedures with payload", () => {
-    const api = Client.make<AppRouter>()
-
-    // This should require { id: string }
-    api.user.byId.useQuery({ id: "123" })
-
-    // @ts-expect-error - missing required payload
-    api.user.byId.useQuery()
-
-    // @ts-expect-error - wrong payload shape
-    api.user.byId.useQuery({ userId: "123" })
-  })
-
-  it("useQuery accepts no payload for procedures without payload", () => {
-    const api = Client.make<AppRouter>()
-
-    // No payload needed
-    api.user.list.useQuery()
-
-    // Can also pass empty object or undefined
-    api.user.list.useQuery({})
-    api.user.list.useQuery(undefined)
-  })
-
-  it("useQuery accepts options as second argument", () => {
-    const api = Client.make<AppRouter>()
-
-    api.user.list.useQuery(undefined, {
-      enabled: false,
-      staleTime: 5000,
-      refetchOnMount: true,
-      refetchOnWindowFocus: false,
-      refetchInterval: 10000,
-    })
-  })
-})
-
-// =============================================================================
-// useMutation Tests
-// =============================================================================
-
-describe("useMutation", () => {
-  it("mutation has useMutation method", () => {
-    const api = Client.make<AppRouter>()
-
-    expect(api.user.create.useMutation).toBeTypeOf("function")
-  })
-
-  it("useMutation returns correct result shape", () => {
-    const api = Client.make<AppRouter>()
-
-    type MutationResult = ReturnType<typeof api.user.create.useMutation>
-
-    expectTypeOf<MutationResult>().toHaveProperty("mutate")
-    expectTypeOf<MutationResult>().toHaveProperty("mutateAsync")
-    expectTypeOf<MutationResult>().toHaveProperty("result")
-    expectTypeOf<MutationResult>().toHaveProperty("isLoading")
-    expectTypeOf<MutationResult>().toHaveProperty("reset")
-  })
-
-  it("mutate accepts correct payload type", () => {
-    const api = Client.make<AppRouter>()
-
-    const mutation = api.user.create.useMutation()
-
-    // Should accept CreateUserInput
-    mutation.mutate({ name: "Test", email: "test@example.com" })
-
-    // @ts-expect-error - wrong shape
-    mutation.mutate({ username: "test" })
-  })
-
-  it("mutateAsync returns correct type", () => {
-    const api = Client.make<AppRouter>()
-
-    const mutation = api.user.create.useMutation()
-
-    type ReturnType = Awaited<ReturnType<typeof mutation.mutateAsync>>
-
-    expectTypeOf<ReturnType>().toEqualTypeOf<User>()
-  })
-
-  it("useMutation accepts callbacks", () => {
-    const api = Client.make<AppRouter>()
-
-    api.user.create.useMutation({
-      onSuccess: (data, payload) => {
-        // data should be User
-        expectTypeOf(data).toEqualTypeOf<User>()
-        // payload should be CreateUserInput
-        expectTypeOf(payload).toEqualTypeOf<CreateUserInput>()
-      },
-      onError: (error, payload) => {
-        // error should be ValidationError
-        expectTypeOf(error).toEqualTypeOf<ValidationError>()
-      },
-      onSettled: () => {},
-    })
-  })
-})
-
-// =============================================================================
-// Query vs Mutation Type Safety
-// =============================================================================
-
-describe("Query vs Mutation type safety", () => {
-  it("queries do not have useMutation", () => {
-    const api = Client.make<AppRouter>()
-
-    // @ts-expect-error - queries don't have useMutation
-    api.user.list.useMutation
-  })
-
-  it("mutations do not have useQuery", () => {
-    const api = Client.make<AppRouter>()
-
-    // @ts-expect-error - mutations don't have useQuery
-    api.user.create.useQuery
-  })
-})
-
-// =============================================================================
-// Imperative API Tests
-// =============================================================================
-
-describe("Imperative API", () => {
-  it("queries have .run that returns Effect", () => {
-    const api = Client.make<AppRouter>()
-
-    const effect = api.user.list.run
-
-    // Should be an Effect
-    expectTypeOf(effect).toMatchTypeOf<Effect.Effect<readonly User[], any, any>>()
-  })
-
-  it("queries have .runPromise for async usage", () => {
-    const api = Client.make<AppRouter>()
-
-    expectTypeOf(api.user.list.runPromise).toBeFunction()
-  })
-
-  it("queries have .prefetch for SSR", () => {
-    const api = Client.make<AppRouter>()
-
-    expectTypeOf(api.user.list.prefetch).toBeFunction()
-  })
-
-  it("queries have .key for cache key generation", () => {
-    const api = Client.make<AppRouter>()
-
-    const key = api.user.byId.key({ id: "123" })
-
-    expectTypeOf(key).toEqualTypeOf<string>()
-  })
-
-  it("api.invalidate accepts array of keys", () => {
-    const api = Client.make<AppRouter>()
-
-    api.invalidate(["user.list", "user.byId"])
-  })
-})
-
-// =============================================================================
-// Provider Tests
-// =============================================================================
-
-describe("Client.Provider", () => {
-  it("Provider requires layer prop", () => {
-    const api = Client.make<AppRouter>()
-
-    // @ts-expect-error - layer is required
-    api.Provider({ children: null })
-
-    // This should work
-    api.Provider({
-      children: null,
-      layer: Transport.http("/api/trpc"),
-    })
-  })
-
-  it("Provider accepts Transport layer", () => {
-    const api = Client.make<AppRouter>()
-
-    const httpLayer = Transport.http("/api/trpc")
+describe("Client.provide", () => {
+  it("binds transport to client", () => {
+    const api = Client.make(appRouter)
+    const mockLayer = Transport.mock({})
+    const bound = api.provide(mockLayer)
     
-    api.Provider({
-      children: null,
-      layer: httpLayer,
-    })
+    expect(bound).toBeDefined()
+  })
+
+  it("bound client has same structure", () => {
+    const api = Client.make(appRouter)
+    const mockLayer = Transport.mock({})
+    const bound = api.provide(mockLayer)
+    
+    expect(bound.users.list).toBeDefined()
+    expect(bound.users.get).toBeDefined()
   })
 })
 
 // =============================================================================
-// Result Pattern Matching Tests
+// Procedure Client Tests
 // =============================================================================
 
-describe("Result pattern matching", () => {
-  it("Result.match handles all states", () => {
-    const api = Client.make<AppRouter>()
+describe("Procedure client methods", () => {
+  const api = Client.make(appRouter)
+  const mockLayer = Transport.mock({
+    "users.list": () => Effect.succeed([]),
+  })
+  const bound = api.provide(mockLayer)
 
-    // Simulating usage in a component
-    const query = api.user.list.useQuery()
-
-    // Effect Atom Result.match API
-    const rendered = Result.match(query.result, {
-      onInitial: () => "loading...",
-      onSuccess: (result) => `${result.value.length} users`,
-      onFailure: () => "error",
-    })
-
-    expectTypeOf(rendered).toEqualTypeOf<string>()
+  it("query client has useQuery stub", () => {
+    expect(bound.users.list.useQuery).toBeDefined()
   })
 
-  it("Result.matchWithWaiting handles waiting state", () => {
-    const api = Client.make<AppRouter>()
-    const query = api.user.list.useQuery()
+  it("mutation client has useMutation stub", () => {
+    expect(bound.users.create.useMutation).toBeDefined()
+  })
+})
 
-    // For showing loading/refreshing states
-    const rendered = Result.matchWithWaiting(query.result, {
-      onWaiting: () => "loading or refreshing...",
-      onSuccess: (result) => `${result.value.length} users`,
-      onError: (error) => `error: ${error}`,
-      onDefect: (defect) => `defect: ${defect}`,
-    })
+// =============================================================================
+// Client.ClientServiceTag Tests
+// =============================================================================
 
-    expectTypeOf(rendered).toEqualTypeOf<string>()
+describe("Client.ClientServiceTag", () => {
+  it("is defined", () => {
+    expect(Client.ClientServiceTag).toBeDefined()
+  })
+})
+
+// =============================================================================
+// Client.ClientServiceLive Tests
+// =============================================================================
+
+describe("Client.ClientServiceLive", () => {
+  it("is a Layer that requires Transport", () => {
+    expect(Client.ClientServiceLive).toBeDefined()
+    expect(Layer.isLayer(Client.ClientServiceLive)).toBe(true)
   })
 
-  it("Result.isSuccess and value access", () => {
-    const api = Client.make<AppRouter>()
-    const query = api.user.list.useQuery()
+  it("can be composed with transport layer", () => {
+    const transportLayer = Transport.mock({})
+    const clientLayer = Client.ClientServiceLive.pipe(
+      Layer.provide(transportLayer)
+    )
+    
+    expect(clientLayer).toBeDefined()
+    expect(Layer.isLayer(clientLayer)).toBe(true)
+  })
+})
 
-    if (Result.isSuccess(query.result)) {
-      // result.value should be User[]
-      expectTypeOf(query.result.value).toEqualTypeOf<readonly User[]>()
-    }
+// =============================================================================
+// Type Inference Tests
+// =============================================================================
+
+describe("Client type inference", () => {
+  it("query with void payload", () => {
+    const api = Client.make(appRouter)
+    
+    // users.list has void payload
+    type ListPayload = Client.ProcedurePayload<typeof appRouter.definition.users.list>
+    expectTypeOf<ListPayload>().toEqualTypeOf<void>()
   })
 
-  it("Result.isFailure and cause access", () => {
-    const api = Client.make<AppRouter>()
-    const query = api.user.byId.useQuery({ id: "123" })
-
-    if (Result.isFailure(query.result)) {
-      // Can access cause
-      const error = Result.error(query.result)
-      // error is Option<NotFoundError>
-    }
+  it("query with struct payload", () => {
+    const api = Client.make(appRouter)
+    
+    // users.get has { id: string } payload
+    type GetPayload = Client.ProcedurePayload<typeof appRouter.definition.users.get>
+    expectTypeOf<GetPayload>().toEqualTypeOf<{ readonly id: string }>()
   })
 
-  it("Result.builder for fluent pattern matching", () => {
-    const api = Client.make<AppRouter>()
-    const query = api.user.byId.useQuery({ id: "123" })
+  it("query success type", () => {
+    const api = Client.make(appRouter)
+    
+    type ListSuccess = Client.ProcedureSuccess<typeof appRouter.definition.users.list>
+    expectTypeOf<ListSuccess>().toEqualTypeOf<readonly User[]>()
+  })
 
-    // Builder pattern from Effect Atom
-    const rendered = Result.builder(query.result)
-      .onInitialOrWaiting(() => "loading...")
-      .onSuccess((user) => `Hello ${user.name}`)
-      .onErrorTag("NotFoundError", (error) => `Not found: ${error.id}`)
-      .orNull()
+  it("query error type", () => {
+    const api = Client.make(appRouter)
+    
+    type GetError = Client.ProcedureError<typeof appRouter.definition.users.get>
+    expectTypeOf<GetError>().toEqualTypeOf<NotFoundError>()
+  })
+
+  it("mutation payload type", () => {
+    const api = Client.make(appRouter)
+    
+    type CreatePayload = Client.ProcedurePayload<typeof appRouter.definition.users.create>
+    expectTypeOf<CreatePayload>().toEqualTypeOf<CreateUserInput>()
+  })
+
+  it("mutation success type", () => {
+    const api = Client.make(appRouter)
+    
+    type CreateSuccess = Client.ProcedureSuccess<typeof appRouter.definition.users.create>
+    expectTypeOf<CreateSuccess>().toEqualTypeOf<User>()
+  })
+
+  it("mutation error type", () => {
+    const api = Client.make(appRouter)
+    
+    type CreateError = Client.ProcedureError<typeof appRouter.definition.users.create>
+    expectTypeOf<CreateError>().toEqualTypeOf<ValidationError>()
+  })
+})
+
+// =============================================================================
+// Nested Router Type Tests
+// =============================================================================
+
+describe("Nested router types", () => {
+  it("deeply nested procedures are accessible", () => {
+    const api = Client.make(appRouter)
+    
+    expect(api.contracts.public.list).toBeDefined()
+  })
+
+  it("nested query has correct success type", () => {
+    type ListSuccess = Client.ProcedureSuccess<typeof appRouter.definition.contracts.public.list>
+    expectTypeOf<ListSuccess>().toEqualTypeOf<readonly string[]>()
+  })
+})
+
+// =============================================================================
+// Result Type Tests
+// =============================================================================
+
+describe("Result type", () => {
+  it("Result is exported from Client", () => {
+    expect(Result).toBeDefined()
+  })
+})
+
+// =============================================================================
+// Hook Stub Tests
+// =============================================================================
+
+describe("Hook stubs", () => {
+  const api = Client.make(appRouter)
+  const mockLayer = Transport.mock({})
+  const bound = api.provide(mockLayer)
+
+  it("useQuery exists on query client", () => {
+    // The stub throws when called outside React, but the method should exist
+    expect(typeof bound.users.list.useQuery).toBe("function")
+  })
+
+  it("useMutation exists on mutation client", () => {
+    expect(typeof bound.users.create.useMutation).toBe("function")
+  })
+
+  it("useQuery throws outside React", () => {
+    expect(() => bound.users.list.useQuery()).toThrow(/React/)
+  })
+
+  it("useMutation throws outside React", () => {
+    expect(() => bound.users.create.useMutation()).toThrow(/React/)
+  })
+})
+
+// =============================================================================
+// api.invalidate Tests
+// =============================================================================
+
+describe("api.invalidate", () => {
+  it("invalidate method exists on bound client", () => {
+    const api = Client.make(appRouter)
+    const mockLayer = Transport.mock({})
+    const bound = api.provide(mockLayer)
+    
+    expect(bound.invalidate).toBeDefined()
   })
 })

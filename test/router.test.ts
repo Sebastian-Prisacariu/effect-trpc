@@ -80,12 +80,13 @@ describe("Router.make", () => {
     expect(Router.tagOf(router, "health")).toBe("@api/health")
   })
 
-  it("creates Effect RPC router internally", () => {
+  it("router has procedures array", () => {
     const router = Router.make("@api", {
       list: Procedure.query({ success: Schema.Array(User) }),
     })
 
-    expect(router.rpcRouter).toBeDefined()
+    expect(router.procedures).toBeDefined()
+    expect(router.procedures.length).toBe(1)
   })
 })
 
