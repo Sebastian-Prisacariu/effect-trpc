@@ -1,58 +1,62 @@
 {
   "name": "effect-trpc",
-  "version": "0.1.0",
-  "description": "tRPC-style ergonomics built on Effect RPC + Effect Atom",
+  "version": "0.0.1",
+  "description": "End-to-end typesafe APIs with Effect",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/dts/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./server": {
-      "types": "./dist/server/handler.d.ts",
-      "import": "./dist/server/handler.js"
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/dts/index.d.ts"
     },
     "./client": {
-      "types": "./dist/client/index.d.ts",
-      "import": "./dist/client/index.js"
+      "import": "./dist/esm/client.js",
+      "require": "./dist/cjs/client.js",
+      "types": "./dist/dts/client.d.ts"
+    },
+    "./server": {
+      "import": "./dist/esm/server.js",
+      "require": "./dist/cjs/server.js",
+      "types": "./dist/dts/server.d.ts"
     }
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "typecheck": "tsc --noEmit"
+    "build": "tsup",
+    "test": "vitest",
+    "test:types": "tsc --noEmit",
+    "typecheck": "vitest typecheck"
   },
   "peerDependencies": {
-    "@effect/platform": ">=0.70.0",
-    "@effect/rpc": ">=0.50.0",
-    "@effect-atom/atom-react": ">=0.1.0",
-    "effect": ">=3.12.0",
-    "react": ">=18.0.0"
+    "effect": "^3.0.0",
+    "@effect/rpc": "^0.50.0",
+    "@effect/platform": "^0.70.0",
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@effect/platform": "^0.70.0",
-    "@effect/rpc": "^0.50.0",
-    "@effect-atom/atom-react": "^0.1.0",
-    "@types/react": "^18.2.0",
     "effect": "^3.12.0",
-    "react": "^18.2.0",
-    "typescript": "^5.7.0"
+    "@effect/rpc": "^0.50.0",
+    "@effect/platform": "^0.70.0",
+    "@effect/vitest": "^0.15.0",
+    "vitest": "^2.1.0",
+    "typescript": "^5.7.0",
+    "tsup": "^8.0.0",
+    "react": "^19.0.0",
+    "@types/react": "^19.0.0"
   },
   "keywords": [
     "effect",
-    "effect-ts",
     "trpc",
     "rpc",
-    "effect-atom",
-    "react",
-    "typescript"
+    "typesafe",
+    "api"
   ],
-  "author": "Sebastian Prisacariu",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Sebastian-Prisacariu/effect-trpc.git"
-  }
+  "license": "MIT"
 }

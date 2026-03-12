@@ -1,13 +1,14 @@
 /**
- * effect-trpc/server - Server-side exports
- * 
- * @since 1.0.0
+ * effect-trpc/server entry point
+ * @module
  */
 
-export * as Server from "./Server/index.js"
+// Re-export core modules
 export * as Procedure from "./Procedure/index.js"
 export * as Router from "./Router/index.js"
 export * as Result from "./Result/index.js"
+export * as Middleware from "./Middleware/index.js"
 
-// Convenience re-export
+// Server-specific exports
+export * as Server from "./Server/index.js"
 export { createRouteHandler, createHandler, createCaller } from "./Server/index.js"
