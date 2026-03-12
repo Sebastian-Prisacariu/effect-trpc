@@ -353,50 +353,61 @@ describe("Result pattern matching", () => {
     // Simulating usage in a component
     const query = api.user.list.useQuery()
 
+    // Effect Atom Result.match API
     const rendered = Result.match(query.result, {
       onInitial: () => "loading...",
-      onWaiting: () => "refreshing...",
-      onSuccess: (users) => `${users.length} users`,
-      onFailure: (error) => `error: ${error}`,
+      onSuccess: (result) => `${result.value.length} users`,
+      onFailure: () => "error",
     })
 
     expectTypeOf(rendered).toEqualTypeOf<string>()
   })
 
-  it("Result.match onSuccess receives correct type", () => {
+  it("Result.matchWithWaiting handles waiting state", () => {
     const api = Client.make<AppRouter>()
     const query = api.user.list.useQuery()
 
-    Result.match(query.result, {
-      onInitial: () => null,
-      onWaiting: () => null,
-      onSuccess: (users) => {
-        // users should be User[]
-        expectTypeOf(users).toEqualTypeOf<readonly User[]>()
-        return null
-      },
-      onFailure: () => null,
+    // For showing loading/refreshing states
+    const rendered = Result.matchWithWaiting(query.result, {
+      onWaiting: () => "loading or refreshing...",
+      onSuccess: (result) => `${result.value.length} users`,
+      onError: (error) => `error: ${error}`,
+      onDefect: (defect) => `defect: ${defect}`,
     })
+
+    expectTypeOf(rendered).toEqualTypeOf<string>()
   })
 
-  it("Result.match onFailure receives correct error type", () => {
+  it("Result.isSuccess and value access", () => {
+    const api = Client.make<AppRouter>()
+    const query = api.user.list.useQuery()
+
+    if (Result.isSuccess(query.result)) {
+      // result.value should be User[]
+      expectTypeOf(query.result.value).toEqualTypeOf<readonly User[]>()
+    }
+  })
+
+  it("Result.isFailure and cause access", () => {
     const api = Client.make<AppRouter>()
     const query = api.user.byId.useQuery({ id: "123" })
 
-    Result.match(query.result, {
-      onInitial: () => null,
-      onWaiting: () => null,
-      onSuccess: () => null,
-      onFailure: (error) => {
-        // error should be NotFoundError
-        expectTypeOf(error).toEqualTypeOf<NotFoundError>()
+    if (Result.isFailure(query.result)) {
+      // Can access cause
+      const error = Result.error(query.result)
+      // error is Option<NotFoundError>
+    }
+  })
 
-        // Can access typed properties
-        if (error._tag === "NotFoundError") {
-          console.log(error.id)
-        }
-        return null
-      },
-    })
+  it("Result.builder for fluent pattern matching", () => {
+    const api = Client.make<AppRouter>()
+    const query = api.user.byId.useQuery({ id: "123" })
+
+    // Builder pattern from Effect Atom
+    const rendered = Result.builder(query.result)
+      .onInitialOrWaiting(() => "loading...")
+      .onSuccess((user) => `Hello ${user.name}`)
+      .onErrorTag("NotFoundError", (error) => `Not found: ${error.id}`)
+      .orNull()
   })
 })
