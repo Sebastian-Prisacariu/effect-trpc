@@ -36,9 +36,6 @@
  * ```
  */
 
-import * as Rpc from "@effect/rpc/Rpc"
-import * as RpcRouter from "@effect/rpc/RpcRouter"
-import * as Schema from "effect/Schema"
 import { Pipeable, pipeArguments } from "effect/Pipeable"
 import * as Procedure from "../Procedure/index.js"
 
@@ -76,7 +73,6 @@ export interface TaggedProcedure {
   readonly path: string
   readonly tag: string
   readonly procedure: Procedure.Any
-  readonly rpc: Rpc.Rpc<any, any, any, any, any>
 }
 
 /**
@@ -140,11 +136,6 @@ export interface Router<D extends Definition> extends Pipeable {
    * All tagged procedures
    */
   readonly procedures: ReadonlyArray<TaggedProcedure>
-  
-  /**
-   * The Effect RPC router (for server use)
-   */
-  readonly rpcRouter: RpcRouter.RpcRouter<any, any>
 }
 
 // =============================================================================
@@ -192,14 +183,10 @@ export const make = <D extends Definition>(
       const procedureTag = `${tagPrefix}/${key}`
       
       if (Procedure.isProcedure(value)) {
-        // Create the Effect RPC
-        const rpc = createRpc(procedureTag, value)
-        
         const tagged: TaggedProcedure = {
           path,
           tag: procedureTag,
           procedure: value,
-          rpc,
         }
         
         procedures.push(tagged)
@@ -241,40 +228,13 @@ export const make = <D extends Definition>(
     },
   }
   
-  // Build the Effect RPC router
-  const rpcs = procedures.map((p) => p.rpc)
-  const rpcRouter = RpcRouter.make(...rpcs)
-  
   const self = Object.create(RouterProto)
   self.tag = tag
   self.definition = definition
   self.pathMap = pathMap
   self.procedures = procedures
-  self.rpcRouter = rpcRouter
   
   return self
-}
-
-/**
- * Create an Effect RPC from a Procedure
- * @internal
- */
-const createRpc = (tag: string, procedure: Procedure.Any): Rpc.Rpc<any, any, any, any, any> => {
-  if (Procedure.isQuery(procedure) || Procedure.isMutation(procedure)) {
-    return Rpc.make(tag, {
-      payload: procedure.payloadSchema,
-      success: procedure.successSchema,
-      error: procedure.errorSchema,
-    })
-  } else {
-    // Stream
-    return Rpc.make(tag, {
-      payload: procedure.payloadSchema,
-      success: procedure.successSchema,
-      error: procedure.errorSchema,
-      stream: true,
-    })
-  }
 }
 
 // =============================================================================
@@ -397,8 +357,6 @@ export type Flatten<D extends Definition, Prefix extends string = ""> = {
     ? (Prefix extends "" ? K : `${Prefix}.${K}`)
     : never
   ]: D[K]
-} & {
-  [K in keyof D & string as D[K] extends Definition ? never : never]: never
 } & UnionToIntersection<{
   [K in keyof D & string]: D[K] extends Definition
     ? Flatten<D[K], Prefix extends "" ? K : `${Prefix}.${K}`>
