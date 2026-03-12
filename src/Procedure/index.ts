@@ -258,7 +258,7 @@ export interface MutationOptions<
   Payload extends Schema.Schema.Any,
   Success extends Schema.Schema.Any,
   Error extends Schema.Schema.All,
-  Invalidates extends ReadonlyArray<string>,
+  Paths extends string = string,
   Target = unknown
 > {
   /**
@@ -279,12 +279,18 @@ export interface MutationOptions<
   /**
    * Paths to invalidate after successful mutation (required)
    * 
+   * Pass a Router's Paths type for autocomplete:
+   * ```ts
+   * type Paths = Router.Paths<typeof router>
+   * Procedure.mutation<Paths>({ invalidates: ["users"] })
+   * ```
+   * 
    * @example
    * ```ts
    * invalidates: ["users", "users.count"]
    * ```
    */
-  readonly invalidates: Invalidates
+  readonly invalidates: readonly AutoComplete<Paths>[]
   
   /**
    * Optional optimistic update configuration
@@ -330,14 +336,14 @@ export interface MutationOptions<
  * ```
  */
 export const mutation = <
+  Paths extends string = string,
   Payload extends Schema.Schema.Any = typeof Schema.Void,
   Success extends Schema.Schema.Any = typeof Schema.Void,
   Error extends Schema.Schema.All = typeof Schema.Never,
-  const Invalidates extends ReadonlyArray<string> = ReadonlyArray<string>,
   Target = unknown
 >(
-  options: MutationOptions<Payload, Success, Error, Invalidates, Target>
-): Mutation<Payload, Success, Error, Invalidates> => {
+  options: MutationOptions<Payload, Success, Error, Paths, Target>
+): Mutation<Payload, Success, Error, readonly AutoComplete<Paths>[]> => {
   const self = Object.create(ProcedureProto)
   self[MutationTypeId] = MutationTypeId
   self._tag = "Mutation"
@@ -452,6 +458,26 @@ export const isMutation = (u: unknown): u is Mutation<any, any, any, any> =>
  */
 export const isStream = (u: unknown): u is Stream<any, any, any> =>
   typeof u === "object" && u !== null && StreamTypeId in u
+
+// =============================================================================
+// AutoComplete Helper
+// =============================================================================
+
+/**
+ * Allows any string but provides autocomplete for known values
+ * 
+ * @since 1.0.0
+ * @category type-level
+ * @example
+ * ```ts
+ * type Paths = "users" | "users.list"
+ * type Input = AutoComplete<Paths>
+ * 
+ * const x: Input = "users"      // autocomplete works
+ * const y: Input = "other"      // also valid, no error
+ * ```
+ */
+export type AutoComplete<T extends string> = T | (string & {})
 
 // =============================================================================
 // Type Utilities

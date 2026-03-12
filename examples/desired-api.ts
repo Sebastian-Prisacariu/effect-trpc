@@ -60,27 +60,6 @@ const getUserById = Procedure.query({
   error: NotFoundError,
 })
 
-const createUser = Procedure.mutation({
-  payload: CreateUserInput,
-  success: User,
-  error: ValidationError,
-  invalidates: ["users"],
-  optimistic: {
-    target: "users.list",
-    reducer: (users: readonly User[], input: CreateUserInput) => [
-      ...users,
-      new User({ ...input, id: `temp-${Date.now()}` }),
-    ],
-  },
-})
-
-const deleteUser = Procedure.mutation({
-  payload: Schema.Struct({ id: Schema.String }),
-  success: Schema.Void,
-  error: NotFoundError,
-  invalidates: ["users"],
-})
-
 const listContracts = Procedure.query({
   success: Schema.Array(Contract),
 })
@@ -96,9 +75,65 @@ const watchUsers = Procedure.stream({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. ROUTER
+// 4. ROUTER (initial)
 //
-// Only the root router needs a tag. Nested structures are plain objects.
+// Define the router structure first to get path types for autocomplete.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const routerV1 = Router.make("@api", {
+  users: {
+    list: listUsers,
+    get: getUserById,
+    watch: watchUsers,
+  },
+  contracts: {
+    public: {
+      list: listContracts,
+      get: getContract,
+    },
+    private: {
+      list: listContracts,
+      get: getContract,
+    },
+  },
+  health: Procedure.query({ success: Schema.String }),
+})
+
+// Extract paths for autocomplete in mutations
+type Paths = Router.Paths<typeof routerV1>
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. MUTATIONS (with autocomplete)
+//
+// Pass the Paths type for autocomplete on invalidates.
+// Any string is still valid, but known paths will autocomplete.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const createUser = Procedure.mutation<Paths>({
+  payload: CreateUserInput,
+  success: User,
+  error: ValidationError,
+  invalidates: ["users"], // ← Autocompletes: "users" | "users.list" | "users.get" | ...
+  optimistic: {
+    target: "users.list",
+    reducer: (users: readonly User[], input: CreateUserInput) => [
+      ...users,
+      new User({ ...input, id: `temp-${Date.now()}` }),
+    ],
+  },
+})
+
+const deleteUser = Procedure.mutation<Paths>({
+  payload: Schema.Struct({ id: Schema.String }),
+  success: Schema.Void,
+  error: NotFoundError,
+  invalidates: ["users"], // ← Autocompletes known paths
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. FINAL ROUTER
+//
+// Now add the mutations to create the complete router.
 // Each procedure's tag is derived from the root tag + its path in the tree.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -126,13 +161,13 @@ const appRouter = Router.make("@api", {
 type AppRouter = typeof appRouter
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. CLIENT
+// 7. CLIENT
 // ═══════════════════════════════════════════════════════════════════════════
 
 const api = Client.make<AppRouter>()
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. REACT PROVIDER
+// 8. REACT PROVIDER
 // ═══════════════════════════════════════════════════════════════════════════
 
 function App() {
@@ -151,7 +186,7 @@ function App() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. HOOKS
+// 9. HOOKS
 // ═══════════════════════════════════════════════════════════════════════════
 
 function UserList() {
@@ -200,7 +235,7 @@ function CreateUserForm() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 8. IMPERATIVE API
+// 10. IMPERATIVE API
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Effect-based (for use in Effect programs)
@@ -220,7 +255,7 @@ api.invalidate(["users"])        // Invalidates all user queries
 api.invalidate(["users.list"])   // Invalidates only users.list
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 9. SSR / SERVER COMPONENTS
+// 11. SSR / SERVER COMPONENTS
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function UsersPage() {
@@ -229,7 +264,7 @@ async function UsersPage() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 10. MOCK TRANSPORT
+// 12. MOCK TRANSPORT
 //
 // Type-safe mock handlers for testing. Keyed by path (e.g., "users.list").
 // ═══════════════════════════════════════════════════════════════════════════
@@ -264,7 +299,7 @@ function TestApp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 11. HIERARCHICAL INVALIDATION
+// 13. HIERARCHICAL INVALIDATION
 //
 // Invalidating a path invalidates all descendants.
 // ═══════════════════════════════════════════════════════════════════════════
