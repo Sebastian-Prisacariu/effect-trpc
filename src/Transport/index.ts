@@ -544,3 +544,57 @@ export const isTransientError = (error: unknown): boolean => {
  */
 export const generateRequestId = (): string =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
+
+// =============================================================================
+// Loopback Transport (for testing)
+// =============================================================================
+
+/**
+ * Create a loopback transport that connects directly to a Server
+ * 
+ * This is useful for testing Client ↔ Server communication without
+ * actual HTTP. The transport calls Server.handle() directly.
+ * 
+ * @since 1.0.0
+ * @category constructors
+ * @example
+ * ```ts
+ * import { Transport, Server, Client } from "effect-trpc"
+ * 
+ * const server = Server.make(router, handlers)
+ * const loopbackLayer = Transport.loopback(server)
+ * 
+ * const api = Client.make(router)
+ * const boundApi = api.provide(loopbackLayer)
+ * 
+ * // Now boundApi calls go directly to server handlers
+ * await boundApi.users.list.runPromise()
+ * ```
+ */
+export const loopback = <D extends Router.Definition, R>(
+  server: {
+    readonly handle: (request: TransportRequest) => Effect.Effect<TransportResponse, never, R>
+    readonly handleStream: (request: TransportRequest) => Stream.Stream<StreamResponse, never, R>
+  }
+): Layer.Layer<Transport, never, R> =>
+  Layer.effect(
+    Transport,
+    Effect.gen(function* () {
+      return {
+        send: (request: TransportRequest) => 
+          server.handle(request).pipe(
+            Effect.mapError(() => new TransportError({ 
+              reason: "Protocol", 
+              message: "Server error" 
+            }))
+          ) as Effect.Effect<TransportResponse, TransportError>,
+        sendStream: (request: TransportRequest) => 
+          server.handleStream(request).pipe(
+            Stream.mapError(() => new TransportError({ 
+              reason: "Protocol", 
+              message: "Server stream error" 
+            }))
+          ) as Stream.Stream<StreamResponse, TransportError>,
+      }
+    })
+  )
