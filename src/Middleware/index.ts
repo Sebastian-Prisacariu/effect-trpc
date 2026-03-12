@@ -352,13 +352,14 @@ const executeOne = <A, E, R, Provides, Failure>(
     const impl = yield* middleware as any as Context.Tag<any, MiddlewareImpl<Provides, Failure> | WrapMiddlewareImpl<Failure>>
     
     if ("wrap" in impl) {
-      // Wrap middleware
+      // Wrap middleware - wraps the handler execution
       return yield* (impl as WrapMiddlewareImpl<Failure>).wrap(request, next)
     } else {
-      // Provides middleware
+      // Provides middleware - runs first, then provides service to handler
       const provided = yield* (impl as MiddlewareImpl<Provides, Failure>).run(request)
+      // Provide to the middleware's "provides" tag (e.g., CurrentUser)
       return yield* next.pipe(
-        Effect.provideService(middleware as any, provided as any)
+        Effect.provideService(middleware.provides, provided)
       ) as Effect.Effect<A, E, R>
     }
   }) as Effect.Effect<A, E | Failure, R>

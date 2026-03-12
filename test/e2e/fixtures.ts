@@ -8,6 +8,7 @@ import { Context, Effect, Layer, Schema, Stream } from "effect"
 import * as Procedure from "../../src/Procedure/index.js"
 import * as Router from "../../src/Router/index.js"
 import * as Server from "../../src/Server/index.js"
+import * as Middleware from "../../src/Middleware/index.js"
 
 // =============================================================================
 // Schemas
@@ -43,6 +44,44 @@ export class ValidationError extends Schema.TaggedError<ValidationError>("Valida
     message: Schema.String,
   }
 ) {}
+
+export class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("UnauthorizedError")(
+  "UnauthorizedError",
+  {
+    message: Schema.String,
+  }
+) {}
+
+// =============================================================================
+// Middleware
+// =============================================================================
+
+/**
+ * CurrentUser service - provided by AuthMiddleware
+ */
+export class CurrentUser extends Context.Tag("CurrentUser")<CurrentUser, User>() {}
+
+/**
+ * AuthMiddleware - validates authorization header and provides CurrentUser
+ */
+export const AuthMiddleware = Middleware.Tag<User, UnauthorizedError>(
+  "AuthMiddleware",
+  CurrentUser
+)
+
+/**
+ * Implementation that checks for "Bearer valid-token" header
+ */
+export const AuthMiddlewareLive = Middleware.implement(AuthMiddleware, (request) =>
+  Effect.gen(function* () {
+    const token = request.headers.get("authorization")
+    if (token !== "Bearer valid-token") {
+      return yield* Effect.fail(new UnauthorizedError({ message: "Invalid or missing token" }))
+    }
+    // Return a mock user
+    return new User({ id: "auth-user", name: "Authenticated User", email: "auth@example.com" })
+  })
+)
 
 // =============================================================================
 // Procedures
@@ -80,6 +119,13 @@ export const health = Procedure.query({
   success: Schema.String,
 })
 
+/**
+ * Protected procedure - requires AuthMiddleware
+ */
+export const getMe = Procedure.query({
+  success: User,
+}).middleware(AuthMiddleware)
+
 // =============================================================================
 // Router
 // =============================================================================
@@ -91,6 +137,7 @@ export const testRouter = Router.make("@test", {
     create: createUser,
     delete: deleteUser,
     watch: watchUsers,
+    me: getMe,  // Protected by AuthMiddleware
   },
   health,
 })
@@ -190,6 +237,12 @@ export const testHandlers: Server.Handlers<Router.DefinitionOf<TestRouter>, Test
         return users[0] // Just return first user for simplicity
       })
     ),
+    
+    me: () => Effect.gen(function* () {
+      // CurrentUser is provided by AuthMiddleware
+      const currentUser = yield* CurrentUser
+      return currentUser
+    }),
   },
   
   health: () => Effect.succeed("OK"),

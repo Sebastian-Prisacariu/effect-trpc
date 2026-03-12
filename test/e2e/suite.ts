@@ -14,8 +14,10 @@ import {
   CreateUserInput, 
   NotFoundError, 
   ValidationError,
+  UnauthorizedError,
   testRouter,
   TestDatabase,
+  AuthMiddlewareLive,
 } from "./fixtures.js"
 
 /**
@@ -247,6 +249,37 @@ export const e2eSuite = (
           
           expect((result as User).name).toBe("RoundTrip")
         }).pipe(Effect.provide(clientLayer))
+      )
+    })
+    
+    // =========================================================================
+    // Middleware Tests
+    // =========================================================================
+    
+    describe("Middleware", () => {
+      it.effect("protected procedure fails without auth header", () =>
+        Effect.gen(function* () {
+          const service = yield* Client.ClientServiceTag
+          const proc = testRouter.pathMap.procedures.get("users.me")!.procedure
+          
+          // No auth header - should fail
+          const result = yield* service.send(
+            "@test/users/me",
+            undefined,
+            proc.successSchema,
+            proc.errorSchema
+          ).pipe(Effect.either)
+          
+          expect(result._tag).toBe("Left")
+          if (result._tag === "Left") {
+            // Should be UnauthorizedError
+            expect((result.left as any)._tag).toBe("UnauthorizedError")
+          }
+        }).pipe(
+          Effect.provide(clientLayer),
+          // AuthMiddlewareLive is needed for server-side middleware execution
+          Effect.provide(AuthMiddlewareLive)
+        )
       )
     })
   })

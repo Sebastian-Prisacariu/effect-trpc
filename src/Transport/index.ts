@@ -150,6 +150,7 @@ export class TransportRequest extends Schema.Class<TransportRequest>("TransportR
   id: Schema.String,
   tag: Schema.String,
   payload: Schema.Unknown,
+  headers: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), { default: () => ({}) }),
 }) {}
 
 /**

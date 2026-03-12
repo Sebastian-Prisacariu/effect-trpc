@@ -51,6 +51,7 @@ import * as Stream from "effect/Stream"
 import * as Router from "../Router/index.js"
 import * as Procedure from "../Procedure/index.js"
 import * as Transport from "../Transport/index.js"
+import * as Middleware from "../Middleware/index.js"
 
 // =============================================================================
 // Type IDs
@@ -148,42 +149,69 @@ export const make = <D extends Router.Definition, R = never>(
   router: Router.Router<D>,
   handlers: Handlers<D, R>
 ): Server<D, R> => {
-  // Build a map from tag to handler + procedure
+  // Build a map from tag to handler + procedure + middleware
   const handlerMap = new Map<string, {
     handler: (payload: unknown) => Effect.Effect<unknown, unknown, R> | Stream.Stream<unknown, unknown, R>
     procedure: Procedure.Any
     isStream: boolean
+    middlewares: ReadonlyArray<Middleware.Applicable>
   }>()
   
   const buildHandlerMap = (
     def: Router.Definition,
     handlerDef: Record<string, unknown>,
-    pathParts: readonly string[]
+    pathParts: readonly string[],
+    inheritedMiddlewares: ReadonlyArray<Middleware.Applicable>
   ): void => {
     for (const key of Object.keys(def)) {
-      const procedure = def[key]
+      let entry = def[key]
       const handler = handlerDef[key]
       const newPath = [...pathParts, key]
       const tag = [router.tag, ...newPath].join("/")
       
-      if (Procedure.isProcedure(procedure)) {
+      // Check if entry is wrapped with middleware (Router.withMiddleware)
+      let groupMiddlewares: ReadonlyArray<Middleware.Applicable> = []
+      if (typeof entry === "object" && entry !== null && "definition" in entry && "middlewares" in entry) {
+        const wrapped = entry as unknown as Router.DefinitionWithMiddleware<Router.Definition>
+        groupMiddlewares = wrapped.middlewares as ReadonlyArray<Middleware.Applicable>
+        entry = wrapped.definition
+      }
+      
+      const currentMiddlewares = [...inheritedMiddlewares, ...groupMiddlewares]
+      
+      if (Procedure.isProcedure(entry)) {
+        // Add procedure's own middlewares
+        const procedureMiddlewares = entry.middlewares as ReadonlyArray<Middleware.Applicable>
         handlerMap.set(tag, {
           handler: handler as (payload: unknown) => Effect.Effect<unknown, unknown, R>,
-          procedure,
-          isStream: Procedure.isStream(procedure),
+          procedure: entry,
+          isStream: Procedure.isStream(entry),
+          middlewares: [...currentMiddlewares, ...procedureMiddlewares],
         })
-      } else {
+      } else if (typeof entry === "object" && entry !== null) {
         // Nested definition - recurse
         buildHandlerMap(
-          procedure as Router.Definition,
+          entry as Router.Definition,
           handler as Record<string, unknown>,
-          newPath
+          newPath,
+          currentMiddlewares
         )
       }
     }
   }
   
-  buildHandlerMap(router.definition, handlers as Record<string, unknown>, [])
+  buildHandlerMap(router.definition, handlers as Record<string, unknown>, [], [])
+  
+  // Create MiddlewareRequest from TransportRequest
+  const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
+    id: request.id,
+    tag: request.tag,
+    headers: {
+      get: (name: string) => request.headers[name.toLowerCase()] ?? null,
+      has: (name: string) => name.toLowerCase() in request.headers,
+    },
+    payload: request.payload,
+  })
   
   // Handle a single request
   const handle = (
@@ -198,7 +226,7 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    const { handler, procedure, isStream } = entry
+    const { handler, procedure, isStream, middlewares } = entry
     
     if (isStream) {
       return Effect.succeed(new Transport.Failure({
@@ -207,14 +235,17 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
+    const middlewareRequest = toMiddlewareRequest(request)
+    
     return Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
       Effect.matchEffect({
         onFailure: (cause) => Effect.succeed(new Transport.Failure({
           id: request.id,
           error: { message: "Invalid payload", cause },
         })),
-        onSuccess: (payload) =>
-          (handler(payload) as Effect.Effect<unknown, unknown, R>).pipe(
+        onSuccess: (payload) => {
+          // Build the handler effect
+          const handlerEffect = (handler(payload) as Effect.Effect<unknown, unknown, R>).pipe(
             Effect.matchEffect({
               onFailure: (error) =>
                 Schema.encode(procedure.errorSchema)(error).pipe(
@@ -233,7 +264,19 @@ export const make = <D extends Router.Definition, R = never>(
                   }))
                 ),
             })
-          ),
+          )
+          
+          // Execute procedure/group middleware chain if any
+          if (middlewares.length > 0) {
+            return Middleware.execute(
+              middlewares,
+              middlewareRequest,
+              handlerEffect
+            ) as Effect.Effect<Transport.TransportResponse, never, R>
+          }
+          
+          return handlerEffect
+        },
       })
     ) as Effect.Effect<Transport.TransportResponse, never, R>
   }
@@ -408,9 +451,46 @@ export const isServer = (value: unknown): value is Server<any, any> =>
  * )
  * ```
  */
-export const middleware = <M>(m: M) => <D extends Router.Definition, R>(
+export const middleware = <M extends Middleware.Applicable>(m: M) => <D extends Router.Definition, R>(
   server: Server<D, R>
-): Server<D, R> => ({
-  ...server,
-  middlewares: [...server.middlewares, m],
-})
+): Server<D, R> => {
+  const newMiddlewares = [...server.middlewares, m] as ReadonlyArray<Middleware.Applicable>
+  
+  // Create MiddlewareRequest from TransportRequest
+  const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
+    id: request.id,
+    tag: request.tag,
+    headers: {
+      get: (name: string) => request.headers[name.toLowerCase()] ?? null,
+      has: (name: string) => name.toLowerCase() in request.headers,
+    },
+    payload: request.payload,
+  })
+  
+  // Wrap the original handle with middleware execution
+  const wrappedHandle = (
+    request: Transport.TransportRequest
+  ): Effect.Effect<Transport.TransportResponse, never, R> => {
+    const middlewareRequest = toMiddlewareRequest(request)
+    
+    // Execute server-level middleware then delegate to original handle
+    if (newMiddlewares.length > 0) {
+      return Middleware.execute(
+        newMiddlewares,
+        middlewareRequest,
+        server.handle(request)
+      ) as Effect.Effect<Transport.TransportResponse, never, R>
+    }
+    
+    return server.handle(request)
+  }
+  
+  return {
+    ...server,
+    middlewares: newMiddlewares,
+    handle: wrappedHandle,
+    pipe() {
+      return pipeArguments(this, arguments)
+    },
+  }
+}
