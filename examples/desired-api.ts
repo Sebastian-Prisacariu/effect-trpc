@@ -1,14 +1,11 @@
 /**
- * DESIRED API — What we want to be able to write.
+ * effect-trpc — Type-safe RPC with Effect
  * 
- * This is the target. We'll build the implementation to make this work.
+ * This example demonstrates the full API surface.
  */
 
-import { Schema, Effect, Context, Layer, Duration } from "effect"
-import { Headers } from "@effect/platform"
-
-// Helper for client-side token storage
-declare const getStoredToken: () => Effect.Effect<string>
+import { Schema, Effect, Layer, Duration } from "effect"
+import { Procedure, Router, Client, Transport, Result } from "effect-trpc"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. SCHEMAS
@@ -45,21 +42,13 @@ class ValidationError extends Schema.TaggedError<ValidationError>("ValidationErr
   message: Schema.String,
 }) {}
 
-class UnauthorizedError extends Schema.TaggedError<UnauthorizedError>("UnauthorizedError")({
-  message: Schema.String,
-}) {}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// 3. PROCEDURE DEFINITIONS
-// 
-// - Procedures define shape only (no tags)
-// - Tags auto-derived when placed in Router
-// - Mutations require `invalidates` array
+// 3. PROCEDURES
+//
+// Procedures define the shape of an RPC call: payload, success, and error types.
+// Tags are assigned automatically when procedures are placed in a Router.
+// Mutations require an `invalidates` array for cache invalidation.
 // ═══════════════════════════════════════════════════════════════════════════
-
-import { Procedure, Router, Client, Transport, Result } from "effect-trpc"
-
-// ─── User Procedures ───
 
 const listUsers = Procedure.query({
   success: Schema.Array(User),
@@ -92,8 +81,6 @@ const deleteUser = Procedure.mutation({
   invalidates: ["users"],
 })
 
-// ─── Contract Procedures ───
-
 const listContracts = Procedure.query({
   success: Schema.Array(Contract),
 })
@@ -104,51 +91,48 @@ const getContract = Procedure.query({
   error: NotFoundError,
 })
 
-// ─── Stream Procedures ───
-
 const watchUsers = Procedure.stream({
   success: User,
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. ROUTER DEFINITION
-// 
-// - Only the root router needs a tag
-// - Nested structures are plain objects
-// - Tags auto-derived from root tag + path
+// 4. ROUTER
+//
+// Only the root router needs a tag. Nested structures are plain objects.
+// Each procedure's tag is derived from the root tag + its path in the tree.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const appRouter = Router.make("@api", {
   users: {
-    list: listUsers,       // tag: "@api/users/list"
-    get: getUserById,      // tag: "@api/users/get"
-    create: createUser,    // tag: "@api/users/create"
-    delete: deleteUser,    // tag: "@api/users/delete"
-    watch: watchUsers,     // tag: "@api/users/watch"
+    list: listUsers,       // → "@api/users/list"
+    get: getUserById,      // → "@api/users/get"
+    create: createUser,    // → "@api/users/create"
+    delete: deleteUser,    // → "@api/users/delete"
+    watch: watchUsers,     // → "@api/users/watch"
   },
   contracts: {
     public: {
-      list: listContracts, // tag: "@api/contracts/public/list"
-      get: getContract,    // tag: "@api/contracts/public/get"
+      list: listContracts, // → "@api/contracts/public/list"
+      get: getContract,    // → "@api/contracts/public/get"
     },
     private: {
-      list: listContracts, // tag: "@api/contracts/private/list"
-      get: getContract,    // tag: "@api/contracts/private/get"
+      list: listContracts, // → "@api/contracts/private/list"
+      get: getContract,    // → "@api/contracts/private/get"
     },
   },
-  health: Procedure.query({ success: Schema.String }), // tag: "@api/health"
+  health: Procedure.query({ success: Schema.String }),
 })
 
 type AppRouter = typeof appRouter
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. CLIENT CREATION
+// 5. CLIENT
 // ═══════════════════════════════════════════════════════════════════════════
 
 const api = Client.make<AppRouter>()
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. PROVIDER & TRANSPORT SETUP (React)
+// 6. REACT PROVIDER
 // ═══════════════════════════════════════════════════════════════════════════
 
 function App() {
@@ -167,14 +151,12 @@ function App() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. USING HOOKS IN COMPONENTS
+// 7. HOOKS
 // ═══════════════════════════════════════════════════════════════════════════
 
 function UserList() {
-  // ─── Query Hook ───
   const query = api.users.list.useQuery()
   
-  // Pattern matching on result
   return Result.match(query.result, {
     onInitial: () => <div>Loading...</div>,
     onSuccess: (r) => (
@@ -189,7 +171,6 @@ function UserList() {
 }
 
 function UserDetail({ id }: { id: string }) {
-  // Query with payload
   const query = api.users.get.useQuery({ id })
   
   if (query.isLoading) return <div>Loading...</div>
@@ -199,7 +180,6 @@ function UserDetail({ id }: { id: string }) {
 }
 
 function CreateUserForm() {
-  // ─── Mutation Hook ───
   const mutation = api.users.create.useMutation({
     onSuccess: (user) => {
       console.log('Created user:', user.name)
@@ -220,48 +200,41 @@ function CreateUserForm() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 8. IMPERATIVE API (outside React)
+// 8. IMPERATIVE API
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Effect-based
+// Effect-based (for use in Effect programs)
 const program = Effect.gen(function* () {
   const users = yield* api.users.list.run
   return users
 })
 
-// Promise-based
+// Promise-based (for use outside Effect)
 async function fetchUsers() {
   const users = await api.users.list.runPromise()
   return users
 }
 
-// Manual invalidation
-function invalidateAllUsers() {
-  api.invalidate(["users"])
-}
-
-function invalidateSpecificQuery() {
-  api.invalidate(["users.list"])
-}
+// Manual cache invalidation
+api.invalidate(["users"])        // Invalidates all user queries
+api.invalidate(["users.list"])   // Invalidates only users.list
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 9. SSR / SERVER COMPONENTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// In Server Component
 async function UsersPage() {
-  // Prefetch on server
   await api.users.list.prefetchPromise()
-  
-  // Data is now in cache
-  return <UserList />  // No loading state - data already available
+  return <UserList />
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 10. TYPED MOCK TRANSPORT (for testing)
+// 10. MOCK TRANSPORT
+//
+// Type-safe mock handlers for testing. Keyed by path (e.g., "users.list").
 // ═══════════════════════════════════════════════════════════════════════════
 
-const mockTransport = Transport.make<AppRouter>({
+const mockTransport = Transport.mock<AppRouter>({
   "users.list": () => Effect.succeed([
     new User({ id: "1", name: "Mock User", email: "mock@example.com" }),
   ]),
@@ -282,7 +255,6 @@ const mockTransport = Transport.make<AppRouter>({
   "health": () => Effect.succeed("OK"),
 })
 
-// Use in tests
 function TestApp() {
   return (
     <api.Provider layer={mockTransport}>
@@ -292,17 +264,11 @@ function TestApp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 11. PATH → TAG MAPPING (internal, for Reactivity)
+// 11. HIERARCHICAL INVALIDATION
+//
+// Invalidating a path invalidates all descendants.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// User-facing API uses paths:
-// api.users.list.useQuery()
-// api.invalidate(["users"])
-
-// Internally, paths map to tags for Reactivity:
-// "users.list" → "@api/users/list"
-// "users" → "@api/users" (and all children)
-
-// The Router handles this mapping:
+// Get all tags that would be invalidated for a path
 const tags = Router.tagsToInvalidate(appRouter, "users")
 // → ["@api/users", "@api/users/list", "@api/users/get", "@api/users/create", ...]
