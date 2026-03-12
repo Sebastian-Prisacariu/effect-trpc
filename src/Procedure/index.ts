@@ -279,16 +279,13 @@ export interface MutationOptions<
   /**
    * Paths to invalidate after successful mutation (required)
    * 
-   * Pass a Router's Paths type for autocomplete:
-   * ```ts
-   * type Paths = Router.Paths<typeof router>
-   * Procedure.mutation<Paths>({ invalidates: ["users"] })
-   * ```
-   * 
    * @example
    * ```ts
    * invalidates: ["users", "users.count"]
    * ```
+   * 
+   * @tip For autocomplete, use `Procedure.mutation<Router.Paths<typeof router>>()`.
+   * This is optional — any string is valid, but known paths will autocomplete.
    */
   readonly invalidates: readonly AutoComplete<Paths>[]
   

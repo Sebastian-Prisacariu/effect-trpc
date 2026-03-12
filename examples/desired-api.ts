@@ -5,7 +5,7 @@
  */
 
 import { Schema, Effect, Layer, Duration } from "effect"
-import { Procedure, Router, Client, Transport, Result } from "effect-trpc"
+import { Procedure, Router, Client, Transport, Result, Server } from "effect-trpc"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. SCHEMAS
@@ -47,7 +47,6 @@ class ValidationError extends Schema.TaggedError<ValidationError>("ValidationErr
 //
 // Procedures define the shape of an RPC call: payload, success, and error types.
 // Tags are assigned automatically when procedures are placed in a Router.
-// Mutations require an `invalidates` array for cache invalidation.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const listUsers = Procedure.query({
@@ -58,6 +57,20 @@ const getUserById = Procedure.query({
   payload: Schema.Struct({ id: Schema.String }),
   success: User,
   error: NotFoundError,
+})
+
+const createUser = Procedure.mutation({
+  payload: CreateUserInput,
+  success: User,
+  error: ValidationError,
+  invalidates: ["users"],
+})
+
+const deleteUser = Procedure.mutation({
+  payload: Schema.Struct({ id: Schema.String }),
+  success: Schema.Void,
+  error: NotFoundError,
+  invalidates: ["users"],
 })
 
 const listContracts = Procedure.query({
@@ -75,65 +88,9 @@ const watchUsers = Procedure.stream({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. ROUTER (initial)
+// 4. ROUTER
 //
-// Define the router structure first to get path types for autocomplete.
-// ═══════════════════════════════════════════════════════════════════════════
-
-const routerV1 = Router.make("@api", {
-  users: {
-    list: listUsers,
-    get: getUserById,
-    watch: watchUsers,
-  },
-  contracts: {
-    public: {
-      list: listContracts,
-      get: getContract,
-    },
-    private: {
-      list: listContracts,
-      get: getContract,
-    },
-  },
-  health: Procedure.query({ success: Schema.String }),
-})
-
-// Extract paths for autocomplete in mutations
-type Paths = Router.Paths<typeof routerV1>
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 5. MUTATIONS (with autocomplete)
-//
-// Pass the Paths type for autocomplete on invalidates.
-// Any string is still valid, but known paths will autocomplete.
-// ═══════════════════════════════════════════════════════════════════════════
-
-const createUser = Procedure.mutation<Paths>({
-  payload: CreateUserInput,
-  success: User,
-  error: ValidationError,
-  invalidates: ["users"], // ← Autocompletes: "users" | "users.list" | "users.get" | ...
-  optimistic: {
-    target: "users.list",
-    reducer: (users: readonly User[], input: CreateUserInput) => [
-      ...users,
-      new User({ ...input, id: `temp-${Date.now()}` }),
-    ],
-  },
-})
-
-const deleteUser = Procedure.mutation<Paths>({
-  payload: Schema.Struct({ id: Schema.String }),
-  success: Schema.Void,
-  error: NotFoundError,
-  invalidates: ["users"], // ← Autocompletes known paths
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 6. FINAL ROUTER
-//
-// Now add the mutations to create the complete router.
+// Only the root router needs a tag. Nested structures are plain objects.
 // Each procedure's tag is derived from the root tag + its path in the tree.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -161,13 +118,55 @@ const appRouter = Router.make("@api", {
 type AppRouter = typeof appRouter
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. CLIENT
+// 5. SERVER
+//
+// Handlers mirror the router structure. They receive decoded payloads
+// and return Effects. Dependencies are provided via layers.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const api = Client.make<AppRouter>()
+// Example service for handlers to use
+class Database extends Effect.Tag("Database")<Database, {
+  getAllUsers: () => Effect.Effect<User[]>
+  findUser: (id: string) => Effect.Effect<User | null>
+}>() {}
+
+const server = Server.make(appRouter, {
+  users: {
+    list: () => Effect.gen(function* () {
+      const db = yield* Database
+      return yield* db.getAllUsers()
+    }),
+    get: ({ id }) => Effect.gen(function* () {
+      const db = yield* Database
+      const user = yield* db.findUser(id)
+      if (!user) return yield* Effect.fail(new NotFoundError({ entity: "User", id }))
+      return user
+    }),
+    create: (input) => Effect.succeed(new User({ ...input, id: `new-${Date.now()}` })),
+    delete: ({ id }) => Effect.succeed(undefined as void),
+    watch: () => Effect.succeed(new User({ id: "1", name: "Streamed", email: "s@e.com" })),
+  },
+  contracts: {
+    public: {
+      list: () => Effect.succeed([]),
+      get: ({ id }) => Effect.succeed(new Contract({ id, title: "Public", userId: "1" })),
+    },
+    private: {
+      list: () => Effect.succeed([]),
+      get: ({ id }) => Effect.succeed(new Contract({ id, title: "Private", userId: "1" })),
+    },
+  },
+  health: () => Effect.succeed("OK"),
+})
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 8. REACT PROVIDER
+// 6. CLIENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+const api = Client.make(appRouter)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. REACT PROVIDER
 // ═══════════════════════════════════════════════════════════════════════════
 
 function App() {
@@ -186,7 +185,7 @@ function App() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 9. HOOKS
+// 8. HOOKS
 // ═══════════════════════════════════════════════════════════════════════════
 
 function UserList() {
@@ -235,36 +234,35 @@ function CreateUserForm() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 10. IMPERATIVE API
+// 9. VANILLA CLIENT (imperative)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Effect-based (for use in Effect programs)
-const program = Effect.gen(function* () {
-  const users = yield* api.users.list.run
-  return users
-})
+const vanillaApi = api.provide(Transport.http("/api/trpc"))
 
-// Promise-based (for use outside Effect)
+// Effect-based
+const program = vanillaApi.users.list.run
+
+// Promise-based
 async function fetchUsers() {
-  const users = await api.users.list.runPromise()
+  const users = await vanillaApi.users.list.runPromise()
   return users
 }
 
-// Manual cache invalidation
+// Manual cache invalidation (strict path typing)
 api.invalidate(["users"])        // Invalidates all user queries
 api.invalidate(["users.list"])   // Invalidates only users.list
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 11. SSR / SERVER COMPONENTS
+// 10. SSR / SERVER COMPONENTS
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function UsersPage() {
-  await api.users.list.prefetchPromise()
+  await vanillaApi.users.list.prefetch()
   return <UserList />
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 12. MOCK TRANSPORT
+// 11. MOCK TRANSPORT
 //
 // Type-safe mock handlers for testing. Keyed by path (e.g., "users.list").
 // ═══════════════════════════════════════════════════════════════════════════
@@ -299,7 +297,7 @@ function TestApp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 13. HIERARCHICAL INVALIDATION
+// 12. HIERARCHICAL INVALIDATION
 //
 // Invalidating a path invalidates all descendants.
 // ═══════════════════════════════════════════════════════════════════════════
