@@ -72,7 +72,72 @@ export class TransportError extends Schema.TaggedError<TransportError>()(
 ) {}
 
 // =============================================================================
-// Models
+// Response Schemas
+// =============================================================================
+
+/**
+ * Successful response envelope
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export class Success extends Schema.TaggedClass<Success>()("Success", {
+  id: Schema.String,
+  value: Schema.Unknown,
+}) {}
+
+/**
+ * Failure response envelope
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export class Failure extends Schema.TaggedClass<Failure>()("Failure", {
+  id: Schema.String,
+  error: Schema.Unknown,
+}) {}
+
+/**
+ * Stream chunk response
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export class StreamChunk extends Schema.TaggedClass<StreamChunk>()("StreamChunk", {
+  id: Schema.String,
+  chunk: Schema.Unknown,
+}) {}
+
+/**
+ * Stream end signal
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export class StreamEnd extends Schema.TaggedClass<StreamEnd>()("StreamEnd", {
+  id: Schema.String,
+}) {}
+
+/**
+ * Response for query/mutation (single response)
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export const TransportResponse = Schema.Union(Success, Failure)
+export type TransportResponse = typeof TransportResponse.Type
+
+/**
+ * Response for streams (multiple responses)
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export const StreamResponse = Schema.Union(StreamChunk, StreamEnd, Failure)
+export type StreamResponse = typeof StreamResponse.Type
+
+// =============================================================================
+// Request
 // =============================================================================
 
 /**
@@ -81,23 +146,11 @@ export class TransportError extends Schema.TaggedError<TransportError>()(
  * @since 1.0.0
  * @category models
  */
-export interface TransportRequest {
-  readonly id: string
-  readonly tag: string
-  readonly payload: unknown
-}
-
-/**
- * Response received from transport
- * 
- * @since 1.0.0
- * @category models
- */
-export type TransportResponse =
-  | { readonly _tag: "Success"; readonly id: string; readonly value: unknown }
-  | { readonly _tag: "Failure"; readonly id: string; readonly error: unknown }
-  | { readonly _tag: "StreamChunk"; readonly id: string; readonly chunk: unknown }
-  | { readonly _tag: "StreamEnd"; readonly id: string }
+export class TransportRequest extends Schema.Class<TransportRequest>("TransportRequest")({
+  id: Schema.String,
+  tag: Schema.String,
+  payload: Schema.Unknown,
+}) {}
 
 /**
  * Transport service interface
@@ -107,18 +160,18 @@ export type TransportResponse =
  */
 export interface TransportService {
   /**
-   * Send a request and receive response(s)
+   * Send a query/mutation request and receive a single response
    */
   readonly send: (
     request: TransportRequest
   ) => Effect.Effect<TransportResponse, TransportError>
   
   /**
-   * Send a streaming request
+   * Send a streaming request and receive multiple responses
    */
   readonly sendStream: (
     request: TransportRequest
-  ) => Stream.Stream<TransportResponse, TransportError>
+  ) => Stream.Stream<StreamResponse, TransportError>
 }
 
 /**
@@ -274,17 +327,28 @@ const sendHttp = (
       )
     }
     
-    const data = yield* Effect.tryPromise({
+    const json = yield* Effect.tryPromise({
       try: () => response.json(),
       catch: (cause) =>
         new TransportError({
           reason: "Protocol",
-          message: "Failed to parse response",
+          message: "Failed to parse response JSON",
           cause,
         }),
     })
     
-    return data as TransportResponse
+    // Validate response envelope
+    const decoded = yield* Schema.decodeUnknown(TransportResponse)(json).pipe(
+      Effect.mapError((cause) =>
+        new TransportError({
+          reason: "Protocol",
+          message: "Invalid response envelope",
+          cause,
+        })
+      )
+    )
+    
+    return decoded
   })
 
 const sendHttpStream = (
@@ -292,9 +356,17 @@ const sendHttpStream = (
   request: TransportRequest,
   fetchFn: typeof globalThis.fetch,
   headers?: HttpOptions["headers"]
-): Stream.Stream<TransportResponse, TransportError> =>
+): Stream.Stream<StreamResponse, TransportError> =>
+  // TODO: Implement proper SSE/streaming - for now just convert single response
   Stream.fromEffect(
-    sendHttp(url, request, fetchFn, headers, undefined)
+    sendHttp(url, request, fetchFn, headers, undefined).pipe(
+      Effect.map((response): StreamResponse => {
+        if (Schema.is(Success)(response)) {
+          return new StreamChunk({ id: response.id, chunk: response.value })
+        }
+        return response // Failure passes through
+      })
+    )
   )
 
 // =============================================================================
@@ -359,8 +431,6 @@ export const mock = <D extends Router.Definition>(
     send: (request) =>
       Effect.gen(function* () {
         // Convert tag to path (e.g., "@api/users/list" → "users.list")
-        // For now, assume the path is stored somehow or derivable
-        // In practice, we'd need the router to look this up
         const path = tagToPath(request.tag)
         const handler = handlerMap[path]
         
@@ -376,18 +446,10 @@ export const mock = <D extends Router.Definition>(
         const result = yield* handler(request.payload).pipe(Effect.either)
         
         if (result._tag === "Left") {
-          return {
-            _tag: "Failure" as const,
-            id: request.id,
-            error: result.left,
-          }
+          return new Failure({ id: request.id, error: result.left })
         }
         
-        return {
-          _tag: "Success" as const,
-          id: request.id,
-          value: result.right,
-        }
+        return new Success({ id: request.id, value: result.right })
       }),
       
     sendStream: (request) =>
@@ -407,17 +469,14 @@ export const mock = <D extends Router.Definition>(
           
           const result = yield* Effect.mapError(
             handler(request.payload),
-            () => new TransportError({
+            (err) => new TransportError({
               reason: "Protocol",
               message: "Handler error",
+              cause: err,
             })
           )
           
-          return {
-            _tag: "Success" as const,
-            id: request.id,
-            value: result,
-          } satisfies TransportResponse
+          return new StreamChunk({ id: request.id, chunk: result })
         })
       ),
   })
