@@ -376,3 +376,45 @@ type UnionToIntersection<U> = (
  * @category type-level
  */
 export type DefinitionOf<R> = R extends Router<infer D> ? D : never
+
+// =============================================================================
+// Middleware Helpers
+// =============================================================================
+
+/**
+ * A definition with middleware attached
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export interface DefinitionWithMiddleware<D extends Definition> {
+  readonly definition: D
+  readonly middlewares: ReadonlyArray<unknown>
+}
+
+/**
+ * Wrap a definition with middleware that applies to all procedures in it
+ * 
+ * @since 1.0.0
+ * @category middleware
+ * @example
+ * ```ts
+ * const appRouter = Router.make("@api", {
+ *   users: Router.withMiddleware([AuthMiddleware], {
+ *     list: listUsers,
+ *     get: getUser,
+ *   }),
+ *   admin: Router.withMiddleware([AuthMiddleware, AdminMiddleware], {
+ *     delete: deleteUser,
+ *   }),
+ *   health: healthCheck, // No middleware
+ * })
+ * ```
+ */
+export const withMiddleware = <D extends Definition, M extends ReadonlyArray<unknown>>(
+  middlewares: M,
+  definition: D
+): DefinitionWithMiddleware<D> => ({
+  definition,
+  middlewares,
+})

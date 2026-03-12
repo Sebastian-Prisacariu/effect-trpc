@@ -111,6 +111,11 @@ export interface Server<D extends Router.Definition, R = never> {
   readonly router: Router.Router<D>
   
   /**
+   * Server-level middlewares
+   */
+  readonly middlewares: ReadonlyArray<unknown>
+  
+  /**
    * Handle a single request (query/mutation)
    */
   readonly handle: (
@@ -290,6 +295,7 @@ export const make = <D extends Router.Definition, R = never>(
   return {
     [ServerTypeId]: ServerTypeId,
     router,
+    middlewares: [],
     handle,
     handleStream,
   }
@@ -377,3 +383,30 @@ export const isServer = (value: unknown): value is Server<any, any> =>
   typeof value === "object" &&
   value !== null &&
   ServerTypeId in value
+
+// =============================================================================
+// Middleware
+// =============================================================================
+
+/**
+ * Add middleware to a server
+ * 
+ * Middleware runs before all handlers in the server.
+ * Multiple calls chain middlewares (outer to inner).
+ * 
+ * @since 1.0.0
+ * @category middleware
+ * @example
+ * ```ts
+ * const server = Server.make(appRouter, handlers).pipe(
+ *   Server.middleware(LoggingMiddleware),
+ *   Server.middleware(AuthMiddleware),
+ * )
+ * ```
+ */
+export const middleware = <M>(m: M) => <D extends Router.Definition, R>(
+  server: Server<D, R>
+): Server<D, R> => ({
+  ...server,
+  middlewares: [...server.middlewares, m],
+})

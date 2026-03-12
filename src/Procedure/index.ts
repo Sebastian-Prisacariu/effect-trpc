@@ -82,6 +82,22 @@ export interface ProcedureBase<
   readonly payloadSchema: Payload
   readonly successSchema: Success
   readonly errorSchema: Error
+  
+  /**
+   * Middleware applied to this procedure
+   */
+  readonly middlewares: ReadonlyArray<unknown>
+  
+  /**
+   * Add middleware to this procedure
+   * 
+   * @example
+   * ```ts
+   * const secureQuery = Procedure.query({ success: Secret })
+   *   .middleware(AuthMiddleware)
+   * ```
+   */
+  readonly middleware: <M>(middleware: M) => this
 }
 
 /**
@@ -177,8 +193,15 @@ export type Any = Query<any, any, any> | Mutation<any, any, any, any> | Stream<a
 
 const ProcedureProto = {
   [ProcedureTypeId]: ProcedureTypeId,
+  middlewares: [] as ReadonlyArray<unknown>,
   pipe() {
     return pipeArguments(this, arguments)
+  },
+  middleware<M>(this: Any, m: M): Any {
+    const clone = Object.create(Object.getPrototypeOf(this))
+    Object.assign(clone, this)
+    clone.middlewares = [...this.middlewares, m]
+    return clone
   },
 }
 
