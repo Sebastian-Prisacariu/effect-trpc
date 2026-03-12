@@ -1,11 +1,11 @@
 /**
  * Router Module Tests
  * 
- * Tests for composing procedures into routers, nesting, and path resolution.
+ * Tests for composing procedures into routers with auto-derived tags.
  */
 
 import { describe, it, expect, expectTypeOf } from "vitest"
-import { Effect, Schema, Context } from "effect"
+import { Schema } from "effect"
 
 import { Procedure, Router } from "../src/index.js"
 
@@ -29,75 +29,103 @@ class NotFoundError extends Schema.TaggedError<NotFoundError>()(
 ) {}
 
 // =============================================================================
-// Test Services (for requirement tracking)
-// =============================================================================
-
-class UserRepository extends Context.Tag("UserRepository")<
-  UserRepository,
-  {
-    readonly findAll: () => Effect.Effect<User[]>
-    readonly findById: (id: string) => Effect.Effect<User, NotFoundError>
-  }
->() {}
-
-class ContractRepository extends Context.Tag("ContractRepository")<
-  ContractRepository,
-  {
-    readonly findAll: () => Effect.Effect<Contract[]>
-  }
->() {}
-
-// =============================================================================
 // Router.make Tests
 // =============================================================================
 
 describe("Router.make", () => {
-  it("creates a router from procedure definitions", () => {
-    const router = Router.make({
-      list: Procedure.query({ success: Schema.Array(User) }),
-      byId: Procedure.query({
-        payload: Schema.Struct({ id: Schema.String }),
-        success: User,
-        error: NotFoundError,
-      }),
-    })
-
-    expect(router._tag).toBe("Router")
-    expect(router.definition.list).toBeDefined()
-    expect(router.definition.byId).toBeDefined()
-  })
-
-  it("creates a router from procedure families", () => {
-    const userProcedures = Procedure.family("user", {
+  it("creates a router with a tag", () => {
+    const router = Router.make("@api", {
       list: Procedure.query({ success: Schema.Array(User) }),
     })
 
-    const router = Router.make({
-      user: userProcedures,
-    })
-
-    expect(router._tag).toBe("Router")
+    expect(router.tag).toBe("@api")
   })
 
-  it("supports nested routers", () => {
-    const publicContracts = Procedure.family("public", {
-      list: Procedure.query({ success: Schema.Array(Contract) }),
+  it("accepts nested plain objects", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
     })
 
-    const privateContracts = Procedure.family("private", {
-      list: Procedure.query({ success: Schema.Array(Contract) }),
+    expect(router.procedures).toHaveLength(2)
+  })
+
+  it("supports deeply nested structures", () => {
+    const router = Router.make("@api", {
+      contracts: {
+        public: {
+          list: Procedure.query({ success: Schema.Array(Contract) }),
+        },
+        private: {
+          list: Procedure.query({ success: Schema.Array(Contract) }),
+        },
+      },
     })
 
-    const contractsRouter = Router.make({
-      public: publicContracts,
-      private: privateContracts,
+    expect(router.procedures).toHaveLength(2)
+  })
+
+  it("derives tags from root tag and path", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+      },
+      health: Procedure.query({ success: Schema.String }),
     })
 
-    const appRouter = Router.make({
-      contracts: contractsRouter,
+    // Check derived tags
+    expect(Router.tagOf(router, "users.list")).toBe("@api/users/list")
+    expect(Router.tagOf(router, "health")).toBe("@api/health")
+  })
+
+  it("creates Effect RPC router internally", () => {
+    const router = Router.make("@api", {
+      list: Procedure.query({ success: Schema.Array(User) }),
     })
 
-    expect(appRouter.definition.contracts).toBeDefined()
+    expect(router.rpcRouter).toBeDefined()
+  })
+})
+
+// =============================================================================
+// Path Mapping Tests
+// =============================================================================
+
+describe("Path mapping", () => {
+  it("maps paths to tags", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
+    })
+
+    expect(router.pathMap.pathToTag.get("users.list")).toBe("@api/users/list")
+    expect(router.pathMap.pathToTag.get("users.get")).toBe("@api/users/get")
+  })
+
+  it("maps tags to paths", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+      },
+    })
+
+    expect(router.pathMap.tagToPath.get("@api/users/list")).toBe("users.list")
+  })
+
+  it("includes namespace paths for hierarchical invalidation", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
+    })
+
+    // The "users" path should also be mapped for hierarchical invalidation
+    expect(router.pathMap.pathToTag.get("users")).toBe("@api/users")
   })
 })
 
@@ -106,55 +134,21 @@ describe("Router.make", () => {
 // =============================================================================
 
 describe("Router.paths", () => {
-  it("returns all procedure paths in flat router", () => {
-    const router = Router.make({
-      list: Procedure.query({ success: Schema.Array(User) }),
-      byId: Procedure.query({ success: User }),
-      create: Procedure.mutation({ success: User, invalidates: [] }),
+  it("returns all procedure paths", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
+      health: Procedure.query({ success: Schema.String }),
     })
 
     const paths = Router.paths(router)
 
-    expect(paths).toContain("list")
-    expect(paths).toContain("byId")
-    expect(paths).toContain("create")
+    expect(paths).toContain("users.list")
+    expect(paths).toContain("users.get")
+    expect(paths).toContain("health")
     expect(paths).toHaveLength(3)
-  })
-
-  it("returns dotted paths for nested routers", () => {
-    const userProcedures = Procedure.family("user", {
-      list: Procedure.query({ success: Schema.Array(User) }),
-      byId: Procedure.query({ success: User }),
-    })
-
-    const router = Router.make({
-      user: userProcedures,
-    })
-
-    const paths = Router.paths(router)
-
-    expect(paths).toContain("user.list")
-    expect(paths).toContain("user.byId")
-  })
-
-  it("returns deeply nested paths", () => {
-    const publicContracts = Procedure.family("public", {
-      list: Procedure.query({ success: Schema.Array(Contract) }),
-      get: Procedure.query({ success: Contract }),
-    })
-
-    const contractsRouter = Router.make({
-      public: publicContracts,
-    })
-
-    const router = Router.make({
-      contracts: contractsRouter,
-    })
-
-    const paths = Router.paths(router)
-
-    expect(paths).toContain("contracts.public.list")
-    expect(paths).toContain("contracts.public.get")
   })
 })
 
@@ -164,33 +158,31 @@ describe("Router.paths", () => {
 
 describe("Router.get", () => {
   it("retrieves procedure by path", () => {
-    const listQuery = Procedure.query({ success: Schema.Array(User) })
-
-    const router = Router.make({
-      list: listQuery,
+    const router = Router.make("@api", {
+      list: Procedure.query({ success: Schema.Array(User) }),
     })
 
     const procedure = Router.get(router, "list")
 
-    expect(procedure).toBe(listQuery)
+    expect(procedure).toBeDefined()
+    expect(procedure?.procedure._tag).toBe("Query")
   })
 
   it("retrieves nested procedure by dotted path", () => {
-    const userProcedures = Procedure.family("user", {
-      list: Procedure.query({ success: Schema.Array(User) }),
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+      },
     })
 
-    const router = Router.make({
-      user: userProcedures,
-    })
+    const procedure = Router.get(router, "users.list")
 
-    const procedure = Router.get(router, "user.list")
-
-    expect(procedure?._tag).toBe("Query")
+    expect(procedure).toBeDefined()
+    expect(procedure?.tag).toBe("@api/users/list")
   })
 
   it("returns undefined for non-existent path", () => {
-    const router = Router.make({
+    const router = Router.make("@api", {
       list: Procedure.query({ success: Schema.Array(User) }),
     })
 
@@ -201,23 +193,54 @@ describe("Router.get", () => {
 })
 
 // =============================================================================
-// Router.merge Tests
+// Hierarchical Invalidation Tests
 // =============================================================================
 
-describe("Router.merge", () => {
-  it("merges multiple routers", () => {
-    const userRouter = Router.make({
-      list: Procedure.query({ success: Schema.Array(User) }),
+describe("Hierarchical invalidation", () => {
+  it("getChildPaths returns all paths under a prefix", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+        create: Procedure.mutation({ success: User, invalidates: [] }),
+      },
+      health: Procedure.query({ success: Schema.String }),
     })
 
-    const contractRouter = Router.make({
-      list: Procedure.query({ success: Schema.Array(Contract) }),
+    const childPaths = router.pathMap.getChildPaths("users")
+
+    expect(childPaths).toContain("users")
+    expect(childPaths).toContain("users.list")
+    expect(childPaths).toContain("users.get")
+    expect(childPaths).toContain("users.create")
+    expect(childPaths).not.toContain("health")
+  })
+
+  it("tagsToInvalidate returns all tags under a path", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
     })
 
-    // Note: this would overwrite 'list' - maybe we need namespacing
-    const merged = Router.merge(userRouter, contractRouter)
+    const tags = Router.tagsToInvalidate(router, "users")
 
-    expect(merged._tag).toBe("Router")
+    expect(tags).toContain("@api/users")
+    expect(tags).toContain("@api/users/list")
+    expect(tags).toContain("@api/users/get")
+  })
+
+  it("tagsToInvalidate for leaf path returns only that tag", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+      },
+    })
+
+    const tags = Router.tagsToInvalidate(router, "users.list")
+
+    expect(tags).toEqual(["@api/users/list"])
   })
 })
 
@@ -226,71 +249,62 @@ describe("Router.merge", () => {
 // =============================================================================
 
 describe("Router type inference", () => {
-  it("infers correct type for flat definition", () => {
-    const router = Router.make({
-      list: Procedure.query({ success: Schema.Array(User) }),
-      byId: Procedure.query({
-        payload: Schema.Struct({ id: Schema.String }),
-        success: User,
-      }),
+  it("Paths extracts all valid paths", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        get: Procedure.query({ success: User }),
+      },
+      health: Procedure.query({ success: Schema.String }),
     })
 
-    type Def = typeof router.definition
+    type AllPaths = Router.Paths<typeof router.definition>
     
-    expectTypeOf<Def>().toHaveProperty("list")
-    expectTypeOf<Def>().toHaveProperty("byId")
+    // These should be valid paths
+    const validPaths: AllPaths[] = ["users.list", "users.get", "health"]
+    expect(validPaths).toHaveLength(3)
   })
 
-  it("flattens families in type", () => {
-    const userProcedures = Procedure.family("user", {
-      list: Procedure.query({ success: Schema.Array(User) }),
-    })
+  it("ProcedureAt extracts procedure type at path", () => {
+    const definition = {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+      },
+    }
 
-    const router = Router.make({
-      user: userProcedures,
-    })
-
-    // The flattened type should have user.list accessible
-    type Flattened = typeof router.flattened
+    type ListProcedure = Router.ProcedureAt<typeof definition, "users.list">
     
-    expectTypeOf<Flattened>().toHaveProperty("user")
+    // Should be a Query
+    expectTypeOf<ListProcedure>().toMatchTypeOf<Procedure.Query<any, any, any>>()
   })
 })
 
 // =============================================================================
-// Requirement Tracking Tests
+// Mixed Procedure Types Tests
 // =============================================================================
 
-describe("Router requirements", () => {
-  it("tracks service requirements from handlers", () => {
-    const router = Router.make({
-      list: Procedure.query({
-        success: Schema.Array(User),
-        handler: () =>
-          Effect.flatMap(UserRepository, (repo) => repo.findAll()),
-      }),
+describe("Mixed procedure types", () => {
+  it("router can contain queries, mutations, and streams", () => {
+    const router = Router.make("@api", {
+      users: {
+        list: Procedure.query({ success: Schema.Array(User) }),
+        create: Procedure.mutation({
+          payload: Schema.Struct({ name: Schema.String }),
+          success: User,
+          invalidates: ["users"],
+        }),
+        watch: Procedure.stream({ success: User }),
+      },
     })
 
-    // The router should have UserRepository as a requirement
-    type Requirements = Router.RequirementsOf<typeof router>
-    expectTypeOf<Requirements>().toMatchTypeOf<UserRepository>()
-  })
+    expect(router.procedures).toHaveLength(3)
 
-  it("combines requirements from multiple procedures", () => {
-    const router = Router.make({
-      users: Procedure.query({
-        success: Schema.Array(User),
-        handler: () =>
-          Effect.flatMap(UserRepository, (repo) => repo.findAll()),
-      }),
-      contracts: Procedure.query({
-        success: Schema.Array(Contract),
-        handler: () =>
-          Effect.flatMap(ContractRepository, (repo) => repo.findAll()),
-      }),
-    })
+    const list = Router.get(router, "users.list")
+    const create = Router.get(router, "users.create")
+    const watch = Router.get(router, "users.watch")
 
-    type Requirements = Router.RequirementsOf<typeof router>
-    expectTypeOf<Requirements>().toMatchTypeOf<UserRepository | ContractRepository>()
+    expect(list?.procedure._tag).toBe("Query")
+    expect(create?.procedure._tag).toBe("Mutation")
+    expect(watch?.procedure._tag).toBe("Stream")
   })
 })

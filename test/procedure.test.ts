@@ -6,9 +6,8 @@
  */
 
 import { describe, it, expect, expectTypeOf } from "vitest"
-import { Effect, Schema } from "effect"
+import { Schema } from "effect"
 
-// These imports will fail until we implement them
 import { Procedure } from "../src/index.js"
 
 // =============================================================================
@@ -47,7 +46,7 @@ describe("Procedure.query", () => {
     })
 
     expect(listUsers._tag).toBe("Query")
-    expect(listUsers.success).toBeDefined()
+    expect(listUsers.successSchema).toBeDefined()
   })
 
   it("creates a query with payload and success", () => {
@@ -57,8 +56,8 @@ describe("Procedure.query", () => {
     })
 
     expect(getUserById._tag).toBe("Query")
-    expect(getUserById.payload).toBeDefined()
-    expect(getUserById.success).toBeDefined()
+    expect(getUserById.payloadSchema).toBeDefined()
+    expect(getUserById.successSchema).toBeDefined()
   })
 
   it("creates a query with payload, success, and error", () => {
@@ -69,7 +68,7 @@ describe("Procedure.query", () => {
     })
 
     expect(getUserById._tag).toBe("Query")
-    expect(getUserById.error).toBeDefined()
+    expect(getUserById.errorSchema).toBeDefined()
   })
 
   it("infers payload type correctly", () => {
@@ -78,9 +77,8 @@ describe("Procedure.query", () => {
       success: User,
     })
 
-    // Type test: payload should be { id: string }
-    type Payload = Procedure.PayloadOf<typeof getUserById>
-    expectTypeOf<Payload>().toEqualTypeOf<{ readonly id: string }>()
+    type PayloadType = Procedure.Payload<typeof getUserById>
+    expectTypeOf<PayloadType>().toEqualTypeOf<{ readonly id: string }>()
   })
 
   it("infers success type correctly", () => {
@@ -88,8 +86,8 @@ describe("Procedure.query", () => {
       success: Schema.Array(User),
     })
 
-    type Success = Procedure.SuccessOf<typeof listUsers>
-    expectTypeOf<Success>().toEqualTypeOf<readonly User[]>()
+    type SuccessType = Procedure.Success<typeof listUsers>
+    expectTypeOf<SuccessType>().toEqualTypeOf<readonly User[]>()
   })
 
   it("infers error type correctly", () => {
@@ -99,8 +97,8 @@ describe("Procedure.query", () => {
       error: NotFoundError,
     })
 
-    type Error = Procedure.ErrorOf<typeof getUserById>
-    expectTypeOf<Error>().toEqualTypeOf<NotFoundError>()
+    type ErrorType = Procedure.Error<typeof getUserById>
+    expectTypeOf<ErrorType>().toEqualTypeOf<NotFoundError>()
   })
 
   it("defaults error to never when not specified", () => {
@@ -108,17 +106,17 @@ describe("Procedure.query", () => {
       success: Schema.Array(User),
     })
 
-    type Error = Procedure.ErrorOf<typeof listUsers>
-    expectTypeOf<Error>().toEqualTypeOf<never>()
+    type ErrorType = Procedure.Error<typeof listUsers>
+    expectTypeOf<ErrorType>().toEqualTypeOf<never>()
   })
 
-  it("defaults payload to void when not specified", () => {
+  it("is pipeable", () => {
     const listUsers = Procedure.query({
       success: Schema.Array(User),
     })
 
-    type Payload = Procedure.PayloadOf<typeof listUsers>
-    expectTypeOf<Payload>().toEqualTypeOf<void>()
+    // Should have pipe method
+    expect(typeof listUsers.pipe).toBe("function")
   })
 })
 
@@ -131,31 +129,40 @@ describe("Procedure.mutation", () => {
     const createUser = Procedure.mutation({
       payload: CreateUserInput,
       success: User,
-      invalidates: ["user.list"],
+      invalidates: ["users"],
     })
 
     expect(createUser._tag).toBe("Mutation")
-    expect(createUser.invalidates).toEqual(["user.list"])
+    expect(createUser.invalidates).toEqual(["users"])
   })
 
   it("accepts multiple invalidation targets", () => {
     const deleteUser = Procedure.mutation({
       payload: Schema.Struct({ id: Schema.String }),
       success: Schema.Void,
-      invalidates: ["user.list", "user.byId", "user.count"],
+      invalidates: ["users", "users.count", "stats"],
     })
 
-    expect(createUser.invalidates).toHaveLength(3)
+    expect(deleteUser.invalidates).toHaveLength(3)
+  })
+
+  it("accepts empty invalidates array", () => {
+    const doSomething = Procedure.mutation({
+      success: Schema.Void,
+      invalidates: [],
+    })
+
+    expect(doSomething.invalidates).toEqual([])
   })
 
   it("accepts optimistic update config", () => {
     const createUser = Procedure.mutation({
       payload: CreateUserInput,
       success: User,
-      invalidates: ["user.list"],
+      invalidates: ["users"],
       optimistic: {
-        target: "user.list",
-        reducer: (users: User[], input) => [
+        target: "users",
+        reducer: (users: readonly User[], input: CreateUserInput) => [
           ...users,
           new User({ id: `temp-${Date.now()}`, ...input }),
         ],
@@ -163,18 +170,18 @@ describe("Procedure.mutation", () => {
     })
 
     expect(createUser.optimistic).toBeDefined()
-    expect(createUser.optimistic?.target).toBe("user.list")
+    expect(createUser.optimistic?.target).toBe("users")
   })
 
   it("optimistic reconcile is optional", () => {
     const createUser = Procedure.mutation({
       payload: CreateUserInput,
       success: User,
-      invalidates: ["user.list"],
+      invalidates: ["users"],
       optimistic: {
-        target: "user.list",
-        reducer: (users: User[], input) => [...users, input as User],
-        reconcile: (users, input, result) =>
+        target: "users",
+        reducer: (users: readonly User[], input: CreateUserInput) => [...users, input as unknown as User],
+        reconcile: (users, _input, result) =>
           users.map((u) => (u.id.startsWith("temp") ? result : u)),
       },
     })
@@ -182,13 +189,15 @@ describe("Procedure.mutation", () => {
     expect(createUser.optimistic?.reconcile).toBeDefined()
   })
 
-  // @ts-expect-error - mutation without invalidates should be a type error
-  it.fails("fails without invalidates", () => {
-    Procedure.mutation({
+  it("extracts invalidates type", () => {
+    const createUser = Procedure.mutation({
       payload: CreateUserInput,
       success: User,
-      // Missing invalidates!
+      invalidates: ["users", "users.count"] as const,
     })
+
+    type Invalidates = Procedure.Invalidates<typeof createUser>
+    expectTypeOf<Invalidates>().toEqualTypeOf<readonly ["users", "users.count"]>()
   })
 })
 
@@ -211,8 +220,8 @@ describe("Procedure.stream", () => {
     })
 
     // Each chunk is a User, not User[]
-    type Success = Procedure.SuccessOf<typeof watchUsers>
-    expectTypeOf<Success>().toEqualTypeOf<User>()
+    type SuccessType = Procedure.Success<typeof watchUsers>
+    expectTypeOf<SuccessType>().toEqualTypeOf<User>()
   })
 
   it("accepts payload for filtered streams", () => {
@@ -224,43 +233,49 @@ describe("Procedure.stream", () => {
       }),
     })
 
-    expect(watchUserActivity.payload).toBeDefined()
+    expect(watchUserActivity.payloadSchema).toBeDefined()
   })
 })
 
 // =============================================================================
-// Family Tests
+// Guards Tests
 // =============================================================================
 
-describe("Procedure.family", () => {
-  it("groups procedures with a namespace", () => {
-    const userProcedures = Procedure.family("user", {
-      list: Procedure.query({ success: Schema.Array(User) }),
-      byId: Procedure.query({
-        payload: Schema.Struct({ id: Schema.String }),
-        success: User,
-        error: NotFoundError,
-      }),
-      create: Procedure.mutation({
-        payload: CreateUserInput,
-        success: User,
-        invalidates: ["user.list"],
-      }),
-    })
+describe("Procedure guards", () => {
+  it("isProcedure identifies procedures", () => {
+    const q = Procedure.query({ success: User })
+    const m = Procedure.mutation({ success: User, invalidates: [] })
+    const s = Procedure.stream({ success: User })
 
-    expect(userProcedures._tag).toBe("Family")
-    expect(userProcedures.name).toBe("user")
-    expect(userProcedures.procedures.list).toBeDefined()
-    expect(userProcedures.procedures.byId).toBeDefined()
-    expect(userProcedures.procedures.create).toBeDefined()
+    expect(Procedure.isProcedure(q)).toBe(true)
+    expect(Procedure.isProcedure(m)).toBe(true)
+    expect(Procedure.isProcedure(s)).toBe(true)
+    expect(Procedure.isProcedure({})).toBe(false)
+    expect(Procedure.isProcedure(null)).toBe(false)
   })
 
-  it("family procedures are accessible by name", () => {
-    const userProcedures = Procedure.family("user", {
-      list: Procedure.query({ success: Schema.Array(User) }),
-    })
+  it("isQuery identifies queries", () => {
+    const q = Procedure.query({ success: User })
+    const m = Procedure.mutation({ success: User, invalidates: [] })
 
-    expect(userProcedures.procedures.list._tag).toBe("Query")
+    expect(Procedure.isQuery(q)).toBe(true)
+    expect(Procedure.isQuery(m)).toBe(false)
+  })
+
+  it("isMutation identifies mutations", () => {
+    const q = Procedure.query({ success: User })
+    const m = Procedure.mutation({ success: User, invalidates: [] })
+
+    expect(Procedure.isMutation(q)).toBe(false)
+    expect(Procedure.isMutation(m)).toBe(true)
+  })
+
+  it("isStream identifies streams", () => {
+    const q = Procedure.query({ success: User })
+    const s = Procedure.stream({ success: User })
+
+    expect(Procedure.isStream(q)).toBe(false)
+    expect(Procedure.isStream(s)).toBe(true)
   })
 })
 
@@ -269,22 +284,6 @@ describe("Procedure.family", () => {
 // =============================================================================
 
 describe("Procedure type safety", () => {
-  it("query cannot have invalidates", () => {
-    // @ts-expect-error - queries don't have invalidates
-    Procedure.query({
-      success: User,
-      invalidates: ["something"],
-    })
-  })
-
-  it("mutation requires invalidates", () => {
-    // @ts-expect-error - mutations require invalidates
-    Procedure.mutation({
-      payload: CreateUserInput,
-      success: User,
-    })
-  })
-
   it("success is required for all procedure types", () => {
     // @ts-expect-error - success is required
     Procedure.query({})
@@ -298,11 +297,19 @@ describe("Procedure type safety", () => {
     Procedure.stream({})
   })
 
-  it("payload schema must be a Schema", () => {
-    // @ts-expect-error - payload must be a Schema
-    Procedure.query({
-      payload: { id: "string" },
+  it("mutation requires invalidates", () => {
+    // @ts-expect-error - invalidates is required
+    Procedure.mutation({
+      payload: CreateUserInput,
       success: User,
+    })
+  })
+
+  it("query does not accept invalidates", () => {
+    // @ts-expect-error - queries don't have invalidates
+    Procedure.query({
+      success: User,
+      invalidates: ["something"],
     })
   })
 })
