@@ -368,3 +368,11 @@ type UnionToIntersection<U> = (
 ) extends (x: infer I) => void
   ? I
   : never
+
+/**
+ * Extract the definition type from a Router
+ * 
+ * @since 1.0.0
+ * @category type-level
+ */
+export type DefinitionOf<R> = R extends Router<infer D> ? D : never
