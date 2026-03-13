@@ -202,15 +202,37 @@ export const make = <D extends Router.Definition, R = never>(
   
   buildHandlerMap(router.definition, handlers as Record<string, unknown>, [], [])
   
+  // Convert tag to path (e.g., "@api/users/list" → "users.list")
+  const tagToPath = (tag: string): string => {
+    const withoutPrefix = tag.startsWith("@") ? tag.slice(tag.indexOf("/") + 1) : tag
+    return withoutPrefix.replace(/\//g, ".")
+  }
+  
+  // Get procedure type
+  const getProcedureType = (proc: Procedure.Any): Middleware.ProcedureType => {
+    if (Procedure.isMutation(proc)) return "mutation"
+    if (Procedure.isStream(proc)) return "stream"
+    return "query"
+  }
+  
   // Create MiddlewareRequest from TransportRequest
-  const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
+  const toMiddlewareRequest = (
+    request: Transport.TransportRequest,
+    procedureType: Middleware.ProcedureType,
+    meta: Record<string, unknown> = {},
+    signal?: AbortSignal
+  ): Middleware.MiddlewareRequest => ({
     id: request.id,
     tag: request.tag,
+    path: tagToPath(request.tag),
+    type: procedureType,
     headers: {
       get: (name: string) => request.headers[name.toLowerCase()] ?? null,
       has: (name: string) => name.toLowerCase() in request.headers,
     },
     payload: request.payload,
+    meta,
+    signal,
   })
   
   // Handle a single request
@@ -235,7 +257,12 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    const middlewareRequest = toMiddlewareRequest(request)
+    // TODO: Add meta support to procedures
+    const middlewareRequest = toMiddlewareRequest(
+      request, 
+      getProcedureType(procedure),
+      {} // procedure.meta when implemented
+    )
     
     return Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
       Effect.matchEffect({
@@ -249,7 +276,13 @@ export const make = <D extends Router.Definition, R = never>(
             Effect.matchEffect({
               onFailure: (error) =>
                 Schema.encode(procedure.errorSchema)(error).pipe(
-                  Effect.orElseSucceed(() => error),
+                  Effect.catchAll((encodeError) =>
+                    Effect.logWarning("Failed to encode error response", {
+                      tag: request.tag,
+                      encodeError,
+                      originalError: error,
+                    }).pipe(Effect.as(error))
+                  ),
                   Effect.map((encodedError) => new Transport.Failure({
                     id: request.id,
                     error: encodedError,
@@ -257,7 +290,13 @@ export const make = <D extends Router.Definition, R = never>(
                 ),
               onSuccess: (value) =>
                 Schema.encode(procedure.successSchema)(value).pipe(
-                  Effect.orElseSucceed(() => value),
+                  Effect.catchAll((encodeError) =>
+                    Effect.logWarning("Failed to encode success response", {
+                      tag: request.tag,
+                      encodeError,
+                      originalValue: value,
+                    }).pipe(Effect.as(value))
+                  ),
                   Effect.map((encodedValue) => new Transport.Success({
                     id: request.id,
                     value: encodedValue,
@@ -306,7 +345,12 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    const middlewareRequest = toMiddlewareRequest(request)
+    // TODO: Add meta support to procedures
+    const middlewareRequest = toMiddlewareRequest(
+      request,
+      "stream",
+      {} // procedure.meta when implemented
+    )
     
     const makeStream = (payload: unknown): Stream.Stream<Transport.StreamResponse, never, R> => {
       const stream = handler(payload) as Stream.Stream<unknown, unknown, R>
@@ -362,7 +406,12 @@ export const make = <D extends Router.Definition, R = never>(
     return Stream.unwrap(
       Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
         Effect.map(makeStream),
-        Effect.orElseSucceed(() => failureStream)
+        Effect.catchAll((decodeError) =>
+          Effect.logWarning("Stream payload validation failed", {
+            tag: request.tag,
+            decodeError,
+          }).pipe(Effect.as(failureStream))
+        )
       )
     ) as Stream.Stream<Transport.StreamResponse, never, R>
   }
@@ -462,11 +511,17 @@ export const toHttpHandler = <D extends Router.Definition, R>(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(response),
       })),
-      Effect.catchAll(() => Effect.succeed({
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "Invalid request" }),
-      }))
+      Effect.catchAll((error) =>
+        // JSON parsing errors should return 400 Bad Request
+        // Other errors return 500 Internal Server Error
+        Effect.logWarning("HTTP handler error", { error }).pipe(
+          Effect.as({
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ error: "Invalid request" }),
+          })
+        )
+      )
     ) as Effect.Effect<HttpResponse, never, R>
 }
 
@@ -610,15 +665,25 @@ export const middleware = <M extends Middleware.Applicable>(m: M) => <D extends 
 ): Server<D, R> => {
   const newMiddlewares = [...server.middlewares, m] as ReadonlyArray<Middleware.Applicable>
   
-  // Create MiddlewareRequest from TransportRequest
+  // Convert tag to path (e.g., "@api/users/list" → "users.list")
+  const tagToPath = (tag: string): string => {
+    const withoutPrefix = tag.startsWith("@") ? tag.slice(tag.indexOf("/") + 1) : tag
+    return withoutPrefix.replace(/\//g, ".")
+  }
+  
+  // Create MiddlewareRequest from TransportRequest (server-level doesn't know procedure type)
   const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
     id: request.id,
     tag: request.tag,
+    path: tagToPath(request.tag),
+    type: "query", // Default - actual type determined in handler
     headers: {
       get: (name: string) => request.headers[name.toLowerCase()] ?? null,
       has: (name: string) => name.toLowerCase() in request.headers,
     },
     payload: request.payload,
+    meta: {},
+    signal: undefined,
   })
   
   // Wrap the original handle with middleware execution

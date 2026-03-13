@@ -42,3 +42,21 @@ export * as Transport from "./Transport/index.js"
 export * as Result from "./Result/index.js"
 export * as Middleware from "./Middleware/index.js"
 export * as Reactivity from "./Reactivity/index.js"
+export * as SSR from "./SSR/index.js"
+
+// Convenience type exports
+export type {
+  InferProcedurePayload,
+  InferProcedureSuccess,
+  InferProcedureError,
+  InferMutationInvalidates,
+  InferRouterPaths,
+  InferRouterDefinition,
+  InferRouterProcedure,
+  TransportRequest,
+  TransportResponse,
+  TransportError,
+  MiddlewareRequest,
+  ProcedureType,
+  PathReactivityService,
+} from "./types.js"

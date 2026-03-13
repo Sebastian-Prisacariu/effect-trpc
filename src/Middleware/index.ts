@@ -67,16 +67,43 @@ export type MiddlewareTagTypeId = typeof MiddlewareTagTypeId
 // =============================================================================
 
 /**
+ * Procedure type
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export type ProcedureType = "query" | "mutation" | "stream"
+
+/**
  * Request information available to middleware
  * 
  * @since 1.0.0
  * @category models
  */
 export interface MiddlewareRequest {
+  /** Unique request ID */
   readonly id: string
+  
+  /** Full tag (e.g., "@api/users/list") */
   readonly tag: string
+  
+  /** Dot-separated path (e.g., "users.list") */
+  readonly path: string
+  
+  /** Procedure type: "query" | "mutation" | "stream" */
+  readonly type: ProcedureType
+  
+  /** Request headers */
   readonly headers: Headers
+  
+  /** Request payload (decoded) */
   readonly payload: unknown
+  
+  /** Procedure-level metadata (from procedure.meta()) */
+  readonly meta: Record<string, unknown>
+  
+  /** AbortSignal for request cancellation */
+  readonly signal?: AbortSignal
 }
 
 /**
