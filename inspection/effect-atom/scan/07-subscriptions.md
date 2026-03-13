@@ -1,48 +1,58 @@
-# H7: Subscription Management in Effect Atom
+# H7: Effect-Atom Subscription Management
 
-## Executive Summary
+## Overview
 
-Effect Atom provides a sophisticated subscription management system built on a **dependency graph with automatic cleanup**. Unlike manual `useState` management, it uses a centralized `Registry` that tracks observer relationships, automatically disposes subscriptions when atoms are no longer needed, and provides batching for efficient updates.
+Effect-atom implements a sophisticated subscription management system built around a **reactive dependency graph** with automatic lifecycle management. The system centers on the `Registry` and its internal `Node` class, providing fine-grained control over subscription lifecycles, cleanup, and memory management.
 
 ## Core Architecture
 
-### 1. The Registry Pattern
+### 1. Registry - The Subscription Coordinator
+
+The `Registry` serves as the central coordinator for all atom subscriptions:
 
 ```typescript
-// Registry.ts - Central subscription coordinator
 interface Registry {
   readonly subscribe: <A>(
-    atom: Atom<A>, 
-    f: (_: A) => void, 
+    atom: Atom<A>,
+    f: (_: A) => void,
     options?: { readonly immediate?: boolean }
-  ) => () => void  // Returns cleanup function
+  ) => () => void  // Returns unsubscribe function
+  
   readonly mount: <A>(atom: Atom<A>) => () => void
   readonly dispose: () => void
+  readonly reset: () => void
 }
 ```
 
-The Registry acts as the single source of truth for:
-- All atom instances (stored as `Node<A>`)
-- Observer relationships (parent-child dependencies)
-- Subscription cleanup
+**Key Design Decisions:**
+- Subscriptions return cleanup functions (unsubscribe callbacks)
+- `mount()` is implemented as `subscribe(atom, constVoid, { immediate: true })`
+- The registry tracks all nodes in a `Map<Atom | string, Node>`
 
-### 2. Node-Based Dependency Graph
+### 2. Node - The Subscription Unit
 
-Each atom is backed by a `Node<A>` that tracks:
+Each atom gets a corresponding `Node` in the registry that manages its subscriptions:
 
 ```typescript
-// internal/registry.ts:275-291
 class Node<A> {
-  parents: Array<Node<any>> = []      // Atoms this depends on
-  previousParents: Array<Node<any>> | undefined
-  children: Array<Node<any>> = []     // Atoms that depend on this
-  listeners: Set<() => void> = new Set()  // External subscribers
-  lifetime: Lifetime<A> | undefined   // Scoped resource management
+  // Subscription listeners
+  listeners: Set<() => void> = new Set()
   
+  // Dependency tracking (for automatic cleanup)
+  parents: Array<Node<any>> = []
+  previousParents: Array<Node<any>> | undefined
+  children: Array<Node<any>> = []
+  
+  // Lifecycle state
+  state: NodeState
+  lifetime: Lifetime<A> | undefined
+  
+  // Removal eligibility
   get canBeRemoved(): boolean {
     return !this.atom.keepAlive && 
            this.listeners.size === 0 && 
-           this.children.length === 0
+           this.children.length === 0 &&
+           this.state !== 0
   }
 }
 ```
@@ -50,231 +60,368 @@ class Node<A> {
 ### 3. Subscription Flow
 
 ```
-Component subscribes to Atom
-       |
-       v
-Registry.subscribe(atom, callback)
-       |
-       v
-Node.ensureNode(atom) - creates or retrieves node
-       |
-       v
-Node.value() - evaluates atom.read(ctx)
-       |
-       v
-ctx.get(dependency) - adds parent relationship
-       |
-       v
-Returns cleanup function
+subscribe(atom, callback)
+    |
+    v
+ensureNode(atom)  --> Creates Node if needed, removes from timeout bucket if present
+    |
+    v
+node.value()  --> Recomputes if stale (creates Lifetime)
+    |
+    v
+node.subscribe(listener)  --> Add to listeners Set
+    |
+    v
+Returns cleanup function that:
+  1. Removes listener from Set
+  2. Schedules node removal if canBeRemoved
 ```
 
-## Subscription Lifecycle
+## Subscription Patterns
 
-### Phase 1: Subscribe
+### Pattern 1: Direct Subscription via Registry
 
 ```typescript
-// internal/registry.ts:105-119
-subscribe<A>(atom: Atom<A>, f: (_: A) => void, options?): () => void {
+// Source: internal/registry.ts:105-119
+subscribe<A>(atom: Atom<A>, f: (_: A) => void, options?: { readonly immediate?: boolean }): () => void {
   const node = this.ensureNode(atom)
   if (options?.immediate) {
-    f(node.value())  // Immediately invoke with current value
+    f(node.value())  // Immediate notification with current value
   }
   const remove = node.subscribe(function() {
-    f(node._value)
+    f(node._value)  // Subsequent notifications
   })
   return () => {
     remove()
     if (node.canBeRemoved) {
-      this.scheduleNodeRemoval(node)  // Automatic cleanup!
+      this.scheduleNodeRemoval(node)
     }
   }
 }
 ```
 
-### Phase 2: Notify on Change
+### Pattern 2: Context-Based Subscription (within Atom reads)
 
 ```typescript
-// internal/registry.ts:420-426
-notify(): void {
-  this.listeners.forEach(notifyListener)
-  
-  if (batchState.phase === BatchPhase.commit) {
-    batchState.notify.delete(this)
+// Source: internal/registry.ts:643-649
+subscribe<A>(this: Lifetime<any>, atom: Atom<A>, f: (_: A) => void, options?: {
+  readonly immediate?: boolean
+}): void {
+  if (this.disposed) {
+    throw disposedError(this.node.atom)
   }
+  // Automatically adds cleanup to lifetime finalizers
+  this.addFinalizer(this.node.registry.subscribe(atom, f, options))
 }
 ```
 
-### Phase 3: Cleanup
+### Pattern 3: Stream-Based Subscription
 
 ```typescript
-// internal/registry.ts:440-462
-remove() {
-  this.state = NodeState.removed
-  this.listeners.clear()  // Remove all subscriptions
-  
-  if (this.lifetime !== undefined) {
-    this.disposeLifetime()  // Call all registered finalizers
-  }
-  
-  // Cascade cleanup to parents
-  if (this.previousParents !== undefined) {
-    for (const parent of this.previousParents) {
-      parent.removeChild(this)
-      if (parent.canBeRemoved) {
-        this.registry.removeNode(parent)
-      }
-    }
-  }
-}
-```
-
-## Lifetime-Based Cleanup
-
-Effect Atom uses a `Lifetime` context that provides:
-
-```typescript
-// internal/registry.ts:495-501
-interface Lifetime<A> extends Atom.Context {
-  readonly node: Node<A>
-  finalizers: Array<() => void> | undefined
-  disposed: boolean
-  readonly dispose: () => void
-}
-```
-
-### Adding Finalizers
-
-```typescript
-// Atom.ts - Context interface
-interface Context {
-  addFinalizer(this: Context, f: () => void): void
-  subscribe<A>(this: Context, atom: Atom<A>, f: (_: A) => void): void
-  mount<A>(this: Context, atom: Atom<A>): void
-}
-```
-
-### Example Usage
-
-```typescript
-// Atom.ts:1746-1758 - Window focus subscription
-export const windowFocusSignal: Atom<number> = readable((get) => {
-  let count = 0
-  function update() {
-    if (document.visibilityState === "visible") {
-      get.setSelf(++count)
-    }
-  }
-  window.addEventListener("visibilitychange", update)
-  get.addFinalizer(() => {
-    window.removeEventListener("visibilitychange", update)  // Automatic cleanup!
-  })
-  return count
-})
-```
-
-## React Integration: useSyncExternalStore
-
-Effect Atom leverages React 18's `useSyncExternalStore` for subscriptions:
-
-```typescript
-// Hooks.ts:28-56
-interface AtomStore<A> {
-  readonly subscribe: (f: () => void) => () => void
-  readonly snapshot: () => A
-  readonly getServerSnapshot: () => A
-}
-
-function makeStore<A>(registry: Registry, atom: Atom<A>): AtomStore<A> {
-  return {
-    subscribe(f) {
-      return registry.subscribe(atom, f)  // Returns cleanup automatically
-    },
-    snapshot() {
-      return registry.get(atom)
-    },
-    getServerSnapshot() {
-      return Atom.getServerValue(atom, registry)
-    }
-  }
-}
-
-function useStore<A>(registry: Registry, atom: Atom<A>): A {
-  const store = makeStore(registry, atom)
-  return React.useSyncExternalStore(
-    store.subscribe, 
-    store.snapshot, 
-    store.getServerSnapshot
+// Source: internal/registry.ts:666-691
+stream<A>(this: Lifetime<any>, atom: Atom<A>, options?: {
+  readonly withoutInitialValue?: boolean
+  readonly bufferSize?: number
+}) {
+  return pipe(
+    Effect.acquireRelease(
+      Queue.bounded<A>(options?.bufferSize ?? 16),
+      Queue.shutdown
+    ),
+    Effect.tap((queue) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          return this.node.registry.subscribe(atom, (_) => {
+            Queue.unsafeOffer(queue, _)
+          }, { immediate: options?.withoutInitialValue !== true })
+        }),
+        (cancel) => Effect.sync(cancel)
+      )
+    ),
+    Effect.map((queue) => Stream.fromQueue(queue)),
+    Stream.unwrapScoped
   )
 }
 ```
 
-### Benefits over useState
+## Cleanup Mechanisms
 
-| Manual useState | Effect Atom |
-|-----------------|-------------|
-| Manual useEffect for subscription | Automatic via useSyncExternalStore |
-| Manual cleanup in useEffect return | Automatic via Registry |
-| Re-renders on every state change | Batched notifications |
-| No SSR support | getServerSnapshot support |
-| No concurrent mode safety | useSyncExternalStore is concurrent-safe |
+### 1. Lifetime-Based Cleanup
 
-## Automatic Disposal Strategies
-
-### Strategy 1: Listener Count Tracking
+The `Lifetime` object tracks finalizers for each atom's read cycle:
 
 ```typescript
-// internal/registry.ts:294-296
-get canBeRemoved(): boolean {
-  return !this.atom.keepAlive && 
-         this.listeners.size === 0 && 
-         this.children.length === 0
+interface Lifetime<A> extends Atom.Context {
+  finalizers: Array<() => void> | undefined
+  disposed: boolean
+  readonly dispose: () => void
+}
+
+// Cleanup execution (LIFO order)
+dispose(this: Lifetime<any>): void {
+  this.disposed = true
+  if (this.finalizers === undefined) return
+  
+  const finalizers = this.finalizers
+  this.finalizers = undefined
+  // Reverse order cleanup (LIFO)
+  for (let i = finalizers.length - 1; i >= 0; i--) {
+    finalizers[i]()
+  }
 }
 ```
 
-### Strategy 2: Idle TTL (Time To Live)
+### 2. Parent-Child Dependency Cleanup
+
+When a node is invalidated, its lifetime is disposed and parent relationships are tracked for cleanup:
 
 ```typescript
-// Atom.ts:157-171
-export const setIdleTTL: {
-  (duration: DurationInput): <A extends Atom<any>>(self: A) => A
-} = dual(2, (self, durationInput) => {
-  const duration = Duration.decode(durationInput)
-  return {
-    ...self,
-    keepAlive: !Duration.isFinite(duration),
-    idleTTL: Duration.isFinite(duration) ? Duration.toMillis(duration) : undefined
+disposeLifetime(): void {
+  if (this.lifetime !== undefined) {
+    this.lifetime.dispose()
+    this.lifetime = undefined
   }
-})
+
+  if (this.parents.length !== 0) {
+    this.previousParents = this.parents  // Track for later cleanup
+    this.parents = []
+  }
+}
 ```
 
-### Strategy 3: Keep Alive
+After recomputation, stale parents are cleaned up:
 
 ```typescript
-// Atom.ts:1413-1417
-export const keepAlive = <A extends Atom<any>>(self: A): A =>
-  Object.assign(Object.create(Object.getPrototypeOf(self)), {
-    ...self,
-    keepAlive: true  // Never auto-dispose
+// Source: internal/registry.ts:306-316
+if (this.previousParents) {
+  const parents = this.previousParents
+  this.previousParents = undefined
+  for (let i = 0; i < parents.length; i++) {
+    parents[i].removeChild(this)
+    if (parents[i].canBeRemoved) {
+      this.registry.scheduleNodeRemoval(parents[i])
+    }
+  }
+}
+```
+
+### 3. Node Removal with Cascade
+
+```typescript
+remove() {
+  this.state = NodeState.removed
+  this.listeners.clear()
+
+  if (this.lifetime === undefined) return
+
+  this.disposeLifetime()
+
+  // Cascade cleanup to parents
+  if (this.previousParents === undefined) return
+  const parents = this.previousParents
+  this.previousParents = undefined
+  for (let i = 0; i < parents.length; i++) {
+    parents[i].removeChild(this)
+    if (parents[i].canBeRemoved) {
+      this.registry.removeNode(parents[i])  // Recursive removal
+    }
+  }
+}
+```
+
+### 4. Idle TTL-Based Cleanup
+
+Atoms with `idleTTL` are placed in timeout buckets for deferred cleanup:
+
+```typescript
+// Source: internal/registry.ts:188-215
+setNodeTimeout(node: Node<any>): void {
+  if (this.nodeTimeoutBucket.has(node)) return
+
+  let idleTTL = node.atom.idleTTL ?? this.defaultIdleTTL!
+  // ... TTL calculation
+  const bucket = timestamp - (timestamp % this.timeoutResolution) + this.timeoutResolution
+
+  let entry = this.timeoutBuckets.get(bucket)
+  if (entry === undefined) {
+    entry = [
+      new Set<Node<any>>(),
+      setTimeout(() => this.sweepBucket(bucket), bucket - Date.now())
+    ]
+    this.timeoutBuckets.set(bucket, entry)
+  }
+  entry[0].add(node)
+  this.nodeTimeoutBucket.set(node, bucket)
+}
+```
+
+### 5. Registry-Level Cleanup
+
+```typescript
+reset(): void {
+  // Clear all timeout buckets
+  this.timeoutBuckets.forEach(([, handle]) => clearTimeout(handle))
+  this.timeoutBuckets.clear()
+  this.nodeTimeoutBucket.clear()
+
+  // Remove all nodes
+  this.nodes.forEach((node) => node.remove())
+  this.nodes.clear()
+}
+
+dispose(): void {
+  this.disposed = true
+  this.reset()
+}
+```
+
+## Effect Integration for Cleanup
+
+### runCallbackSync - Cancellable Effect Execution
+
+```typescript
+// Source: internal/runtime.ts:35-63
+export const runCallbackSync = <R, ER = never>(runtime: Runtime.Runtime<R>) => {
+  const runFork = Runtime.runFork(runtime)
+  return <A, E>(
+    effect: Effect.Effect<A, E, R>,
+    onExit: (exit: Exit.Exit<A, E | ER>) => void,
+    uninterruptible = false
+  ): (() => void) | undefined => {
+    // Fast path for sync values
+    const op = fastPath(effect)
+    if (op) {
+      onExit(op)
+      return undefined  // No cleanup needed
+    }
+    
+    // Async path with fiber
+    const scheduler = new SyncScheduler()
+    const fiberRuntime = runFork(effect, { scheduler })
+    scheduler.flush()
+    
+    const result = fiberRuntime.unsafePoll()
+    if (result) {
+      onExit(result)
+      return undefined  // Completed synchronously
+    }
+    
+    // Running async - return cancel function
+    fiberRuntime.addObserver(onExit)
+    function cancel() {
+      fiberRuntime.removeObserver(onExit)
+      if (!uninterruptible) {
+        fiberRuntime.unsafeInterruptAsFork(FiberId.none)
+      }
+    }
+    return cancel
+  }
+}
+```
+
+### Effect-Based Atom Cleanup
+
+```typescript
+// Source: Atom.ts:482-525
+function makeEffect<A, E>(
+  ctx: Context,
+  effect: Effect.Effect<A, E, Scope.Scope | AtomRegistry>,
+  initialValue: Result.Result<A, E>,
+  runtime = Runtime.defaultRuntime,
+  uninterruptible = false
+): Result.Result<A, E> {
+  const previous = ctx.self<Result.Result<A, E>>()
+
+  // Create a scope for this effect
+  const scope = Effect.runSync(Scope.make())
+  ctx.addFinalizer(() => {
+    Effect.runFork(Scope.close(scope, Exit.void))
   })
+  
+  // ... runtime setup
+  
+  const cancel = runCallbackSync(scopedRuntime)(
+    effect,
+    function(exit) {
+      syncResult = Result.fromExitWithPrevious(exit, previous)
+      if (isAsync) {
+        ctx.setSelf(syncResult)
+      }
+    },
+    uninterruptible
+  )
+  
+  if (cancel !== undefined) {
+    ctx.addFinalizer(cancel)  // Add cancel to lifetime finalizers
+  }
+  
+  // ... return result
+}
 ```
 
-## Batching for Performance
+## AtomRef Subscription Pattern
 
-Effect Atom batches updates to prevent cascading re-renders:
+The `AtomRef` module provides a simpler, synchronous subscription model:
 
 ```typescript
-// internal/registry.ts:780-802
+// Source: AtomRef.ts:87-99
+subscribe(f: (a: A) => void): () => void {
+  this.listeners.push(f)
+  this.listenerCount++
+
+  return () => {
+    const index = this.listeners.indexOf(f)
+    if (index !== -1) {
+      // Swap-and-pop for efficient removal
+      this.listeners[index] = this.listeners[this.listenerCount - 1]
+      this.listeners.pop()
+      this.listenerCount--
+    }
+  }
+}
+```
+
+### MapRef - Filtered Subscriptions
+
+```typescript
+// Source: AtomRef.ts:139-149
+subscribe(f: (a: B) => void): () => void {
+  let previous = this.transform(this.parent.value)
+  return this.parent.subscribe((a) => {
+    const next = this.transform(a)
+    if (Equal.equals(next, previous)) {
+      return  // Skip if unchanged
+    }
+    previous = next
+    f(next)
+  })
+}
+```
+
+## Batching and Notification
+
+### Batch State Management
+
+```typescript
+// Source: internal/registry.ts:772-802
+export const batchState = globalValue("@effect-atom/atom/Registry/batchState", () => ({
+  phase: BatchPhase.disabled,
+  depth: 0,
+  stale: [] as Array<Node<any>>,
+  notify: new Set<Node<any>>()
+}))
+
 export function batch(f: () => void): void {
   batchState.phase = BatchPhase.collect
   batchState.depth++
   try {
     f()
     if (batchState.depth === 1) {
-      // Rebuild stale nodes
-      for (const node of batchState.stale) {
-        batchRebuildNode(node)
+      // Rebuild all stale nodes
+      for (let i = 0; i < batchState.stale.length; i++) {
+        batchRebuildNode(batchState.stale[i])
       }
-      // Then notify all listeners once
+      // Commit phase - notify all
       batchState.phase = BatchPhase.commit
       for (const node of batchState.notify) {
         node.notify()
@@ -291,161 +438,36 @@ export function batch(f: () => void): void {
 }
 ```
 
-## Effect Integration
-
-### Stream Subscriptions
+### Node Notification
 
 ```typescript
-// internal/registry.ts:666-691
-stream<A>(this: Lifetime<any>, atom: Atom<A>, options?) {
-  return pipe(
-    Effect.acquireRelease(
-      Queue.bounded<A>(options?.bufferSize ?? 16),
-      Queue.shutdown
-    ),
-    Effect.tap((queue) =>
-      Effect.acquireRelease(
-        Effect.sync(() => {
-          return this.node.registry.subscribe(atom, (_) => {
-            Queue.unsafeOffer(queue, _)
-          }, { immediate: options?.withoutInitialValue !== true })
-        }),
-        (cancel) => Effect.sync(cancel)  // Cleanup in Effect's scope
-      )
-    ),
-    Effect.map((queue) => Stream.fromQueue(queue)),
-    Stream.unwrapScoped
-  )
-}
-```
+// Source: internal/registry.ts:420-426
+notify(): void {
+  this.listeners.forEach(notifyListener)
 
-### Effect-based Atom Execution
-
-```typescript
-// Atom.ts:482-525
-function makeEffect<A, E>(
-  ctx: Context,
-  effect: Effect.Effect<A, E, Scope.Scope | AtomRegistry>,
-  initialValue: Result.Result<A, E>,
-  runtime = Runtime.defaultRuntime,
-  uninterruptible = false
-): Result.Result<A, E> {
-  const scope = Effect.runSync(Scope.make())
-  ctx.addFinalizer(() => {
-    Effect.runFork(Scope.close(scope, Exit.void))  // Scope-based cleanup
-  })
-  
-  const cancel = runCallbackSync(scopedRuntime)(
-    effect,
-    function(exit) {
-      syncResult = Result.fromExitWithPrevious(exit, previous)
-      if (isAsync) {
-        ctx.setSelf(syncResult)
-      }
-    },
-    uninterruptible
-  )
-  
-  if (cancel !== undefined) {
-    ctx.addFinalizer(cancel)  // Register fiber cancellation
-  }
-  
-  // ...
-}
-```
-
-## AtomRef: Observable Value Containers
-
-For fine-grained subscriptions on object properties:
-
-```typescript
-// AtomRef.ts:87-99
-class ReadonlyRefImpl<A> implements ReadonlyRef<A> {
-  listeners: Array<(a: A) => void> = []
-  listenerCount = 0
-
-  subscribe(f: (a: A) => void): () => void {
-    this.listeners.push(f)
-    this.listenerCount++
-    return () => {
-      const index = this.listeners.indexOf(f)
-      if (index !== -1) {
-        this.listeners[index] = this.listeners[this.listenerCount - 1]
-        this.listeners.pop()
-        this.listenerCount--
-      }
-    }
+  if (batchState.phase === BatchPhase.commit) {
+    batchState.notify.delete(this)
   }
 }
 ```
 
-### Derived Subscriptions (MapRef)
+## Key Patterns Summary
 
-```typescript
-// AtomRef.ts:139-149
-subscribe(f: (a: B) => void): () => void {
-  let previous = this.transform(this.parent.value)
-  return this.parent.subscribe((a) => {
-    const next = this.transform(a)
-    if (Equal.equals(next, previous)) {
-      return  // Skip notification if value unchanged
-    }
-    previous = next
-    f(next)
-  })
-}
-```
+| Pattern | Location | Purpose |
+|---------|----------|---------|
+| **Unsubscribe Return** | Registry.subscribe | Standard cleanup pattern |
+| **Lifetime Finalizers** | Lifetime.addFinalizer | Automatic cleanup on recompute |
+| **Parent-Child Tracking** | Node.parents/children | Dependency graph cleanup |
+| **Idle TTL Buckets** | Registry.timeoutBuckets | Memory-efficient delayed cleanup |
+| **Effect Cancellation** | runCallbackSync | Fiber interrupt on cleanup |
+| **Scope Management** | makeEffect | Effect scope lifecycle |
+| **Batch Deferred Notify** | batchState | Coalesced notifications |
 
-## Comparison: Manual vs Effect Atom
+## Design Insights for effect-trpc
 
-### Manual Approach (Current tRPC-Effect)
-
-```typescript
-function useTRPCQuery<T>(key: string) {
-  const [state, setState] = useState<QueryState<T>>({ status: 'idle' })
-  
-  useEffect(() => {
-    const subscription = client.subscribe(key, {
-      onData: (data) => setState({ status: 'success', data }),
-      onError: (error) => setState({ status: 'error', error })
-    })
-    
-    return () => subscription.unsubscribe()  // Manual cleanup
-  }, [key])
-  
-  return state
-}
-```
-
-### Effect Atom Approach
-
-```typescript
-// Define once
-const queryAtom = runtime.atom((get) => 
-  client.query(key).pipe(
-    Effect.map(data => Result.success(data)),
-    Effect.catchAll(e => Effect.succeed(Result.failure(e)))
-  )
-)
-
-// Use anywhere - cleanup is automatic
-function useQuery() {
-  return useAtomValue(queryAtom)
-}
-```
-
-## Key Takeaways
-
-1. **Automatic Cleanup**: Registry tracks all subscriptions and cleans up when atoms have no more listeners or children
-
-2. **Dependency Tracking**: Parent-child relationships are automatically maintained, enabling cascading invalidation and cleanup
-
-3. **React 18 Integration**: `useSyncExternalStore` provides concurrent-mode-safe subscriptions with SSR support
-
-4. **Batching**: Multiple updates are batched to minimize re-renders
-
-5. **Scope Integration**: Effect's `Scope` mechanism is used for cleanup of async operations
-
-6. **Configurable Lifecycle**: `keepAlive`, `idleTTL`, and `autoDispose` give fine-grained control
-
-7. **No Manual useEffect**: Subscription management is declarative via atom definitions, not imperative via hooks
+1. **Cleanup Hierarchy**: Subscriptions should integrate with Effect's Scope for automatic cleanup
+2. **Dependency Tracking**: Automatic parent-child relationships enable cascade cleanup
+3. **Lazy Cleanup**: TTL-based cleanup prevents premature resource disposal
+4. **Batching**: Deferred notifications during batch operations prevent glitches
+5. **Fast Path**: Synchronous values skip fiber overhead
+6. **LIFO Finalizers**: Reverse-order cleanup ensures proper resource ordering

@@ -1,315 +1,197 @@
-# Type System and Exports Analysis
+# Type System Analysis - effect-trpc
 
-## Summary
+**Generated:** 2024-12-XX  
+**Focus:** Type exports, test type errors, tsconfig configuration
 
-The codebase has a well-designed type system with comprehensive exports, but there are a few notable gaps and issues.
+## Table of Contents
+
+1. [Export Structure](#1-export-structure)
+2. [Type Hierarchy](#2-type-hierarchy)
+3. [Test Files Analysis](#3-test-files-analysis)
+4. [TSConfig Configuration](#4-tsconfig-configuration)
+5. [Type Errors & Missing Exports](#5-type-errors--missing-exports)
+6. [Recommendations](#6-recommendations)
 
 ---
 
-## 1. Exported Types Inventory
+## 1. Export Structure
 
 ### Main Entry Point (`src/index.ts`)
 
-Exports 8 namespace modules:
+```typescript
+// Namespace exports (runtime + types)
+export * as Procedure from "./Procedure/index.js"
+export * as Router from "./Router/index.js"
+export * as Client from "./Client/index.js"
+export * as Server from "./Server/index.js"
+export * as Transport from "./Transport/index.js"
+export * as Result from "./Result/index.js"
+export * as Middleware from "./Middleware/index.js"
+export * as Reactivity from "./Reactivity/index.js"
+export * as SSR from "./SSR/index.js"
 
-| Module | Path |
-|--------|------|
-| `Procedure` | `./Procedure/index.js` |
-| `Router` | `./Router/index.js` |
-| `Client` | `./Client/index.js` |
-| `Server` | `./Server/index.js` |
-| `Transport` | `./Transport/index.js` |
-| `Result` | `./Result/index.js` |
-| `Middleware` | `./Middleware/index.js` |
-| `Reactivity` | `./Reactivity/index.js` |
+// Convenience type exports
+export type {
+  InferProcedurePayload,
+  InferProcedureSuccess,
+  InferProcedureError,
+  InferMutationInvalidates,
+  InferRouterPaths,
+  InferRouterDefinition,
+  InferRouterProcedure,
+  TransportRequest,
+  TransportResponse,
+  TransportError,
+  MiddlewareRequest,
+  ProcedureType,
+  PathReactivityService,
+} from "./types.js"
+```
 
-### Procedure Module (`src/Procedure/index.ts`)
+### Module Export Summary
 
-**Types Exported:**
-- `ProcedureBase<Payload, Success, Error>` - Base interface
-- `Query<Payload, Success, Error>` - Query procedure model
-- `Mutation<Payload, Success, Error, Invalidates>` - Mutation model
-- `Stream<Payload, Success, Error>` - Stream model  
-- `Any` - Union type of all procedures
-- `QueryOptions<P, S, E>` - Query constructor options
-- `MutationOptions<P, S, E, Paths, Target>` - Mutation constructor options
-- `StreamOptions<P, S, E>` - Stream constructor options
-- `OptimisticConfig<Target, Payload, Success>` - Optimistic update config
-- `AutoComplete<T>` - Autocomplete helper type
-- `Payload<P>` - Extract payload type
-- `Success<P>` - Extract success type
-- `Error<P>` - Extract error type
-- `Invalidates<P>` - Extract invalidates array type
-
-**Functions Exported:**
-- `query(options)` - Create query procedure
-- `mutation(options)` - Create mutation procedure
-- `stream(options)` - Create stream procedure
-- `isProcedure(u)` - Type guard
-- `isQuery(u)` - Type guard
-- `isMutation(u)` - Type guard
-- `isStream(u)` - Type guard
-
-**Internal (not exported to consumers):**
-- `ProcedureTypeId`, `QueryTypeId`, `MutationTypeId`, `StreamTypeId` - Symbol identifiers
-
-### Router Module (`src/Router/index.ts`)
-
-**Types Exported:**
-- `Definition` - Nested record of procedures
-- `TaggedProcedure` - Procedure with path/tag metadata
-- `PathMap` - Path/tag lookup structure
-- `Router<D>` - The Router interface
-- `Paths<D, Prefix>` - Extract all paths from definition
-- `ProcedureAt<D, Path>` - Get procedure at path
-- `Flatten<D, Prefix>` - Flatten nested definition
-- `DefinitionOf<R>` - Extract definition from router
-- `DefinitionWithMiddleware<D>` - Definition wrapped with middleware
-
-**Functions Exported:**
-- `make(tag, definition)` - Create router
-- `paths(router)` - Get all paths
-- `get(router, path)` - Get procedure by path
-- `tagOf(router, path)` - Get tag for path
-- `pathOf(router, tag)` - Get path for tag
-- `tagsToInvalidate(router, path)` - Get all tags to invalidate
-- `withMiddleware(middlewares, definition)` - Wrap with middleware
-
-### Client Module (`src/Client/index.ts`)
-
-**Types Exported:**
-- `ClientService` - Internal RPC service interface
-- `Client<R>` - Full client with Provider
-- `BoundClient<R>` - Client with runtime bound
-- `ProviderProps` - React Provider props
-- `ClientProxy<D>` - Recursive proxy type
-- `ProcedureClient<P>` - Client for single procedure
-- `QueryClient<P, S, E>` - Query procedure client
-- `MutationClient<P, S, E>` - Mutation procedure client
-- `StreamClient<P, S, E>` - Stream procedure client
-- `UseQueryFn<P, S, E>` - useQuery signature
-- `QueryOptions` - Query hook options
-- `QueryResult<S, E>` - Query hook result
-- `UseMutationFn<P, S, E>` - useMutation signature
-- `MutationOptions<S, E>` - Mutation hook options
-- `MutationResult<P, S, E>` - Mutation hook result
-- `UseStreamFn<P, S, E>` - useStream signature
-- `StreamOptions` - Stream hook options
-- `StreamResult<S, E>` - Stream hook result
-- `Definition` - Re-export from Router
-
-**Services Exported:**
-- `ClientServiceTag` - Context.Tag for service injection
-- `ClientServiceLive` - Layer implementation
-
-**Functions Exported:**
-- `make(router)` - Create client from router
-
-**NOT EXPORTED but used in tests:**
-- `ProcedurePayload<P>` - Tests use this but it's not defined!
-- `ProcedureSuccess<P>` - Tests use this but it's not defined!
-- `ProcedureError<P>` - Tests use this but it's not defined!
-
-### Server Module (`src/Server/index.ts`)
-
-**Types Exported:**
-- `HandlerFor<P, R>` - Extract handler type for procedure
-- `Handlers<D, R>` - Full handlers structure
-- `Server<D, R>` - Server interface
-- `HttpHandlerOptions` - HTTP adapter options
-
-**Functions Exported:**
-- `make(router, handlers)` - Create server
-- `isServer(value)` - Type guard
-- `middleware(m)` - Add middleware to server
-- `toHttpHandler(server, options)` - Create HTTP handler
-- `toFetchHandler(server, layer)` - Create fetch-compatible handler
-- `toNextApiHandler(server, layer)` - Create Next.js handler
-
-### Transport Module (`src/Transport/index.ts`)
-
-**Types Exported:**
-- `TransportError` - Schema.TaggedError for transport errors
-- `Success` - Schema.TaggedClass for success response
-- `Failure` - Schema.TaggedClass for failure response
-- `StreamChunk` - Schema.TaggedClass for stream chunks
-- `StreamEnd` - Schema.TaggedClass for stream end
-- `TransportResponse` - Union schema type
-- `StreamResponse` - Union schema type
-- `TransportRequest` - Schema.Class for requests
-- `TransportService` - Service interface
-- `Transport` - Context.Tag
-- `HttpOptions` - HTTP transport options
-- `MockHandlers<D>` - Mock handlers type
-
-**Functions Exported:**
-- `http(url, options)` - Create HTTP transport layer
-- `mock(handlers)` - Create mock transport layer
-- `make(service)` - Create custom transport layer
-- `loopback(server)` - Create loopback transport
-- `isTransientError(error)` - Check if retryable
-- `generateRequestId()` - Generate unique ID
-
-### Middleware Module (`src/Middleware/index.ts`)
-
-**Types Exported:**
-- `MiddlewareRequest` - Request context for middleware
-- `Headers` - Minimal headers interface
-- `MiddlewareConfig<Provides, Failure>` - Config type
-- `MiddlewareTag<Self, Provides, Failure>` - Middleware tag
-- `MiddlewareImpl<Provides, Failure>` - Implementation interface
-- `WrapMiddlewareImpl<Failure>` - Wrap middleware implementation
-- `CombinedMiddleware<Tags>` - Combined middlewares
-- `Applicable` - Union of applicable middleware
-- `Provides<M>` - Extract provides type
-- `Failure<M>` - Extract failure type
-
-**Functions Exported:**
-- `Tag(id, provides)` - Create middleware tag
-- `implement(tag, run)` - Implement providing middleware
-- `implementWrap(tag, wrap)` - Implement wrapping middleware
-- `all(...tags)` - Combine middlewares
-- `execute(middlewares, request, handler)` - Execute middleware chain
-- `isMiddlewareTag(value)` - Type guard
-- `isCombinedMiddleware(value)` - Type guard
-- `isApplicable(value)` - Type guard
-
-### Reactivity Module (`src/Reactivity/index.ts`)
-
-**Types Exported:**
-- `InvalidationCallback` - Callback type
-- `ReactivityService` - Service interface
-- `Reactivity` - Context.Tag
-
-**Functions Exported:**
-- `make()` - Create ReactivityService
-- `subscribe(tag, callback)` - Effect-based subscribe
-- `invalidate(tags)` - Effect-based invalidate
-- `getSubscribedTags` - Effect-based getter
-- `pathsToTags(rootTag, paths)` - Convert paths to tags
-- `shouldInvalidate(subscribedTag, invalidatedTag)` - Check invalidation
-
-**Layers Exported:**
-- `ReactivityLive` - Layer implementation
-
-### Result Module (`src/Result/index.ts`)
-
-**Re-exports from @effect-atom/atom/Result:**
-- All exports from the atom package
+| Module | Types Exported | Runtime Exports |
+|--------|---------------|-----------------|
+| Procedure | `Query`, `Mutation`, `Stream`, `Any`, `Payload`, `Success`, `Error`, `Invalidates`, `AutoComplete`, `QueryTypeId`, `MutationTypeId`, `StreamTypeId`, `ProcedureTypeId`, `ProcedureBase`, `OptimisticConfig`, `QueryOptions`, `MutationOptions`, `StreamOptions` | `query`, `mutation`, `stream`, `isProcedure`, `isQuery`, `isMutation`, `isStream` |
+| Router | `Definition`, `Router`, `TaggedProcedure`, `PathMap`, `Paths`, `ProcedureAt`, `Flatten`, `DefinitionOf`, `DefinitionWithMiddleware`, `RouterTypeId` | `make`, `paths`, `get`, `tagOf`, `pathOf`, `tagsToInvalidate`, `withMiddleware` |
+| Client | `Client`, `BoundClient`, `ClientProxy`, `ProcedureClient`, `QueryClient`, `MutationClient`, `StreamClient`, `ProviderProps`, `QueryOptions`, `QueryResult`, `MutationOptions`, `MutationResult`, `StreamOptions`, `StreamResult`, `UseQueryFn`, `UseMutationFn`, `UseStreamFn`, `ClientService`, `ClientTypeId` | `make`, `ClientServiceTag`, `ClientServiceLive` |
+| Server | `Server`, `Handlers`, `HandlerFor`, `HttpHandlerOptions`, `ServerTypeId` | `make`, `toHttpHandler`, `toFetchHandler`, `toNextApiHandler`, `isServer`, `middleware` |
+| Transport | `Transport`, `TransportService`, `TransportRequest`, `TransportResponse`, `StreamResponse`, `TransportError`, `Success`, `Failure`, `StreamChunk`, `StreamEnd`, `HttpOptions`, `MockHandlers`, `TransportTypeId` | `http`, `mock`, `make`, `loopback`, `isTransientError`, `generateRequestId` |
+| Middleware | `MiddlewareTag`, `MiddlewareImpl`, `WrapMiddlewareImpl`, `CombinedMiddleware`, `Applicable`, `Provides`, `Failure`, `MiddlewareRequest`, `Headers`, `ProcedureType`, `MiddlewareConfig`, `MiddlewareTypeId`, `MiddlewareTagTypeId` | `Tag`, `implement`, `implementWrap`, `all`, `execute`, `isMiddlewareTag`, `isCombinedMiddleware`, `isApplicable` |
+| Reactivity | `PathReactivity`, `PathReactivityService`, `InnerReactivity` | `normalizePath`, `shouldInvalidate`, `make`, `layer`, `register`, `invalidate`, `getRegisteredPaths` |
+| Result | Re-exported from `@effect-atom/atom/Result` | (passthrough) |
+| SSR | `DehydratedState`, `DehydrateOptions` | `dehydrate`, `Hydrate` |
 
 ---
 
-## 2. Missing Exports (Types Used in Tests but Not Exported)
+## 2. Type Hierarchy
 
-### Client Module Missing Helper Types
+### Procedure Types
 
-The tests in `test/types.test.ts` and `test/client.test.ts` use:
+```
+Procedure.Any
+├── Procedure.Query<Payload, Success, Error>
+├── Procedure.Mutation<Payload, Success, Error, Invalidates>
+└── Procedure.Stream<Payload, Success, Error>
 
-```typescript
-// test/types.test.ts:163-181
-type Payload = Client.ProcedurePayload<typeof router.definition.users.list>
-type Success = Client.ProcedureSuccess<typeof router.definition.users.list>
-type Err = Client.ProcedureError<typeof router.definition.users.get>
+All extend: ProcedureBase<Payload, Success, Error>
 ```
 
-**These types are NOT defined in `src/Client/index.ts`!**
-
-The test file expects these helper types, but they don't exist. The proper types to use would be:
+### Type Extraction Utilities
 
 ```typescript
-import { Procedure } from "effect-trpc"
+// From Procedure module
+Procedure.Payload<P>    // Extract payload type
+Procedure.Success<P>    // Extract success type  
+Procedure.Error<P>      // Extract error type
+Procedure.Invalidates<M> // Extract invalidates from Mutation
 
-// Should use Procedure-level helpers:
-type Payload = Procedure.Payload<typeof procedure>
-type Success = Procedure.Success<typeof procedure>
-type Error = Procedure.Error<typeof procedure>
+// From Router module  
+Router.Paths<D>         // All paths in definition
+Router.ProcedureAt<D,P> // Get procedure at path
+Router.DefinitionOf<R>  // Extract definition from Router
+Router.Flatten<D>       // Flatten to path → procedure record
+
+// Convenience re-exports from types.ts
+InferProcedurePayload<P>
+InferProcedureSuccess<P>
+InferProcedureError<P>
+InferMutationInvalidates<P>
+InferRouterPaths<R>
+InferRouterDefinition<R>
+InferRouterProcedure<R,P>
 ```
 
-**Recommendation:** Either:
-1. Add these convenience types to Client module:
-   ```typescript
-   export type ProcedurePayload<P extends Procedure.Any> = Procedure.Payload<P>
-   export type ProcedureSuccess<P extends Procedure.Any> = Procedure.Success<P>
-   export type ProcedureError<P extends Procedure.Any> = Procedure.Error<P>
-   ```
+### Client Type Structure
 
-2. Or update tests to use the existing `Procedure.*` types.
+```
+Client<R>
+├── Provider: React.FC<ProviderProps>
+├── invalidate: (paths) => void
+├── provide: (layer) => BoundClient<R>
+└── ...ClientProxy<D>  (spread)
+
+ClientProxy<D>
+├── [namespace]: ClientProxy<NestedDefinition>
+└── [procedure]: ProcedureClient<P>
+
+ProcedureClient<P>
+├── QueryClient<Payload, Success, Error>     // for Query
+├── MutationClient<Payload, Success, Error>  // for Mutation
+└── StreamClient<Payload, Success, Error>    // for Stream
+```
 
 ---
 
-## 3. Type Errors in Test Files
+## 3. Test Files Analysis
 
-### Transport Module Type Error
+### Test File Inventory
 
-In `test/transport.test.ts:107-116`:
+| File | Purpose | Type Tests |
+|------|---------|------------|
+| `test/types.test.ts` | Type-level tests with `@ts-expect-error` | 15 type assertions |
+| `test/procedure.test.ts` | Procedure creation & type inference | 7 type tests |
+| `test/router.test.ts` | Router path/procedure extraction | 3 type tests |
+| `test/client.test.ts` | Client type inference | 7 type tests |
+| `test/server.test.ts` | Handler type extraction | 5 type tests |
+| `test/middleware.test.ts` | Middleware composition | 0 explicit type tests |
+| `test/transport.test.ts` | Transport protocol types | 1 type test |
+| `test/integration.test.ts` | Cross-module type flow | 4 type tests |
+| `test/reactivity.test.ts` | Path utilities | 0 explicit type tests |
+| `test/http-adapter.test.ts` | HTTP handlers | 0 explicit type tests |
+| `test/e2e/*.ts` | End-to-end integration | 0 explicit type tests |
 
+### Type Testing Patterns Used
+
+**1. `@ts-expect-error` for negative tests:**
 ```typescript
-describe("Transport service", () => {
-  it("TransportService.send returns Stream of responses", () => {
-    type SendFn = Transport.TransportService["send"]
-    type Return = ReturnType<SendFn>
+// @ts-expect-error - success is required
+Procedure.query({})
 
-    expectTypeOf<Return>().toMatchTypeOf<
-      Stream.Stream<Transport.TransportResponse, Transport.TransportError>
-    >()
-  })
-})
+// @ts-expect-error - invalidates is required  
+Procedure.mutation({ success: User })
+
+// @ts-expect-error - queries don't have invalidates
+Procedure.query({ success: User, invalidates: ["something"] })
 ```
 
-**This test is INCORRECT.** Looking at `src/Transport/index.ts:162-169`:
-
+**2. `expectTypeOf` for positive type assertions:**
 ```typescript
-export interface TransportService {
-  readonly send: (
-    request: TransportRequest
-  ) => Effect.Effect<TransportResponse, TransportError>  // Effect, not Stream!
-  
-  readonly sendStream: (
-    request: TransportRequest
-  ) => Stream.Stream<StreamResponse, TransportError>  // This is the Stream
-}
+import { expectTypeOf } from "vitest"
+
+type Payload = Procedure.Payload<typeof getUser>
+expectTypeOf<Payload>().toEqualTypeOf<{ readonly id: string }>()
+
+type Success = Procedure.Success<typeof listUsers>
+expectTypeOf<Success>().toEqualTypeOf<readonly User[]>()
 ```
 
-The `send` method returns `Effect.Effect`, not `Stream.Stream`. The test should be:
-
+**3. Variable assignment for path type checking:**
 ```typescript
-expectTypeOf<Return>().toMatchTypeOf<
-  Effect.Effect<Transport.TransportResponse, Transport.TransportError>
->()
+type Paths = Router.Paths<typeof router.definition>
+const validPaths: Paths[] = ["users.list", "users.get", "health"]
 ```
 
-### TransportRequest Type Error
+### Test Coverage Gaps
 
-In `test/transport.test.ts:159-169`:
+1. **Missing type tests for:**
+   - `Client.ProcedurePayload` (tests exist but named inconsistently)
+   - `Client.ProcedureSuccess` 
+   - `Client.ProcedureError`
+   - `Server.StreamHandler` type extraction
+   - `Middleware.Provides<M>` and `Middleware.Failure<M>` extractors
+   - `Transport.MockHandlers` generic constraints
 
-```typescript
-it("TransportRequest has required fields", () => {
-  const request: Transport.TransportRequest = {
-    id: "req-1",
-    tag: "@api/users/list",
-    payload: { filter: "active" },
-  }
-  // ...
-})
-```
-
-**Problem:** `TransportRequest` is a Schema.Class, not a plain object interface. You need to use `new Transport.TransportRequest(...)`:
-
-```typescript
-const request = new Transport.TransportRequest({
-  id: "req-1",
-  tag: "@api/users/list",
-  payload: { filter: "active" },
-})
-```
-
-The test might pass at runtime but is technically type-incorrect.
+2. **Unused exported types:**
+   - `Procedure.AutoComplete<T>` - not explicitly tested
+   - `Router.Flatten<D>` - never used in tests
+   - `Middleware.WrapMiddlewareImpl` - only indirectly tested
 
 ---
 
-## 4. tsconfig.json Analysis
+## 4. TSConfig Configuration
 
-### Current Configuration (`tsconfig.json`)
+### Main `tsconfig.json`
 
 ```json
 {
@@ -333,132 +215,219 @@ The test might pass at runtime but is technically type-incorrect.
 }
 ```
 
-### Issues
+### Configuration Analysis
 
-1. **Test files are excluded from type checking!**
-   
-   The main `tsconfig.json` excludes `test/` directory. This means:
-   - `npm run test:types` (`tsc --noEmit`) does NOT check test files
-   - Type errors in tests will not be caught by CI/CD
-   - The `Client.ProcedurePayload/Success/Error` issue went unnoticed
+#### Issues:
 
-2. **No separate tsconfig for tests**
-   
-   The project needs a `tsconfig.test.json` or similar that includes tests:
-   
-   ```json
-   {
-     "extends": "./tsconfig.json",
-     "compilerOptions": {
-       "rootDir": ".",
-       "noEmit": true
-     },
-     "include": ["src/**/*", "test/**/*"],
-     "exclude": ["node_modules", "dist"]
-   }
-   ```
+1. **Test files are excluded from type checking**
+   - `"exclude": ["test", ...]` means tests don't get type-checked via `tsc`
+   - Tests rely on Vitest's built-in TypeScript handling
+   - No separate `tsconfig.test.json` exists
 
-3. **Missing dependencies in node_modules**
-   
-   The type checker reports "Cannot find module 'effect'" errors because dependencies aren't installed. Run `pnpm install` or `npm install`.
+2. **Missing test configuration**
+   - Standard Effect repos have `tsconfig.test.json` with:
+     ```json
+     {
+       "extends": "./tsconfig.json",
+       "compilerOptions": { "noEmit": true },
+       "include": ["test/**/*"]
+     }
+     ```
+
+3. **`noEmit: true` in main config**
+   - Prevents `tsc` from generating `.d.ts` files
+   - Build process must use different config or tool (like tsup/unbuild)
+
+4. **`skipLibCheck: true`**
+   - Skips type checking of `.d.ts` files from dependencies
+   - Acceptable for dev speed, but masks potential type issues
+
+#### Recommendations:
+
+```json
+// tsconfig.test.json (NEW FILE)
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["vitest/globals"]
+  },
+  "include": ["src/**/*", "test/**/*"]
+}
+```
 
 ---
 
-## 5. Internal vs Public API
+## 5. Type Errors & Missing Exports
 
-### Properly Marked as Internal
+### Errors Found (with `node_modules` missing)
 
-The codebase correctly uses `@internal` JSDoc tags for:
-- Type IDs (`ProcedureTypeId`, `QueryTypeId`, etc.)
-- All TypeId types
+When running `tsc`, all 200+ errors are "Cannot find module" because dependencies aren't installed:
 
-### Should Consider Internal
+```
+src/Client/index.ts - Cannot find module 'effect/Context'
+src/Client/react.ts - Cannot find module 'react'
+src/Reactivity/index.ts - Cannot find module '@effect/experimental/Reactivity'
+src/Result/index.ts - Cannot find module '@effect-atom/atom/Result'
+```
 
-Some types may be too implementation-specific for public API:
-- `TaggedProcedure` - Could be internal
-- `PathMap` - Could be internal, users likely don't need direct access
-- `ClientService` - Internal service interface
+**These are not actual type errors** - they would resolve after `npm install`.
+
+### Potential Type Issues (Code Review)
+
+1. **Client module - redundant type definitions:**
+   ```typescript
+   // src/Client/index.ts:389-391
+   export interface QueryOptions {  // Conflicts with Client.QueryOptions name
+     readonly enabled?: boolean
+     // ...
+   }
+   ```
+   This `QueryOptions` (hook options) has same name as `Procedure.QueryOptions` (procedure creation options).
+
+2. **Implicit `any` in SSR module:**
+   ```typescript
+   // src/SSR/index.ts:171
+   // ERROR: Binding element 'state' implicitly has an 'any' type
+   ({ state, children }: { state: any; children: any })
+   ```
+   Should use proper props interface.
+
+3. **Missing type exports in `types.ts`:**
+   The convenience exports don't include:
+   - `ClientService` - useful for typing custom transport tests
+   - `ServerTypeId`, `ClientTypeId` - for type guards
+   - `Applicable` from Middleware - for typing middleware arrays
+
+### Missing Exports Analysis
+
+**Currently exported from `types.ts`:**
+```typescript
+export type {
+  InferProcedurePayload,
+  InferProcedureSuccess,
+  InferProcedureError,
+  InferMutationInvalidates,
+  InferRouterPaths,
+  InferRouterDefinition,
+  InferRouterProcedure,
+  TransportRequest,
+  TransportResponse,
+  TransportError,
+  MiddlewareRequest,
+  ProcedureType,
+  PathReactivityService,
+}
+```
+
+**Should also export:**
+```typescript
+// Client types consumers often need
+ClientService,        // For typing mock transports
+QueryResult,          // For typing hook returns
+MutationResult,       // For typing hook returns  
+StreamResult,         // For typing hook returns
+
+// Server types for advanced usage
+HandlerFor,           // Type handler functions
+Handlers,             // Type full handler objects
+
+// Middleware types
+Applicable,           // Union type for middleware
+Provides,             // Extract provided service type
+Failure as MiddlewareFailure,  // Extract failure type (name conflict)
+```
 
 ---
 
 ## 6. Recommendations
 
-### Critical (Must Fix)
+### High Priority
 
-1. **Add missing Client helper types or fix tests:**
-   ```typescript
-   // In src/Client/index.ts
-   export type ProcedurePayload<P extends Procedure.Any> = Procedure.Payload<P>
-   export type ProcedureSuccess<P extends Procedure.Any> = Procedure.Success<P>  
-   export type ProcedureError<P extends Procedure.Any> = Procedure.Error<P>
-   ```
-
-2. **Fix transport.test.ts type assertions:**
-   - Change `Stream.Stream` expectation to `Effect.Effect` for `send`
-   - Use `new Transport.TransportRequest(...)` instead of plain object
-
-3. **Create tsconfig.test.json:**
+1. **Create `tsconfig.test.json`:**
    ```json
    {
      "extends": "./tsconfig.json",
      "compilerOptions": {
        "rootDir": ".",
-       "noEmit": true
+       "noEmit": true,
+       "types": ["vitest/globals", "@effect/vitest"]
      },
      "include": ["src/**/*", "test/**/*"]
    }
    ```
-   
-   Update `package.json`:
-   ```json
-   "scripts": {
-     "test:types": "tsc --noEmit -p tsconfig.test.json"
+
+2. **Fix SSR implicit any:**
+   ```typescript
+   // src/SSR/index.ts
+   interface HydrateProps {
+     state: DehydratedState
+     children: React.ReactNode
    }
+   
+   export const Hydrate: React.FC<HydrateProps> = ({ state, children }) => ...
    ```
 
-### Recommended (Should Fix)
+3. **Rename conflicting `QueryOptions`:**
+   ```typescript
+   // Client hook options
+   export interface UseQueryOptions { ... }  // was QueryOptions
+   
+   // Procedure creation options stay as Procedure.QueryOptions
+   ```
 
-4. **Install dependencies:** Run `pnpm install` to resolve "Cannot find module" errors
+### Medium Priority
 
-5. **Export type utilities consistently:**
-   - Consider adding `Router.PathsOf<R>` as alias for `Router.Paths<Router.DefinitionOf<R>>`
+4. **Expand `types.ts` exports:**
+   ```typescript
+   // Add these exports
+   export type { ClientService } from "./Client/index.js"
+   export type { HandlerFor, Handlers } from "./Server/index.js"
+   export type { Applicable, Provides, Failure as MiddlewareFailure } from "./Middleware/index.js"
+   export type { QueryResult, MutationResult, StreamResult } from "./Client/index.js"
+   ```
 
-### Nice to Have
+5. **Add type tests for missing utilities:**
+   - `Router.Flatten<D>` 
+   - `Middleware.Provides<M>`
+   - `Transport.MockHandlers<D>`
 
-6. **Add docstrings for complex types:**
-   - `Flatten<D, Prefix>` could use better documentation
-   - `UnionToIntersection<U>` is internal but used in public types
+6. **Add CI type checking step:**
+   ```yaml
+   # .github/workflows/ci.yml
+   - name: Type Check
+     run: |
+       npx tsc --project tsconfig.json --noEmit
+       npx tsc --project tsconfig.test.json --noEmit
+   ```
+
+### Low Priority
+
+7. **Consider dtslint for stricter type testing:**
+   - Pattern used by Effect core for complex type assertions
+   - Better error messages for type inference failures
+
+8. **Document type utilities in JSDoc:**
+   - Add `@example` blocks showing common patterns
+   - Document covariance/contravariance of type parameters
 
 ---
 
-## 7. Type Flow Verification
+## Summary
 
-The tests verify these type flows work correctly:
+The type system is well-designed with proper inference patterns. Key findings:
 
-```
-Procedure.query({ payload, success, error })
-    ↓
-Router.make("@tag", { path: procedure })
-    ↓
-Server.Handlers<typeof router.definition>  ← Handler types match procedures
-    ↓
-Client.make(router)  ← Proxy mirrors structure
-    ↓
-api.path.useQuery()  ← Hook returns correct types
-```
+| Category | Status |
+|----------|--------|
+| Export structure | Good - namespaced modules |
+| Type utilities | Good - comprehensive extractors |
+| Test coverage | Fair - some gaps |
+| TSConfig | Needs work - missing test config |
+| Missing exports | Minor - some convenience types |
 
-This is well-designed and the type inference chain is correct.
-
----
-
-## 8. Summary Table
-
-| Category | Count | Status |
-|----------|-------|--------|
-| Exported Modules | 8 | Good |
-| Exported Types | 60+ | Good |
-| Exported Functions | 40+ | Good |
-| Missing Exports | 3 | Needs Fix |
-| Type Errors in Tests | 2 | Needs Fix |
-| tsconfig Issues | 2 | Needs Fix |
-| Internal Markers | Consistent | Good |
+The main actionable items are:
+1. Add `tsconfig.test.json` for proper test type checking
+2. Fix SSR implicit any types  
+3. Rename `QueryOptions` to avoid confusion with hook options
+4. Expand `types.ts` with commonly-needed types

@@ -1,17 +1,14 @@
-# H13: Suspense Integration Analysis
+# H13: Suspense Integration
 
-## Summary
+## Overview
 
-**Effect Atom React has full React Suspense support via `useAtomSuspense`.**
+Effect Atom React implements React Suspense through the `useAtomSuspense` hook, using the standard promise-throwing pattern. The implementation is tightly integrated with the `Result` type system.
 
-The implementation uses the standard React Suspense pattern of throwing promises to suspend rendering until async data is available.
+## Core Implementation
 
-## Key Implementation
+### The `useAtomSuspense` Hook
 
-### Location
-`packages/atom-react/src/Hooks.ts:217-270`
-
-### Core Suspense Hook: `useAtomSuspense`
+**Location:** `packages/atom-react/src/Hooks.ts:257-270`
 
 ```typescript
 export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = false>(
@@ -30,9 +27,9 @@ export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = fal
 }
 ```
 
-### Promise Throwing Pattern
+### Promise Throwing Logic
 
-The Suspense integration works via `atomResultOrSuspend`:
+**Location:** `packages/atom-react/src/Hooks.ts:241-251`
 
 ```typescript
 function atomResultOrSuspend<A, E>(
@@ -42,15 +39,15 @@ function atomResultOrSuspend<A, E>(
 ) {
   const value = useStore(registry, atom)
   if (value._tag === "Initial" || (suspendOnWaiting && value.waiting)) {
-    throw atomToPromise(registry, atom, suspendOnWaiting)  // <-- Promise throwing!
+    throw atomToPromise(registry, atom, suspendOnWaiting)
   }
   return value
 }
 ```
 
-### Promise Caching
+### Promise Creation and Caching
 
-Promises are cached in a global map to ensure React Suspense works correctly:
+**Location:** `packages/atom-react/src/Hooks.ts:209-239`
 
 ```typescript
 const atomPromiseMap = globalValue(
@@ -76,7 +73,7 @@ function atomToPromise<A, E>(
       if (result._tag === "Initial" || (suspendOnWaiting && result.waiting)) {
         return
       }
-      setTimeout(dispose, 1000)  // Cleanup after 1 second
+      setTimeout(dispose, 1000)  // Delayed cleanup
       resolve()
       map.delete(atom)
     })
@@ -86,103 +83,186 @@ function atomToPromise<A, E>(
 }
 ```
 
-## Suspense Behavior Matrix
+## Suspension Conditions
 
-| Result State | `suspendOnWaiting: false` | `suspendOnWaiting: true` |
-|--------------|---------------------------|--------------------------|
-| `Initial` | **Suspends** | **Suspends** |
-| `Initial` (waiting) | **Suspends** | **Suspends** |
-| `Success` | Returns value | Returns value |
-| `Success` (waiting) | Returns value | **Suspends** |
-| `Failure` | Throws error* | Throws error* |
-| `Failure` (waiting) | Throws error* | **Suspends** |
+The hook suspends under two scenarios:
 
-*Unless `includeFailure: true`, then returns the Failure result
+### 1. Initial State (`_tag === "Initial"`)
+When the async atom has never resolved, the component suspends until data arrives.
 
-## Options
-
-### `suspendOnWaiting`
-- Default: `false`
-- When `true`: Suspends even when there's a previous value but new data is loading
-- Use case: Show loading state during refetch instead of stale data
-
-### `includeFailure`
-- Default: `false`
-- When `false`: Throws errors as exceptions (caught by Error Boundary)
-- When `true`: Returns `Failure` result to component for manual handling
-
-## Integration with Result Type
-
-The Suspense hook works specifically with atoms containing `Result<A, E>`:
+### 2. Waiting State (Optional)
+When `suspendOnWaiting: true` is set and `result.waiting === true`, the component suspends during refetches.
 
 ```typescript
-type Result<A, E> = Initial<A, E> | Success<A, E> | Failure<A, E>
+// Default: Only suspend on initial load
+useAtomSuspense(atom)
+
+// Option: Also suspend during refetches
+useAtomSuspense(atom, { suspendOnWaiting: true })
+```
+
+## The Result Type States
+
+**Location:** `packages/atom/src/Result.ts`
+
+```typescript
+type Result<A, E = never> = Initial<A, E> | Success<A, E> | Failure<A, E>
+
+// All states have a `waiting` flag
+interface Result.Proto<A, E> {
+  readonly waiting: boolean
+}
 
 interface Initial<A, E> {
   readonly _tag: "Initial"
-  readonly waiting: boolean  // Loading state
+  readonly waiting: boolean
 }
 
 interface Success<A, E> {
   readonly _tag: "Success"
   readonly value: A
-  readonly waiting: boolean  // Refetching indicator
+  readonly waiting: boolean
   readonly timestamp: number
 }
 
 interface Failure<A, E> {
   readonly _tag: "Failure"
   readonly cause: Cause.Cause<E>
-  readonly previousSuccess: Option<Success<A, E>>  // Stale-while-revalidate
   readonly waiting: boolean
+  readonly previousSuccess: Option.Option<Success<A, E>>
 }
 ```
 
-## Usage Pattern
+## Error Handling
 
-```tsx
-import { useAtomSuspense } from "@effect-atom/atom-react"
-import { Suspense, ErrorBoundary } from "react"
+### Default Behavior
+Failures throw errors (caught by Error Boundaries):
 
-// Async atom that fetches data
-const userAtom = Atom.async(() => fetchUser())
-
-function UserProfile() {
-  // Suspends until data is ready
-  const result = useAtomSuspense(userAtom)
-  return <div>{result.value.name}</div>
-}
-
-function App() {
-  return (
-    <ErrorBoundary fallback={<Error />}>
-      <Suspense fallback={<Loading />}>
-        <UserProfile />
-      </Suspense>
-    </ErrorBoundary>
-  )
+```typescript
+if (result._tag === "Failure" && !options?.includeFailure) {
+  throw Cause.squash(result.cause)
 }
 ```
+
+### Optional: Include Failures
+With `includeFailure: true`, failures are returned instead of thrown:
+
+```typescript
+const result = useAtomSuspense(atom, { includeFailure: true })
+// result can be Success or Failure
+```
+
+## Promise Caching Strategy
+
+### Dual Cache System
+Two separate caches for different suspension modes:
+- `atomPromiseMap.default` - For standard suspension (Initial only)
+- `atomPromiseMap.suspendOnWaiting` - For waiting-aware suspension
+
+### Cache Lifecycle
+1. **Creation:** Promise created when atom first suspends
+2. **Resolution:** Promise resolves when result transitions to non-suspending state
+3. **Cleanup:** Promise removed from cache on resolution
+4. **Delayed Disposal:** Subscription cleaned up after 1 second delay (prevents race conditions)
+
+## Integration with useSyncExternalStore
+
+**Location:** `packages/atom-react/src/Hooks.ts:53-57`
+
+```typescript
+function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
+  const store = makeStore(registry, atom)
+  return React.useSyncExternalStore(store.subscribe, store.snapshot, store.getServerSnapshot)
+}
+```
+
+The Suspense integration builds on top of `useSyncExternalStore`:
+1. `useStore` provides the current value reactively
+2. `atomResultOrSuspend` checks if suspension is needed
+3. If suspending, throws a cached promise
+4. React's Suspense catches the promise and re-renders when it resolves
+
+## SSR Considerations
+
+The `getServerSnapshot` function handles server-side rendering:
+
+```typescript
+const newStore: AtomStore<A> = {
+  // ...
+  getServerSnapshot() {
+    return Atom.getServerValue(atom, registry)
+  }
+}
+```
+
+During SSR, atoms may have server-provided values that prevent suspension.
 
 ## Key Design Decisions
 
-1. **Global Promise Cache**: Uses `WeakMap` for registry-level caching and `Map` for atom-level caching to prevent duplicate promise creation during React's concurrent rendering
+### 1. Result-Typed Atoms Only
+`useAtomSuspense` only works with `Atom<Result<A, E>>`. Regular atoms cannot suspend.
 
-2. **Delayed Cleanup**: `setTimeout(dispose, 1000)` ensures subscription is cleaned up after promise resolves, but not immediately (handles edge cases with React re-renders)
+### 2. Waiting Flag Architecture
+The `waiting` flag on Result types enables "stale-while-revalidate" patterns:
+- `Success { value: A, waiting: true }` - Has data, but refreshing
+- Default: Show stale data while refreshing
+- With `suspendOnWaiting`: Suspend during refresh
 
-3. **Separate Maps**: Maintains separate promise maps for `suspendOnWaiting: true/false` to handle different suspension semantics correctly
+### 3. Previous Value Preservation
+`Failure` type preserves `previousSuccess`, enabling graceful degradation.
 
-4. **Error Throwing**: Non-suspending failures throw via `Cause.squash()` - integrates with React Error Boundaries
+### 4. Cause-Based Errors
+Uses Effect's `Cause` type for rich error information, squashed when thrown.
 
-5. **Works with useSyncExternalStore**: The underlying `useStore` uses React 18's `useSyncExternalStore` for tear-free concurrent reads
+## Usage Patterns
 
-## Implications for effect-trpc
+### Basic Suspense
 
-Effect Atom's Suspense support is well-designed and production-ready. For effect-trpc integration:
+```tsx
+function UserProfile() {
+  const result = useAtomSuspense(userAtom)
+  // result is guaranteed to be Success here
+  return <div>{result.value.name}</div>
+}
+```
 
-1. **RPC queries should return `Result<A, E>`** to work with `useAtomSuspense`
-2. **The `waiting` flag enables optimistic updates** - show previous data while refetching
-3. **Error handling integrates with React patterns** - Error Boundaries + typed errors
-4. **Concurrent Mode compatible** - uses proper React 18 primitives
+### With Error Handling in Component
 
-The Suspense implementation is complete and follows React best practices. No additional Suspense work needed in effect-trpc - just ensure RPC atoms produce `Result` values.
+```tsx
+function UserProfile() {
+  const result = useAtomSuspense(userAtom, { includeFailure: true })
+  if (result._tag === "Failure") {
+    return <ErrorDisplay cause={result.cause} />
+  }
+  return <div>{result.value.name}</div>
+}
+```
+
+### Suspend on Refetch
+
+```tsx
+function LiveData() {
+  const result = useAtomSuspense(liveDataAtom, { suspendOnWaiting: true })
+  // Suspends both on initial load AND during refetches
+  return <div>{result.value}</div>
+}
+```
+
+## Comparison with Other Libraries
+
+| Feature | Effect Atom | React Query | Jotai |
+|---------|-------------|-------------|-------|
+| Promise throwing | Yes | Yes | Yes |
+| Waiting flag | Built-in | `isFetching` | Via async atoms |
+| Previous value in error | Yes | Yes | Manual |
+| Effect Cause errors | Yes | No | No |
+| Typed suspension | Yes | Partial | Partial |
+
+## Summary
+
+Effect Atom React's Suspense integration is:
+- **Type-safe:** Only `Result`-typed atoms can suspend
+- **Configurable:** Choose between initial-only or waiting-inclusive suspension
+- **Optimized:** Promise caching prevents duplicate subscriptions
+- **Effect-native:** Uses `Cause` for structured error handling
+- **SSR-aware:** Supports server-side snapshots

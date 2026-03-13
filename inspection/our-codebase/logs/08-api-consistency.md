@@ -2,455 +2,424 @@
 
 ## Executive Summary
 
-The effect-trpc codebase demonstrates **strong overall consistency** in naming conventions and patterns across its modules. The API follows Effect ecosystem conventions while establishing its own clear patterns. There are a few minor inconsistencies and missing utilities identified below.
+This analysis examines the effect-trpc codebase for API naming consistency, pattern adherence, missing type guards, and overall API surface design. The codebase shows **strong overall consistency** with a few areas that could benefit from alignment.
 
 ---
 
-## Module Overview
+## 1. Naming Conventions Analysis
 
-| Module | Primary Exports | Pattern Compliance |
-|--------|-----------------|-------------------|
-| **Procedure** | `procedure`, `Procedure.toLayer` | Excellent |
-| **Middleware** | `Middleware()`, `Middleware.toLayer` | Excellent |
-| **Procedures** | `Procedures.make`, `procedures()` | Good |
-| **Router** | `Router.make`, `Router.use`, `Router.provide` | Excellent |
-| **Client** | `Client.make`, `Client.HttpLive`, `Client.Live` | Excellent |
-| **Transport** | `Transport.HttpLive` | Good |
-| **WebSocket** | Various services with `.layer()` / `.Live` | Good |
+### 1.1 Constructor Functions
 
----
+| Module | Pattern | Functions | Assessment |
+|--------|---------|-----------|------------|
+| Procedure | `query`, `mutation`, `stream` | Direct verbs | Consistent |
+| Router | `make` | Effect pattern | Consistent |
+| Client | `make` | Effect pattern | Consistent |
+| Server | `make` | Effect pattern | Consistent |
+| Transport | `http`, `mock`, `make`, `loopback` | Mixed | **Needs review** |
+| Middleware | `Tag`, `implement`, `implementWrap`, `all` | Mixed | Partially consistent |
+| Reactivity | `make` (internal), `register`, `invalidate` | Actions | Consistent |
+| SSR | `dehydrate`, `createPrefetch`, `Hydrate` (component) | Actions/Component | Consistent |
 
-## Naming Conventions Found
+**Issue:** Transport uses inconsistent naming:
+- `http()`, `mock()`, `loopback()` - Named transports (factory pattern)
+- `make()` - Generic factory (Effect pattern)
 
-### 1. Service Tags (Context.TagClass pattern)
+**Recommendation:** This is actually **acceptable** - the named factories (`http`, `mock`, `loopback`) are conveniences that call the generic `make()` pattern. This matches Effect's approach (e.g., `Layer.effect`, `Layer.succeed`, `Layer.scoped` vs generic composition).
 
-All services follow the `Context.TagClass` pattern with consistent naming:
+### 1.2 Type Guard Functions
 
-```typescript
-// Pattern: class Name extends Name_base
-declare class Client extends Client_base { }
-declare class Transport extends Transport_base { }
-declare class Proxy extends Proxy_base { }
-declare class WebSocketConnection extends WebSocketConnection_base { }
-declare class WebSocketClient extends WebSocketClient_base { }
-declare class WebSocketReconnect extends WebSocketReconnect_base { }
-declare class SubscriptionRegistry extends SubscriptionRegistry_base { }
-declare class ConnectionRegistry extends ConnectionRegistry_base { }
-declare class SubscriptionManager extends SubscriptionManager_base { }
-declare class WebSocketCodec extends WebSocketCodec_base { }
-declare class WebSocketHeartbeat extends WebSocketHeartbeat_base { }
-declare class WebSocketAuth extends WebSocketAuth_base { }
-declare class TrpcLogger extends TrpcLogger_base { }
-```
+| Module | Guards Present | Pattern | Status |
+|--------|----------------|---------|--------|
+| Procedure | `isProcedure`, `isQuery`, `isMutation`, `isStream` | `is{Type}` | **Complete** |
+| Router | None | - | **Missing** |
+| Client | None | - | **Missing** |
+| Server | `isServer` | `is{Type}` | **Partial** |
+| Transport | None | - | **Missing** |
+| Middleware | `isMiddlewareTag`, `isCombinedMiddleware`, `isApplicable` | `is{Type}` | **Complete** |
+| Reactivity | None | - | **N/A** (no branded types) |
+| SSR | `isServer`, `isClient` | `is{State}` | Environment checks only |
 
-**Assessment**: Fully consistent with Effect ecosystem conventions.
+### 1.3 Type Utility Functions
 
-### 2. Layer Naming Conventions
+| Module | Pattern | Examples |
+|--------|---------|----------|
+| Procedure | `Payload<P>`, `Success<P>`, `Error<P>`, `Invalidates<P>` | Type extractors |
+| Router | `Paths<D>`, `ProcedureAt<D, Path>`, `Flatten<D>`, `DefinitionOf<R>` | Type extractors |
+| Client | `ClientProxy<D>`, `ProcedureClient<P>` | Type transformers |
+| Server | `HandlerFor<P, R>`, `Handlers<D, R>` | Type transformers |
+| Transport | `MockHandlers<D>` (internal) | Type transformer |
+| Middleware | `Provides<M>`, `Failure<M>` | Type extractors |
 
-| Pattern | Examples | Status |
-|---------|----------|--------|
-| `ServiceName.Live` | `Client.Live`, `ConnectionRegistry.Live`, `SubscriptionRegistry.Live` | Consistent |
-| `ServiceName.layer(config)` | `WebSocketConnection.layer()`, `WebSocketClient.layer()`, `ConnectionRegistry.layer()` | Consistent |
-| `ServiceNameLive` (standalone) | `WebSocketCodecLive`, `WebSocketHeartbeatLive`, `TrpcLoggerLive` | Consistent |
-| `makeServiceNameLayer()` | `makeWebSocketConnectionLayer()`, `makeWebSocketClientLayer()` | Consistent |
-| `ServiceName.Test` | `WebSocketAuth.Test` | Used appropriately |
-
-**Assessment**: Good, but some inconsistency between `ServiceName.Live` vs `ServiceNameLive`.
-
-### 3. Schema/Error Classes
-
-All tagged errors follow the `Schema.TaggedError` pattern:
-
-```typescript
-declare class InputValidationError extends InputValidationError_base { }
-declare class OutputValidationError extends OutputValidationError_base { }
-declare class NotFoundError extends NotFoundError_base { }
-declare class UnauthorizedError extends UnauthorizedError_base { }
-declare class ForbiddenError extends ForbiddenError_base { }
-declare class RateLimitError extends RateLimitError_base { }
-declare class TimeoutError extends TimeoutError_base { }
-declare class InternalError extends InternalError_base { }
-declare class NetworkError extends NetworkError_base { }
-declare class WebSocketConnectionError extends WebSocketConnectionError_base { }
-// ... and more
-```
-
-**Assessment**: Fully consistent with Effect Schema patterns.
-
-### 4. TypeId Symbols
-
-```typescript
-declare const MiddlewareDefinitionTypeId: unique symbol;
-declare const RpcClientErrorTypeId: unique symbol;
-declare const RpcResponseErrorTypeId: unique symbol;
-declare const RpcTimeoutErrorTypeId: unique symbol;
-declare const WebSocketErrorTypeId: unique symbol;
-```
-
-**Assessment**: Consistent pattern for runtime type identification.
-
-### 5. Factory Functions
-
-| Pattern | Examples |
-|---------|----------|
-| `make()` static method | `Router.make()`, `Procedures.make()`, `Client.make()` |
-| `make*()` standalone | `makeWebSocketConnectionLayer()`, `makeWebSocketAuth()`, `makeTrpcLoggerLayer()` |
-| `create*()` for handlers | `createRouteHandler()`, `createSubscriptionHook()`, `createTRPCReact()` |
-| `toLayer()` static method | `Middleware.toLayer()`, `Procedure.toLayer()`, `Procedures.toLayer()` |
-
-**Assessment**: Consistent. `make` for Effect-style creation, `create` for React/handler creation.
+**Assessment:** Consistent `{PropertyName}<T>` pattern throughout.
 
 ---
 
-## Consistent Patterns Found
+## 2. Missing Type Guards
 
-### 1. `isX` Type Guards
-
-```typescript
-// Core TRPC errors
-declare const isTRPCError: (u: unknown) => u is TRPCError;
-declare const isRpcClientError: (u: unknown) => u is RpcClientError;
-declare const isRpcResponseError: (u: unknown) => u is RpcResponseError;
-declare const isRpcTimeoutError: (u: unknown) => u is RpcTimeoutError;
-declare const isRpcError: (u: unknown) => u is RpcClientError | RpcResponseError | RpcTimeoutError;
-
-// WebSocket errors
-declare const isWebSocketError: (u: unknown) => u is WebSocketError;
-
-// Definitions
-declare const isMiddlewareDefinition: (value: unknown) => value is MiddlewareDefinition<any, any, any, any>;
-declare const isProceduresGroup: (value: unknown) => value is AnyProceduresGroup;
-
-// Protocol messages
-declare const isAuthMessage: (msg: FromClientMessage) => msg is AuthMessage;
-declare const isSubscribeMessage: (msg: FromClientMessage) => msg is SubscribeMessage;
-declare const isUnsubscribeMessage: (msg: FromClientMessage) => msg is UnsubscribeMessage;
-declare const isClientDataMessage: (msg: FromClientMessage) => msg is ClientDataMessage;
-declare const isPingMessage: (msg: FromClientMessage) => msg is PingMessage;
-declare const isDataMessage: (msg: FromServerMessage) => msg is DataMessage;
-declare const isErrorMessage: (msg: FromServerMessage) => msg is ErrorMessage;
-declare const isCompleteMessage: (msg: FromServerMessage) => msg is CompleteMessage;
-```
-
-**Assessment**: Excellent coverage. All error types and protocol messages have guards.
-
-### 2. State Union Types with Constructors
+### 2.1 Definitely Missing
 
 ```typescript
-// Connection state
-type ConnectionState = { _tag: "Disconnected" } | { _tag: "Connecting" } | ...
-declare const ConnectionState: {
-  readonly Disconnected: ConnectionState;
-  readonly Connecting: ConnectionState;
-  readonly Connected: (connectedAt: DateTimeType.Utc) => ConnectionState;
-  // ...
-};
+// Router/index.ts - Should add:
+export const isRouter = (u: unknown): u is Router<any> =>
+  typeof u === "object" && u !== null && RouterTypeId in u
 
-// Subscription state
-type SubscriptionState = { _tag: "Subscribing" } | { _tag: "Active" } | ...
-declare const SubscriptionState: {
-  readonly Subscribing: SubscriptionState;
-  readonly Active: (subscribedAt: DateTimeType.Utc) => SubscriptionState;
-  // ...
-};
-
-// Client state
-type ClientState = { _tag: "Disconnected" } | { _tag: "Connecting" } | ...
-declare const ClientState: {
-  readonly Disconnected: ClientState;
-  readonly Connecting: ClientState;
-  // ...
-};
-
-// Subscription events
-type SubscriptionEvent<A> = { _tag: "Subscribed" } | { _tag: "Data"; data: A } | ...
-declare const SubscriptionEvent: {
-  readonly Subscribed: SubscriptionEvent<never>;
-  readonly Data: <A>(data: A) => SubscriptionEvent<A>;
-  // ...
-};
-
-// Unsubscribe reasons
-type UnsubscribeReason = { _tag: "ClientUnsubscribed" } | ...
-declare const UnsubscribeReason: {
-  ClientUnsubscribed: { readonly _tag: "ClientUnsubscribed" };
-  // ...
-};
+export const isDefinition = (u: unknown): u is Definition =>
+  typeof u === "object" && u !== null && 
+  Object.values(u).every(v => isProcedure(v) || isDefinition(v))
 ```
-
-**Assessment**: Excellent. Tagged union pattern is consistently applied.
-
-### 3. Builder Pattern
 
 ```typescript
-// Middleware builder
-interface MiddlewareBuilder<CtxIn, CtxOut, I, E, R> {
-  input<I2, IFrom>(schema: Schema): MiddlewareBuilder<...>;
-  error<Errors>(...errors: Errors): MiddlewareBuilder<...>;
-  requires<T1>(t1: T1): MiddlewareBuilder<...>;
-  provides<Additions>(): Effect<MiddlewareDefinition<...>>;
-}
+// Client/index.ts - Should add:
+export const isClient = (u: unknown): u is Client<any> =>
+  typeof u === "object" && u !== null && ClientTypeId in u
 
-// Procedure builder
-interface ProcedureBuilder<I, A, E, Ctx, R> {
-  description(text: string): ProcedureBuilder<...>;
-  input<I2>(schema: Schema): ProcedureBuilder<...>;
-  output<A2>(schema: Schema): ProcedureBuilder<...>;
-  error<Errors>(...errors: Errors): ProcedureBuilder<...>;
-  requires<T1>(t1: T1): ProcedureBuilder<...>;
-  use<M>(middleware: M): ProcedureBuilder<...>;
-  query(): Effect<ProcedureDefinition<...>>;
-  mutation(): Effect<ProcedureDefinition<...>>;
-  stream(): Effect<ProcedureDefinition<...>>;
-  // ...
-}
+export const isBoundClient = (u: unknown): u is BoundClient<any> =>
+  isClient(u) && "shutdown" in u
 ```
-
-**Assessment**: Excellent fluent API design.
-
-### 4. Interface Shape + Service Pattern
 
 ```typescript
-// Pattern: InterfaceShape + Service tag
-interface WebSocketConnectionShape { ... }
-declare class WebSocketConnection extends WebSocketConnection_base { }
+// Transport/index.ts - Should add:
+export const isTransportRequest = (u: unknown): u is TransportRequest =>
+  typeof u === "object" && u !== null && 
+  "id" in u && "tag" in u && "payload" in u
 
-interface WebSocketClientShape { ... }
-declare class WebSocketClient extends WebSocketClient_base { }
+export const isSuccess = (u: unknown): u is Success =>
+  typeof u === "object" && u !== null && 
+  "_tag" in u && (u as any)._tag === "Success"
 
-interface SubscriptionRegistryShape { ... }
-declare class SubscriptionRegistry extends SubscriptionRegistry_base { }
+export const isFailure = (u: unknown): u is Failure =>
+  typeof u === "object" && u !== null && 
+  "_tag" in u && (u as any)._tag === "Failure"
+
+export const isStreamChunk = (u: unknown): u is StreamChunk =>
+  typeof u === "object" && u !== null && 
+  "_tag" in u && (u as any)._tag === "StreamChunk"
+
+export const isStreamEnd = (u: unknown): u is StreamEnd =>
+  typeof u === "object" && u !== null && 
+  "_tag" in u && (u as any)._tag === "StreamEnd"
+
+export const isTransportError = (u: unknown): u is TransportError =>
+  u instanceof TransportError
 ```
 
-**Assessment**: Consistent Effect service pattern.
+### 2.2 Currently Using Schema.is() Instead
+
+The codebase uses `Schema.is(Success)` in `Client/index.ts:118`, which is **correct** but could be inconsistent with explicit guards elsewhere.
+
+**Decision Point:** 
+- **Option A:** Add explicit `isSuccess`, `isFailure`, etc. guards (consistent API)
+- **Option B:** Use `Schema.is()` throughout (leverage Effect Schema)
+
+**Recommendation:** Add thin wrappers for developer convenience:
+
+```typescript
+// Transport/index.ts
+export const isSuccess = Schema.is(Success)
+export const isFailure = Schema.is(Failure)
+export const isStreamChunk = Schema.is(StreamChunk)
+export const isStreamEnd = Schema.is(StreamEnd)
+```
 
 ---
 
-## Inconsistencies Discovered
+## 3. Pattern Consistency Analysis
 
-### 1. `isProcedureDefinition` Guard Missing
+### 3.1 TypeId Patterns
 
-**Issue**: While `isMiddlewareDefinition` and `isProceduresGroup` exist, there's no `isProcedureDefinition` guard.
-
-```typescript
-// Exists:
-declare const isMiddlewareDefinition: (value: unknown) => value is MiddlewareDefinition<...>;
-declare const isProceduresGroup: (value: unknown) => value is AnyProceduresGroup;
-
-// Missing:
-// declare const isProcedureDefinition: (value: unknown) => value is ProcedureDefinition<...>;
-```
-
-**Recommendation**: Add `isProcedureDefinition` guard for consistency.
-
-### 2. `isRouter` / `isRouterShape` Guard Missing
-
-**Issue**: No runtime type guard for `RouterShape`.
+All modules correctly implement the TypeId pattern:
 
 ```typescript
-// Missing:
-// declare const isRouterShape: (value: unknown) => value is RouterShape<...>;
+// Consistent pattern across modules
+export const ModuleTypeId: unique symbol = Symbol.for("effect-trpc/Module")
+export type ModuleTypeId = typeof ModuleTypeId
 ```
 
-**Recommendation**: Add `isRouterShape` guard.
+| Module | TypeIds | Status |
+|--------|---------|--------|
+| Procedure | `ProcedureTypeId`, `QueryTypeId`, `MutationTypeId`, `StreamTypeId` | OK |
+| Router | `RouterTypeId` | OK |
+| Client | `ClientTypeId` | OK |
+| Server | `ServerTypeId` | OK |
+| Transport | `TransportTypeId` | OK (unused) |
+| Middleware | `MiddlewareTypeId`, `MiddlewareTagTypeId` | OK |
 
-### 3. Inconsistent Layer Naming
+**Note:** `TransportTypeId` is defined but not used. Consider:
+1. Adding to `TransportService` interface
+2. Or removing unused TypeId
 
-**Issue**: Some services use `ServiceName.Live` while others use standalone `ServiceNameLive`.
+### 3.2 Pipeable Implementation
 
-```typescript
-// Static property pattern:
-Client.Live
-ConnectionRegistry.Live
-SubscriptionRegistry.Live
-SubscriptionManager.Live
+| Module | Implements Pipeable | Status |
+|--------|---------------------|--------|
+| Procedure | Yes (via `ProcedureProto`) | OK |
+| Router | Yes (via `RouterProto`) | OK |
+| Client | No (returns plain object) | **Should add** |
+| Server | Yes (inline) | OK |
+| Middleware | No (Context.Tag-based) | N/A |
 
-// Standalone constant pattern:
-WebSocketCodecLive
-WebSocketHeartbeatLive
-WebSocketReconnectLive
-SubscriptionRegistryLive  // Duplicate of SubscriptionRegistry.Live!
-TrpcLoggerLive
-```
+### 3.3 Context.Tag Usage
 
-**Recommendation**: Standardize on one pattern. The `ServiceName.Live` pattern is more discoverable and namespaced.
+| Module | Tags | Pattern |
+|--------|------|---------|
+| Client | `ClientServiceTag` | `Context.Tag()` class |
+| Transport | `Transport` | `Context.Tag()` class |
+| Reactivity | `PathReactivity` | `Context.Tag()` class |
+| Middleware | Via `Middleware.Tag()` factory | Custom factory |
 
-### 4. `ConnectionStateCtor` vs `ConnectionState` Naming
+**Assessment:** Consistent use of Effect's `Context.Tag` pattern.
 
-**Issue**: In `types-PmcKPi02.d.ts`, there's `ConnectionStateCtor` but in `WebSocketClient` there's just `ConnectionState`.
+### 3.4 Layer Patterns
 
-```typescript
-// In types-PmcKPi02.d.ts:
-declare const ConnectionStateCtor: { ... }
+| Module | Layer Export | Pattern |
+|--------|--------------|---------|
+| Client | `ClientServiceLive` | `Layer.effect()` |
+| Reactivity | `layer` | `Layer.scoped()` with `.pipe(Layer.provide())` |
+| Transport | Functions returning `Layer.Layer` | `Layer.succeed()` |
 
-// In WebSocketClient:
-declare const ConnectionState: { ... }
-```
+**Issue:** Naming inconsistency:
+- `ClientServiceLive` - `{Name}Live` pattern
+- `layer` - lowercase generic
 
-**Recommendation**: Use consistent naming (prefer `ConnectionState` without `Ctor` suffix).
-
-### 5. Missing `generate*` Functions Parity
-
-**Issue**: There are `generateClientId` and `generateSubscriptionId` but no `generateRequestId` exported from the same module.
-
-```typescript
-// In types module:
-declare const generateClientId: Effect.Effect<ClientId>;
-declare const generateSubscriptionId: Effect.Effect<SubscriptionId>;
-
-// In logging module (different):
-declare const generateRequestId: () => string;  // Note: Not Effect-wrapped
-```
-
-**Recommendation**: Either move all ID generation to one module or ensure consistent Effect-wrapping.
-
-### 6. React Hook Return Type Inconsistency
-
-**Issue**: `UseQueryReturn` is defined as an alias for `QueryResult`, but `UseMutationReturn` extends `MutationResult`.
-
-```typescript
-// Alias pattern:
-type UseQueryReturn<A, E> = QueryResult<A, E>;
-
-// Extension pattern:
-interface UseMutationReturn<A, E, I> extends MutationResult<A, E> {
-  readonly mutateAsync: (input: I) => Promise<Exit<A, E>>;
-  readonly mutate: (input: I) => Effect.Effect<A, E>;
-  readonly reset: () => void;
-}
-```
-
-**Recommendation**: This is acceptable as the mutation return type has additional methods. Consider documenting this design choice.
+**Recommendation:** Use consistent naming:
+- `PathReactivityLive` instead of `layer`
+- Or export both: `layer` as alias to `PathReactivityLive`
 
 ---
 
-## Missing Guards or Utilities
+## 4. API Surface Design Analysis
 
-### Missing Type Guards
+### 4.1 Module Export Categories
 
-| Type | Status | Priority |
-|------|--------|----------|
-| `isProcedureDefinition` | Missing | High |
-| `isRouterShape` | Missing | Medium |
-| `isProcedureService` | Missing | Low |
-| `isMiddlewareService` | Missing | Low |
+Each module should export in this order (Effect convention):
 
-### Missing Utilities
+1. **Type IDs** (internal)
+2. **Models/Types**
+3. **Constructors**
+4. **Combinators/Utilities**
+5. **Guards**
+6. **Type-level utilities**
 
-| Utility | Description | Priority |
-|---------|-------------|----------|
-| `Procedure.is` | Type guard for ProcedureDefinition | High |
-| `Router.is` | Type guard for RouterShape | Medium |
-| `Router.extract` | Extract flat procedure map from router | Low |
-| `Middleware.extract` | Extract middleware chain info | Low |
+Current status:
 
----
+| Module | Order Correct | Notes |
+|--------|--------------|-------|
+| Procedure | Mostly | Guards after constructors OK |
+| Router | Yes | |
+| Client | Yes | Missing guards section |
+| Server | Yes | |
+| Transport | Mostly | Should group guards |
+| Middleware | Yes | |
+| Reactivity | Yes | |
+| SSR | Yes | |
 
-## API Design Recommendations
+### 4.2 JSDoc Consistency
 
-### 1. Add Missing Type Guards
-
-```typescript
-// Add to procedures module
-export const isProcedureDefinition = (value: unknown): value is ProcedureDefinition<any, any, any, any, any> =>
-  typeof value === 'object' && value !== null && (value as any)._tag === 'ProcedureDefinition'
-
-// Add to router module  
-export const isRouterShape = (value: unknown): value is RouterShape<any> =>
-  typeof value === 'object' && value !== null && (value as any)._tag === 'Router'
-```
-
-### 2. Standardize Layer Exports
-
-Prefer the namespaced pattern for discoverability:
-
-```typescript
-// Instead of:
-export const WebSocketCodecLive = ...
-
-// Prefer:
-export class WebSocketCodec extends WebSocketCodec_base {
-  static Live = ...
-}
-```
-
-### 3. Add Namespace Re-exports
-
-For better IDE autocomplete, consider namespace re-exports:
-
-```typescript
-export const Procedure = {
-  toLayer,
-  is: isProcedureDefinition,
-  // ... other utilities
-}
-
-export const Router = {
-  make,
-  use,
-  provide,
-  is: isRouterShape,
-  // ...
-}
-```
-
-### 4. Consistent ID Generation
-
-Move all ID generation to a single `ids` or `generators` module:
-
-```typescript
-// effect-trpc/ids
-export const generateRequestId: Effect<RequestId>
-export const generateClientId: Effect<ClientId>
-export const generateSubscriptionId: Effect<SubscriptionId>
-```
-
-### 5. Add JSDoc `@category` Tags
-
-The codebase already has excellent `@since` tags. Consider adding `@category` for better documentation grouping:
+All modules use consistent JSDoc format:
 
 ```typescript
 /**
- * @since 0.1.0
+ * Description
+ * 
+ * @since 1.0.0
+ * @category category-name
+ * @example
+ * ```ts
+ * // example code
+ * ```
+ */
+```
+
+**Categories used:**
+- `models` - Types/interfaces
+- `constructors` - Factory functions
+- `guards` - Type guards
+- `utilities` - Helper functions
+- `type-level` - Type utilities
+- `context` - Context.Tag definitions
+- `errors` - Error classes
+- `layers` - Layer definitions
+- `services` - Service definitions
+- `execution` - Runtime functions
+- `combinators` - Composition functions
+
+### 4.3 Index.ts Re-exports
+
+Main `src/index.ts` exports:
+- All modules as namespaces (`export * as Module from...`)
+- Convenience type re-exports from `types.ts`
+
+**This is correct Effect-style API design.**
+
+---
+
+## 5. Recommendations
+
+### 5.1 High Priority (API Completeness)
+
+1. **Add missing type guards:**
+
+```typescript
+// Router/index.ts
+export const isRouter = (u: unknown): u is Router<any> =>
+  typeof u === "object" && u !== null && RouterTypeId in u
+
+// Client/index.ts  
+export const isClient = (u: unknown): u is Client<any> =>
+  typeof u === "object" && u !== null && ClientTypeId in u
+
+// Transport/index.ts - Add Schema.is wrappers
+export const isSuccess = Schema.is(Success)
+export const isFailure = Schema.is(Failure)
+export const isStreamChunk = Schema.is(StreamChunk)
+export const isStreamEnd = Schema.is(StreamEnd)
+export const isTransportError = (u: unknown): u is TransportError =>
+  u instanceof TransportError
+```
+
+2. **Consider removing unused TypeId:**
+   - `TransportTypeId` is defined but never used in any interface
+
+### 5.2 Medium Priority (Consistency)
+
+1. **Layer naming:**
+   - Rename `Reactivity.layer` to `Reactivity.PathReactivityLive`
+   - Or add alias: `export { layer as PathReactivityLive }`
+
+2. **Add Pipeable to Client:**
+
+```typescript
+// Client/index.ts
+const ClientProto = {
+  [ClientTypeId]: ClientTypeId,
+  pipe() {
+    return pipeArguments(this, arguments)
+  },
+}
+```
+
+### 5.3 Low Priority (Nice-to-have)
+
+1. **Transport convenience guards:**
+   - `isTransientError` already exists
+   - Add `isNetworkError`, `isTimeoutError`, `isProtocolError`
+
+2. **SSR guards:**
+   - `isDehydratedState(u: unknown): u is DehydratedState`
+
+---
+
+## 6. Summary Table
+
+| Category | Status | Action Required |
+|----------|--------|-----------------|
+| Constructor naming | Good | None |
+| Type guards | Incomplete | Add 6-8 guards |
+| TypeId pattern | Good | Remove unused `TransportTypeId` |
+| Pipeable | Good | Add to Client |
+| Layer naming | Inconsistent | Rename `layer` |
+| JSDoc | Excellent | None |
+| Module structure | Excellent | None |
+| Type utilities | Excellent | None |
+
+**Overall Assessment:** The API is well-designed and mostly consistent with Effect patterns. The main gaps are missing type guards, which should be straightforward to add.
+
+---
+
+## 7. Complete Missing Guards Implementation
+
+```typescript
+// ============================================
+// Router/index.ts - Add after utilities section
+// ============================================
+
+/**
+ * Check if a value is a Router
+ * 
+ * @since 1.0.0
  * @category guards
  */
-export const isProcedureDefinition = ...
+export const isRouter = (u: unknown): u is Router<any> =>
+  typeof u === "object" && u !== null && RouterTypeId in u
+
+// ============================================
+// Client/index.ts - Add guards section
+// ============================================
 
 /**
- * @since 0.1.0
- * @category constructors
+ * Check if a value is a Client
+ * 
+ * @since 1.0.0
+ * @category guards
  */
-export const procedure = ...
+export const isClient = (u: unknown): u is Client<any> =>
+  typeof u === "object" && u !== null && ClientTypeId in u
+
+/**
+ * Check if a value is a BoundClient
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isBoundClient = (u: unknown): u is BoundClient<any> =>
+  isClient(u) && typeof (u as any).shutdown === "function"
+
+// ============================================
+// Transport/index.ts - Add after response schemas
+// ============================================
+
+/**
+ * Check if a response is Success
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isSuccess = Schema.is(Success)
+
+/**
+ * Check if a response is Failure
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isFailure = Schema.is(Failure)
+
+/**
+ * Check if a response is StreamChunk
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isStreamChunk = Schema.is(StreamChunk)
+
+/**
+ * Check if a response is StreamEnd
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isStreamEnd = Schema.is(StreamEnd)
+
+/**
+ * Check if a value is a TransportError
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isTransportError = (u: unknown): u is TransportError =>
+  u instanceof TransportError
+
+/**
+ * Check if a value is a TransportRequest
+ * 
+ * @since 1.0.0
+ * @category guards
+ */
+export const isTransportRequest = (u: unknown): u is TransportRequest =>
+  typeof u === "object" &&
+  u !== null &&
+  "id" in u &&
+  "tag" in u &&
+  "payload" in u
 ```
-
----
-
-## Summary Scorecard
-
-| Category | Score | Notes |
-|----------|-------|-------|
-| Naming Consistency | 9/10 | Minor inconsistencies in Layer naming |
-| Pattern Adherence | 9/10 | Excellent Effect ecosystem compliance |
-| Type Guard Coverage | 7/10 | Missing guards for core types |
-| API Discoverability | 8/10 | Good namespace pattern, could improve |
-| Documentation | 8/10 | Good JSDoc, could add categories |
-
-**Overall Score: 8.2/10** - Strong API design with minor improvements needed.
-
----
-
-## Action Items
-
-### High Priority
-1. [ ] Add `isProcedureDefinition` type guard
-2. [ ] Add `isRouterShape` type guard
-3. [ ] Standardize Layer naming convention
-
-### Medium Priority
-4. [ ] Consolidate ID generation functions
-5. [ ] Add `@category` JSDoc tags
-6. [ ] Remove duplicate `SubscriptionRegistryLive` export
-
-### Low Priority
-7. [ ] Add `Procedure.is`, `Router.is` namespace shortcuts
-8. [ ] Document design choices (e.g., why UseQueryReturn vs UseMutationReturn differ)

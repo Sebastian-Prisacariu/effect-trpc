@@ -1,95 +1,186 @@
-# Configuration and Options Analysis
+# Configuration Analysis
+
+Deep analysis of effect-trpc's configuration/options interfaces and their actual usage.
 
 ## Overview
 
-This document analyzes configuration handling across the effect-trpc codebase, examining all options interfaces, their usage patterns, default value handling, and validation approaches.
+effect-trpc defines **13 distinct configuration interfaces** across its modules. This analysis examines what's declared vs. what's actually used in the implementation.
 
 ---
 
-## All Configuration Interfaces Found
+## 1. Server Module (`Server/index.ts`)
 
-### 1. Server Module (`src/Server/index.ts`)
+### HttpHandlerOptions
 
-#### `HttpHandlerOptions` (Line 361)
 ```typescript
 export interface HttpHandlerOptions {
-  /**
-   * Base path for the RPC endpoint (default: "/rpc")
-   */
-  readonly path?: string
+  readonly path?: string  // Base path for RPC endpoint (default: "/rpc")
 }
 ```
 
-**Status**: UNUSED/FAKE CONFIGURATION
+**Status: DECLARED BUT IGNORED**
 
-The `path` option is accepted but completely ignored in `toHttpHandler`:
+| Option | Declared | Used | Notes |
+|--------|----------|------|-------|
+| `path` | Yes | **NO** | Never accessed in `toHttpHandler()` or other HTTP handlers |
+
+**Evidence:**
 ```typescript
+// Line 470-473: Options parameter received but never used
 export const toHttpHandler = <D extends Router.Definition, R>(
   server: Server<D, R>,
-  _options?: HttpHandlerOptions  // <-- Parameter prefixed with _ (unused)
+  _options?: HttpHandlerOptions  // <-- Prefixed with underscore, ignored
 ): (request: HttpRequest) => Effect.Effect<HttpResponse, never, R> => {
-  return (request: HttpRequest) =>
-    // ... path is never used
-}
 ```
 
-**Evidence**: The underscore prefix `_options` is a convention indicating intentionally unused parameter.
+**Impact:** Users cannot configure the base path for RPC endpoints.
 
 ---
 
-### 2. Transport Module (`src/Transport/index.ts`)
+## 2. Transport Module (`Transport/index.ts`)
 
-#### `HttpOptions` (Line 199)
+### HttpOptions
+
 ```typescript
 export interface HttpOptions {
-  /**
-   * Request headers (static or dynamic)
-   */
   readonly headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>)
-  
-  /**
-   * Request timeout
-   */
   readonly timeout?: Duration.DurationInput
-  
-  /**
-   * Batching configuration
-   */
-  readonly batching?: {
-    readonly enabled?: boolean      // default: true for queries
-    readonly window?: Duration.DurationInput  // default: 0 = microtask
-    readonly maxSize?: number       // default: 50
-    readonly queries?: boolean      // default: true
-    readonly mutations?: boolean    // default: false
-  }
-  
-  /**
-   * Custom fetch implementation
-   */
   readonly fetch?: typeof globalThis.fetch
 }
 ```
 
-**Status**: PARTIALLY USED
+**Status: FULLY IMPLEMENTED**
 
-| Option | Used | Evidence |
-|--------|------|----------|
-| `headers` | YES | Used in `sendHttp()` at line 286-288 |
-| `timeout` | YES | Used at line 270, 291-293 |
-| `fetch` | YES | Used at line 269, 273-274 |
-| `batching.enabled` | NO | Not implemented |
-| `batching.window` | NO | Not implemented |
-| `batching.maxSize` | NO | Not implemented |
-| `batching.queries` | NO | Not implemented |
-| `batching.mutations` | NO | Not implemented |
+| Option | Declared | Used | Default |
+|--------|----------|------|---------|
+| `headers` | Yes | Yes | `{}` |
+| `timeout` | Yes | Yes | `30000ms` |
+| `fetch` | Yes | Yes | `globalThis.fetch` |
 
-**Critical Issue**: The entire `batching` configuration is documented but never implemented. The test at `test/transport.test.ts:54-66` passes because it only verifies the layer is created, not that batching works.
+**Evidence:**
+```typescript
+// Line 238-244: All options actually used
+const fetchFn = options?.fetch ?? globalThis.fetch
+const timeout = options?.timeout ? Duration.toMillis(options.timeout) : 30000
+
+return Layer.succeed(Transport, {
+  send: (request) => sendHttp(url, request, fetchFn, options?.headers, timeout),
+  sendStream: (request) => sendHttpStream(url, request, fetchFn, options?.headers),
+})
+```
+
+**Note:** Batching is planned but not implemented (documented in `/plans/batching.md`).
 
 ---
 
-### 3. Client Module (`src/Client/index.ts`)
+## 3. Middleware Module (`Middleware/index.ts`)
 
-#### `QueryOptions` (Line 399)
+### MiddlewareConfig
+
+```typescript
+export interface MiddlewareConfig<Provides, Failure> {
+  readonly provides: Context.Tag<any, Provides>
+  readonly failure?: Schema.Schema<Failure, any>
+}
+```
+
+**Status: NOT DIRECTLY USED**
+
+This interface is documented but the actual `Tag` constructor uses a different signature:
+
+```typescript
+// Actual usage pattern:
+export const Tag = <Provides, Failure = never>(
+  id: string,
+  provides: Context.Tag<any, Provides>
+): MiddlewareTag<any, Provides, Failure>
+```
+
+**Analysis:** The `MiddlewareConfig` interface appears to be documentation-only. The `failure` schema is a type parameter, not a runtime value passed to the tag constructor.
+
+### CombinedMiddleware Options
+
+```typescript
+// Via Middleware.all()
+{ concurrency?: "sequential" | "unbounded" | number }
+```
+
+**Status: DECLARED, STORED, BUT NOT USED**
+
+| Option | Declared | Stored | Actually Used |
+|--------|----------|--------|---------------|
+| `concurrency` | Yes | Yes | **NO** |
+
+**Evidence:**
+```typescript
+// Line 294-308: concurrency is stored but...
+export const all = <Tags extends ReadonlyArray<MiddlewareTag<any, any, any>>>(
+  ...args: [...Tags] | [...Tags, { concurrency?: "sequential" | "unbounded" | number }]
+): CombinedMiddleware<Tags> => {
+  // ...
+  return {
+    [MiddlewareTypeId]: MiddlewareTypeId,
+    tags,
+    concurrency: options.concurrency ?? "sequential",  // Stored!
+  }
+}
+
+// Line 356-371: But execute() ignores it!
+export const execute = <A, E, R>(
+  middlewares: ReadonlyArray<Applicable>,
+  request: MiddlewareRequest,
+  handler: Effect.Effect<A, E, R>
+): Effect.Effect<...> => {
+  const flatMiddlewares = middlewares.flatMap((m) =>
+    MiddlewareTypeId in m ? (m as CombinedMiddleware<any>).tags : [m]
+  )
+  
+  // Always executes sequentially via reduceRight!
+  return flatMiddlewares.reduceRight(
+    (next, middleware) => executeOne(middleware, request, next),
+    handler as Effect.Effect<A, any, any>
+  )
+}
+```
+
+**Impact:** Users cannot parallelize independent middleware execution.
+
+---
+
+## 4. SSR Module (`SSR/index.ts`)
+
+### DehydrateOptions
+
+```typescript
+export interface DehydrateOptions {
+  readonly includeErrors?: boolean  // Whether to include failed queries (default: false)
+}
+```
+
+**Status: DECLARED BUT IGNORED**
+
+| Option | Declared | Used | Notes |
+|--------|----------|------|-------|
+| `includeErrors` | Yes | **NO** | Never accessed in `dehydrate()` |
+
+**Evidence:**
+```typescript
+// Line 101-107: Options parameter ignored
+export const dehydrate = (
+  queries: Record<string, unknown>,
+  _options?: DehydrateOptions  // <-- Underscore prefix
+): DehydratedState => ({
+  queries,
+  timestamp: Date.now(),
+})
+```
+
+---
+
+## 5. Client Module (`Client/index.ts`)
+
+### QueryOptions
+
 ```typescript
 export interface QueryOptions {
   readonly enabled?: boolean
@@ -98,17 +189,27 @@ export interface QueryOptions {
 }
 ```
 
-**Status**: PARTIALLY USED
+**Status: PARTIALLY IMPLEMENTED**
 
-| Option | Used | Evidence |
-|--------|------|----------|
-| `enabled` | YES | Used in `react.ts:148, 159, 191, 205` |
-| `refetchInterval` | YES | Used in `react.ts:148, 204-209` |
-| `staleTime` | NO | Extracted at line 148 but never used |
+| Option | Declared | Used | Notes |
+|--------|----------|------|-------|
+| `enabled` | Yes | Yes | Works |
+| `refetchInterval` | Yes | **NO** | Declared but never used in React hooks |
+| `staleTime` | Yes | **NO** | Declared but never used |
 
-**Issue**: `staleTime` is documented and accepted but has no implementation.
+**Evidence (react.ts):**
+```typescript
+// Line 162-164: Only enabled is destructured
+return function useQuery(
+  payload?: Payload,
+  options: UseQueryOptions = {}
+): UseQueryResult<Success, Error> {
+  const { enabled = true, suspense = false } = options
+  // refetchInterval and staleTime never accessed!
+```
 
-#### `MutationOptions<Success, Error>` (Line 436)
+### MutationOptions
+
 ```typescript
 export interface MutationOptions<Success, Error> {
   readonly onSuccess?: (data: Success) => void
@@ -117,58 +218,40 @@ export interface MutationOptions<Success, Error> {
 }
 ```
 
-**Status**: FULLY USED
+**Status: FULLY IMPLEMENTED**
 
-All callbacks are used in `react.ts:262, 293-294, 302-304`.
+All callbacks are properly wired in `react.ts:261-335`.
 
-#### `StreamOptions` (Line 476)
+### StreamOptions
+
 ```typescript
 export interface StreamOptions {
   readonly enabled?: boolean
 }
 ```
 
-**Status**: FULLY USED
-
-Used in `react.ts:384, 395`.
+**Status: FULLY IMPLEMENTED**
 
 ---
 
-### 4. Procedure Module (`src/Procedure/index.ts`)
+## 6. Procedure Module (`Procedure/index.ts`)
 
-#### `OptimisticConfig<Target, Payload, Success>` (Line 124)
+### QueryOptions
+
 ```typescript
-export interface OptimisticConfig<in out Target, in Payload, in Success> {
-  readonly target: string
-  readonly reducer: (current: Target, payload: Payload) => Target
-  readonly reconcile?: (current: Target, payload: Payload, result: Success) => Target
-}
-```
-
-**Status**: ACCEPTED BUT NOT IMPLEMENTED
-
-The config is stored on mutations (line 374) but never executed. No optimistic update logic exists in the client.
-
-#### `QueryOptions<Payload, Success, Error>` (Line 214)
-```typescript
-export interface QueryOptions<
-  Payload extends Schema.Schema.Any,
-  Success extends Schema.Schema.Any,
-  Error extends Schema.Schema.All
-> {
+export interface QueryOptions<Payload, Success, Error> {
   readonly payload?: Payload
   readonly success: Success
   readonly error?: Error
 }
 ```
 
-**Status**: FULLY USED
+**Status: FULLY IMPLEMENTED**
 
-Used in `query()` constructor (line 258-272).
+### MutationOptions
 
-#### `MutationOptions<Payload, Success, Error, Paths, Target>` (Line 280)
 ```typescript
-export interface MutationOptions<...> {
+export interface MutationOptions<Payload, Success, Error, Paths, Target> {
   readonly payload?: Payload
   readonly success: Success
   readonly error?: Error
@@ -177,248 +260,168 @@ export interface MutationOptions<...> {
 }
 ```
 
-**Status**: MOSTLY USED
+**Status: PARTIALLY IMPLEMENTED**
 
-| Option | Used | Evidence |
-|--------|------|----------|
-| `payload` | YES | Line 370 |
-| `success` | YES | Line 371 |
-| `error` | YES | Line 372 |
-| `invalidates` | YES | Line 373, used in Client |
-| `optimistic` | STORED ONLY | Line 374, no execution |
+| Option | Declared | Used | Notes |
+|--------|----------|------|-------|
+| `payload` | Yes | Yes | Works |
+| `success` | Yes | Yes | Works |
+| `error` | Yes | Yes | Works |
+| `invalidates` | Yes | Yes | Works (stored, triggers invalidation) |
+| `optimistic` | Yes | **STORED ONLY** | Never executed |
 
-#### `StreamOptions<Payload, Success, Error>` (Line 384)
+**Evidence:**
 ```typescript
-export interface StreamOptions<
-  Payload extends Schema.Schema.Any,
-  Success extends Schema.Schema.Any,
-  Error extends Schema.Schema.All
-> {
+// Procedure/index.ts Line 367-375: optimistic is stored
+self.optimistic = options.optimistic
+
+// BUT nowhere in the codebase is optimistic.reducer or optimistic.reconcile called!
+```
+
+**Impact:** Optimistic updates are defined but never applied.
+
+### StreamOptions
+
+```typescript
+export interface StreamOptions<Payload, Success, Error> {
   readonly payload?: Payload
   readonly success: Success
   readonly error?: Error
 }
 ```
 
-**Status**: FULLY USED
-
-Used in `stream()` constructor (line 426-440).
+**Status: FULLY IMPLEMENTED**
 
 ---
 
-### 5. Middleware Module (`src/Middleware/index.ts`)
+## 7. React Module (`Client/react.ts`)
 
-#### `MiddlewareConfig<Provides, Failure>` (Line 103)
+### UseQueryOptions
+
 ```typescript
-export interface MiddlewareConfig<Provides, Failure> {
-  readonly provides: Context.Tag<any, Provides>
-  readonly failure?: Schema.Schema<Failure, any>
+export interface UseQueryOptions {
+  readonly enabled?: boolean
+  readonly refetchInterval?: number
+  readonly suspense?: boolean
 }
 ```
 
-**Status**: TYPE-ONLY
+**Status: PARTIALLY IMPLEMENTED**
 
-This interface is defined but not used in actual construction. The `Tag` function at line 172 takes separate parameters instead of a config object:
-```typescript
-export const Tag = <Provides, Failure = never>(
-  id: string,
-  provides: Context.Tag<any, Provides>
-): MiddlewareTag<any, Provides, Failure>
-```
+| Option | Declared | Used | Notes |
+|--------|----------|------|-------|
+| `enabled` | Yes | Yes | Works |
+| `refetchInterval` | Yes | **NO** | Never implemented |
+| `suspense` | Yes | Yes | Controls useAtomSuspense vs useAtomValue |
 
-The `failure` field is never actually accepted.
-
----
-
-## Default Value Handling
-
-### Explicit Defaults (Good)
-
-| Location | Option | Default | Implementation |
-|----------|--------|---------|----------------|
-| `Procedure.query` | `payload` | `Schema.Void` | `options.payload ?? Schema.Void` |
-| `Procedure.query` | `error` | `Schema.Never` | `options.error ?? Schema.Never` |
-| `Procedure.mutation` | `payload` | `Schema.Void` | `options.payload ?? Schema.Void` |
-| `Procedure.mutation` | `error` | `Schema.Never` | `options.error ?? Schema.Never` |
-| `Procedure.stream` | `payload` | `Schema.Void` | `options.payload ?? Schema.Void` |
-| `Procedure.stream` | `error` | `Schema.Never` | `options.error ?? Schema.Never` |
-| `Transport.http` | `fetch` | `globalThis.fetch` | `options?.fetch ?? globalThis.fetch` |
-| `Transport.http` | `timeout` | `30000ms` | `options?.timeout ? Duration.toMillis(...) : 30000` |
-| `react.ts useQuery` | `enabled` | `true` | `const { enabled = true, ... } = options` |
-| `react.ts useStream` | `enabled` | `true` | `const { enabled = true } = options` |
-
-### Documented But Not Implemented Defaults
-
-| Location | Option | Documented Default | Actual |
-|----------|--------|-------------------|--------|
-| `HttpOptions.batching.enabled` | `true for queries` | Not implemented |
-| `HttpOptions.batching.window` | `0 = microtask` | Not implemented |
-| `HttpOptions.batching.maxSize` | `50` | Not implemented |
-| `HttpOptions.batching.queries` | `true` | Not implemented |
-| `HttpOptions.batching.mutations` | `false` | Not implemented |
-| `HttpHandlerOptions.path` | `"/rpc"` | Completely ignored |
-
----
-
-## Configuration Validation
-
-### Current State: NO VALIDATION
-
-None of the configuration interfaces include runtime validation:
-
-1. **No Schema validation** - Options are not validated against schemas
-2. **No type guards** - No runtime checks for invalid option combinations
-3. **No error messages** - Invalid options silently ignored
-
-### Example Issues
+### UseMutationOptions
 
 ```typescript
-// This silently ignores invalid batching config
-Transport.http("/api", {
-  batching: {
-    enabled: "yes",      // Should be boolean
-    maxSize: -100,       // Should be positive
-    window: "invalid",   // Should be Duration
-  }
-})
-
-// This silently ignores path
-Server.toHttpHandler(server, { path: "/custom" })  // path ignored
+export interface UseMutationOptions<Success, Error> {
+  readonly onSuccess?: (data: Success) => void
+  readonly onError?: (error: Error) => void
+  readonly onSettled?: () => void
+}
 ```
+
+**Status: FULLY IMPLEMENTED**
+
+### UseStreamOptions
+
+```typescript
+export interface UseStreamOptions {
+  readonly enabled?: boolean
+}
+```
+
+**Status: FULLY IMPLEMENTED**
 
 ---
 
-## Summary Tables
+## Summary Table
 
-### Options Usage Summary
+| Module | Interface | Total Options | Implemented | Ignored |
+|--------|-----------|---------------|-------------|---------|
+| Server | `HttpHandlerOptions` | 1 | 0 (0%) | 1 |
+| Transport | `HttpOptions` | 3 | 3 (100%) | 0 |
+| Middleware | `CombinedMiddleware` | 1 | 0 (0%) | 1 |
+| SSR | `DehydrateOptions` | 1 | 0 (0%) | 1 |
+| Client | `QueryOptions` | 3 | 1 (33%) | 2 |
+| Client | `MutationOptions` | 3 | 3 (100%) | 0 |
+| Client | `StreamOptions` | 1 | 1 (100%) | 0 |
+| Procedure | `MutationOptions` | 5 | 4 (80%) | 1 |
+| React | `UseQueryOptions` | 3 | 2 (67%) | 1 |
 
-| Interface | Total Options | Used | Partially Used | Unused |
-|-----------|--------------|------|----------------|--------|
-| `HttpHandlerOptions` | 1 | 0 | 0 | 1 |
-| `HttpOptions` | 7 | 3 | 0 | 4 (batching.*) |
-| `QueryOptions` (Client) | 3 | 2 | 0 | 1 (staleTime) |
-| `MutationOptions` (Client) | 3 | 3 | 0 | 0 |
-| `StreamOptions` (Client) | 1 | 1 | 0 | 0 |
-| `OptimisticConfig` | 3 | 0 | 0 | 3 (stored only) |
-| `MiddlewareConfig` | 2 | 1 | 0 | 1 (failure) |
+**Overall: 21 total options, 14 implemented (67%), 7 ignored (33%)**
 
-### Severity Classification
+---
 
-| Issue | Severity | Impact |
-|-------|----------|--------|
-| `batching` not implemented | HIGH | Users expect batching to work per docs |
-| `HttpHandlerOptions.path` ignored | MEDIUM | Misleading API |
-| `staleTime` not implemented | MEDIUM | React users expect caching |
-| `optimistic` not implemented | HIGH | Feature advertised but doesn't work |
-| `MiddlewareConfig.failure` unused | LOW | Type-only, no runtime impact |
-| No validation | MEDIUM | Silent failures |
+## Default Values
+
+| Option | Default | Location |
+|--------|---------|----------|
+| `Transport.HttpOptions.timeout` | `30000` (30s) | Transport/index.ts:239 |
+| `Transport.HttpOptions.headers` | `{}` | Transport/index.ts:256-257 |
+| `Middleware.all().concurrency` | `"sequential"` | Middleware/index.ts:306 |
+| `QueryOptions.enabled` | `true` | Client/react.ts:164 |
+| `UseQueryOptions.suspense` | `false` | Client/react.ts:164 |
+| `StreamOptions.enabled` | `true` | Client/react.ts:398 |
+| `Procedure.query.payload` | `Schema.Void` | Procedure/index.ts:268 |
+| `Procedure.query.error` | `Schema.Never` | Procedure/index.ts:270 |
 
 ---
 
 ## Recommendations
 
-### Priority 1: Remove or Implement Fake Config
+### Critical (Must Fix)
 
-**Option A: Remove unimplemented options** (Recommended for MVP)
-```typescript
-// Remove from HttpOptions:
-// - batching (entire object)
+1. **Implement `optimistic` updates** - The feature is advertised in the API but never executed. Either implement or remove.
 
-// Remove from HttpHandlerOptions:
-// - path (or implement it)
+2. **Implement or remove `refetchInterval`** - Commonly expected behavior for queries.
 
-// Remove from QueryOptions:
-// - staleTime
+3. **Implement or remove `staleTime`** - Core caching behavior that users will expect.
 
-// Remove from MutationOptions/OptimisticConfig:
-// - optimistic (entire feature)
-```
+### High Priority
 
-**Option B: Implement the features** (Future)
-- Batching requires significant work (request batching, response correlation)
-- Optimistic updates need client-side cache management
+4. **Implement `concurrency` for middleware** - The option is stored but Effect's `Effect.all({ concurrency })` pattern is never used.
 
-### Priority 2: Clean Up Type-Only Interfaces
+5. **Implement `HttpHandlerOptions.path`** - Or remove the interface if paths are handled differently.
 
-Remove `MiddlewareConfig` interface if not used, or update `Middleware.Tag` to accept a config object.
+### Medium Priority
 
-### Priority 3: Add Runtime Validation
+6. **Implement `DehydrateOptions.includeErrors`** - Currently all errors are silently excluded.
 
-```typescript
-// Example with Schema validation
-export const http = (
-  url: string,
-  options?: HttpOptions
-): Layer.Layer<Transport, never, never> => {
-  // Validate options
-  if (options?.timeout !== undefined) {
-    const ms = Duration.toMillis(options.timeout)
-    if (ms <= 0) {
-      throw new Error("timeout must be positive")
-    }
-  }
-  // ...
-}
-```
+### Code Cleanup
 
-### Priority 4: Document Actual Behavior
+7. **Remove underscore prefixes** - Parameters like `_options` should either be used or the interface simplified.
 
-Update JSDoc to reflect what actually works:
-```typescript
-/**
- * HTTP transport configuration
- * 
- * @since 1.0.0
- * @category models
- */
-export interface HttpOptions {
-  /**
-   * Request headers (static or dynamic)
-   */
-  readonly headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>)
-  
-  /**
-   * Request timeout (default: 30 seconds)
-   */
-  readonly timeout?: Duration.DurationInput
-  
-  /**
-   * Custom fetch implementation
-   */
-  readonly fetch?: typeof globalThis.fetch
-  
-  // REMOVED: batching (not implemented)
-}
-```
+8. **Document "planned" vs "implemented"** - Use `@experimental` or `@internal` JSDoc tags for unimplemented options.
 
 ---
 
-## Code Smell Indicators
+## Configuration Flow
 
-1. **Underscore-prefixed parameters**: `_options` in `toHttpHandler` - clear sign of unused
-2. **Destructured but unused**: `staleTime` extracted from options but never referenced
-3. **Stored but not executed**: `optimistic` config saved on mutation but no execution code
-4. **Test coverage gaps**: Tests verify "options accepted" not "options work"
+```
+User Config → Procedure Options → Router → Server → HTTP Handler
+                                            ↓
+                                    Transport Options → Network
+                                            ↓
+                                    Middleware Options → Execution
+```
 
----
-
-## Files Requiring Changes
-
-| File | Change Needed |
-|------|---------------|
-| `src/Transport/index.ts` | Remove `batching` from `HttpOptions` |
-| `src/Server/index.ts` | Remove `path` from `HttpHandlerOptions` or implement |
-| `src/Client/index.ts` | Remove `staleTime` from `QueryOptions` |
-| `src/Procedure/index.ts` | Remove `optimistic` or mark as `@experimental` |
-| `src/Middleware/index.ts` | Clean up `MiddlewareConfig` |
-| `test/transport.test.ts` | Remove batching tests until implemented |
+Most configuration happens at the **Procedure level** (schemas, invalidation) and **Transport level** (HTTP options). Server and middleware configuration is minimal.
 
 ---
 
-## Conclusion
+## Missing Configuration (Feature Gaps)
 
-The codebase has a significant gap between documented configuration and actual implementation. Approximately 40% of configuration options are either completely unused or only partially implemented. This creates a misleading API where users configure features that don't work.
+Compared to tRPC v11, effect-trpc lacks configuration for:
 
-**Immediate action**: Remove unimplemented options to align documentation with reality.
+1. **Batching** - Link-level batching configuration
+2. **SSE options** - Ping interval, reconnection settings
+3. **Retry policies** - Automatic retry configuration
+4. **Request deduplication** - Configurable deduplication windows
+5. **Transformer configuration** - Custom serialization (uses Schema instead)
+6. **Context factories** - Per-request context creation
 
-**Future work**: Implement batching and optimistic updates as separate feature additions with proper tests.
+Most of these are either "planned" or handled differently via Effect patterns (e.g., retry via `Effect.retry`).

@@ -1,416 +1,441 @@
 # Test Coverage Analysis
 
-## Executive Summary
+## Summary
 
-**Overall Coverage Assessment: GOOD with significant gaps**
+**Total Test Files:** 14 (including e2e suite files)
+**Test Categories:** Unit, Integration, E2E, Type-level
 
-The test suite covers most module APIs comprehensively but has critical gaps in:
-1. **React hooks integration** - Hooks only tested for "throws outside context"
-2. **Actual middleware execution** - Only structural tests, no execution verification
-3. **Error propagation paths** - Schema decode errors largely untested
-4. **Client.run/runPromise** - Imperative API not tested with actual effects
+### Coverage by Module
+
+| Module | Tested | Coverage | Quality |
+|--------|--------|----------|---------|
+| Procedure | Yes | High | Good |
+| Router | Yes | High | Good |
+| Middleware | Yes | Medium | Good |
+| Server | Yes | High | Good |
+| Client | Partial | Low | Weak |
+| Transport | Yes | High | Good |
+| Reactivity | Yes | High | Good |
+| HTTP Adapter | Yes | High | Good |
+| Types | Yes | High | Good |
+| **React Hooks** | **Minimal** | **Low** | **Weak** |
+| **SSR** | **No** | **None** | **N/A** |
 
 ---
 
-## Coverage Summary by Module
+## Detailed Module Analysis
 
-### 1. Procedure Module
-**File:** `src/Procedure/index.ts` (544 lines)
-**Test:** `test/procedure.test.ts` (315 lines)
+### 1. Procedure (procedure.test.ts) - 315 lines
 
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `query()` constructor | Yes | Good |
-| `mutation()` constructor | Yes | Good |
-| `stream()` constructor | Yes | Good |
-| Type inference (Payload, Success, Error) | Yes | Good |
-| Guards (isProcedure, isQuery, etc.) | Yes | Good |
-| `.middleware()` chaining | Yes | Good |
-| Optimistic update config | Yes | Partial |
-| `@ts-expect-error` compile checks | Yes | Good |
-| `.pipe()` pipeability | Yes | Weak (only checks existence) |
+**Tested:**
+- `Procedure.query()` creation and validation
+- `Procedure.mutation()` with invalidates
+- `Procedure.stream()` creation
+- Type guards: `isProcedure`, `isQuery`, `isMutation`, `isStream`
+- Type inference: `Payload`, `Success`, `Error`, `Invalidates`
+- Optimistic update configuration
+- `@ts-expect-error` validation for required fields
+
+**Not Tested:**
+- Pipeable chaining behaviors
+- Complex schema compositions
+- Middleware attachment (deferred to middleware tests)
+
+**Quality:** Good - comprehensive schema and type testing
+
+---
+
+### 2. Router (router.test.ts) - 311 lines
+
+**Tested:**
+- `Router.make()` with flat and nested definitions
+- Tag derivation from paths (`@api/users/list`)
+- PathMap: `pathToTag`, `tagToPath`, `procedures`
+- `Router.paths()` extraction
+- `Router.get()` by path
+- `Router.tagOf()` for path-to-tag lookup
+- `Router.tagsToInvalidate()` hierarchical invalidation
+- `getChildPaths()` for prefix queries
+- Type inference: `Paths`, `ProcedureAt`
+- Mixed procedure types (query, mutation, stream)
+
+**Not Tested:**
+- Router merging/composition (not implemented)
+- Dynamic route parameters (not implemented)
+
+**Quality:** Good - covers all current functionality
+
+---
+
+### 3. Middleware (middleware.test.ts) - 290 lines
+
+**Tested:**
+- `Middleware.Tag()` creation
+- `Middleware.implement()` layer creation
+- `Middleware.all()` composition with concurrency options
+- `Procedure.middleware()` attachment
+- `Router.withMiddleware()` group middleware
+- `Server.middleware()` server-level middleware
+- Guards: `isMiddlewareTag`, `isCombinedMiddleware`, `isApplicable`
+- Middleware ordering in arrays
+
+**Not Tested:**
+- **Actual middleware execution** (only structure tests)
+- Error propagation from middleware
+- Context provision to handlers
+- Request/response transformation
+- Sequential vs concurrent execution behavior
+
+**Quality:** Medium - tests structure but not behavior
+
+---
+
+### 4. Server (server.test.ts) - 334 lines
+
+**Tested:**
+- `Server.make()` creation
+- `Server.isServer()` guard
+- `server.handle()` for queries (with Effect tests)
+- `server.handleStream()` for streams (with Effect tests)
+- Handler type inference: `HandlerFor`, `Handlers`
+- Error handling (NotFoundError, unknown procedures)
+- Middleware attachment
+
+**Not Tested:**
+- Payload validation errors
+- Success/error schema encoding
+- Complex dependency injection scenarios
+- Stream error mid-stream
+
+**Quality:** Good - core functionality covered
+
+---
+
+### 5. Client (client.test.ts) - 207 lines
+
+**Tested:**
+- `Client.make()` proxy structure
+- `Client.provide()` bound client creation
+- `Client.ClientServiceLive` layer composition
+- Type inference: `ProcedurePayload`, `ProcedureSuccess`, `ProcedureError`
+- Nested router access
+
+**Not Tested:**
+- **`run` Effect execution**
+- **`runPromise` execution**
+- **`prefetch` behavior**
+- **`invalidate()` functionality**
+- **`shutdown()` cleanup**
+- **Stream client `.stream` method**
+- Error handling through transport
+
+**Quality:** Weak - only tests structure, not behavior
+
+---
+
+### 6. Transport (transport.test.ts) - 237 lines
+
+**Tested:**
+- `Transport.http()` layer creation with options
+- `Transport.mock()` layer creation
+- `TransportError` with all reasons (Network, Timeout, Protocol, Closed)
+- `isTransientError()` for retry logic
+- Protocol types: `TransportRequest`, `Success`, `Failure`, `StreamChunk`, `StreamEnd`
+- Schema type guards
+
+**Not Tested:**
+- **Actual HTTP communication** (deferred to e2e/http.test.ts)
+- Headers propagation
+- Timeout behavior
+- Retry logic
+- Batching (not yet implemented)
+
+**Quality:** Good for type/structure, but no network tests
+
+---
+
+### 7. HTTP Adapter (http-adapter.test.ts) - 311 lines
+
+**Tested:**
+- `Server.toHttpHandler()` with Effect tests
+- `Server.toFetchHandler()` with async tests
+- `Server.toNextApiHandler()` with mock req/res
+- Success/failure response encoding
+- Headers passthrough
+- Invalid JSON handling (400 response)
+
+**Quality:** Good - comprehensive adapter coverage
+
+---
+
+### 8. Reactivity (reactivity.test.ts) - 201 lines
+
+**Tested:**
+- `normalizePath()` dot-to-slash conversion
+- `shouldInvalidate()` hierarchical matching
+- `PathReactivity` service with `@effect/vitest`
+- Registration/unregistration with scope
+- Reference counting for multiple registrations
+- `invalidate()` triggering
+- Convenience functions: `register`, `invalidate`, `getRegisteredPaths`
+
+**Quality:** Good - covers path-based reactivity
+
+---
+
+### 9. Integration (integration.test.ts) - 307 lines
+
+**Tested:**
+- Server handling with dependencies
+- Loopback transport end-to-end
+- Type flow: Procedure -> Router -> Server -> Client
+- Middleware integration points
+
+**Quality:** Good - validates module interactions
+
+---
+
+### 10. E2E Suite (e2e/suite.ts, fixtures.ts, http.test.ts, loopback.test.ts)
+
+**Tested:**
+- Full client-to-server communication
+- Query, Mutation, Stream flows
+- Error propagation
+- Schema round-trip
+- Middleware enforcement
+- HTTP transport with real Node.js server
+- Loopback transport
+
+**Quality:** Excellent - production-realistic scenarios
+
+---
+
+### 11. Types (types.test.ts) - 305 lines
+
+**Tested:**
+- All `@ts-expect-error` validations
+- Cross-module type flow consistency
+- Procedure/Router/Server/Client type alignment
+
+**Quality:** Good - ensures type safety
+
+---
+
+## Critical Gaps
+
+### 1. React Hooks - NO TESTS
+
+**Files:**
+- `src/Client/react.ts` (457 lines)
+
+**Completely Untested:**
+- `createProvider()` - Provider component
+- `createUseQuery()` - useQuery hook
+- `createUseMutation()` - useMutation hook  
+- `createUseStream()` - useStream hook
+- `TrpcContext` - context usage
+- Atom integration with `@effect-atom/atom-react`
+- Reactivity key generation
+- Result state handling (isLoading, isError, isSuccess)
+- Refetch functionality
+- Mutation lifecycle callbacks (onSuccess, onError, onSettled)
+- Stream connection management
+
+**Current Test (client.test.ts):**
+```typescript
+describe("React hooks", () => {
+  it("hooks throw outside React context", () => {
+    expect(() => bound.users.list.useQuery()).toThrow()
+    expect(() => bound.users.create.useMutation()).toThrow()
+  })
+})
+```
+This only tests that hooks throw when used incorrectly - **not that they work correctly**.
+
+**Risk:** High - React integration is a primary use case
+
+---
+
+### 2. SSR Module - NO TESTS
+
+**Files:**
+- `src/SSR/index.ts` (209 lines)
+
+**Completely Untested:**
+- `dehydrate()` function
+- `createPrefetch()` helper
+- `Hydrate` component
+- `isServer` / `isClient` checks
+
+**Risk:** Medium - SSR is important for Next.js users
+
+---
+
+### 3. Client Imperative API - WEAK TESTS
 
 **Untested:**
-- Procedure middleware actually affecting execution
-- Optimistic update `reconcile` function execution
-- AutoComplete type utility (compile-time only)
+- `client.users.list.run` Effect execution
+- `client.users.list.runPromise()` Promise execution
+- `client.users.create.runPromise(payload)` with payload
+- `client.users.watch.stream` stream execution
+- `boundClient.invalidate(paths)` functionality
+- `boundClient.shutdown()` cleanup
 
 ---
 
-### 2. Router Module  
-**File:** `src/Router/index.ts` (implied from usage)
-**Test:** `test/router.test.ts` (311 lines)
+### 4. Middleware Execution - WEAK TESTS
 
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Router.make()` | Yes | Good |
-| Auto-derived tags | Yes | Good |
-| Nested definitions | Yes | Good |
-| Path mapping (pathToTag, tagToPath) | Yes | Good |
-| `Router.get()` | Yes | Good |
-| `Router.paths()` | Yes | Good |
-| `Router.tagOf()` | Yes | Good |
-| Hierarchical invalidation paths | Yes | Good |
-| `Router.withMiddleware()` | Yes | Partial |
-| Mixed procedure types | Yes | Good |
+**Structure Tested, Behavior Not:**
+- Middleware layers are created but never executed
+- `Middleware.execute()` is not directly tested
+- Error short-circuiting not verified
+- Context provision to handlers not verified
+
+---
+
+### 5. Transport Error Scenarios - NO TESTS
 
 **Untested:**
-- Router with multiple levels of `withMiddleware` nesting
-- Very deep nesting (5+ levels)
-- Edge cases: empty definition, single procedure
-
----
-
-### 3. Client Module
-**File:** `src/Client/index.ts` (777 lines)
-**Test:** `test/client.test.ts` (207 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Client.make()` structure | Yes | Good |
-| `Client.provide()` | Yes | Partial |
-| `ClientServiceLive` layer | Yes | Weak |
-| Type inference (ProcedurePayload, etc.) | Yes | Good |
-| Nested client access | Yes | Good |
-| React hooks throw outside context | Yes | Good |
-| `run` Effect | No | Missing |
-| `runPromise` | No | Missing |
-| `prefetch` | No | Missing |
-| `invalidate` method | No | Missing |
-| `BoundClient.shutdown()` | No | Missing |
-
-**Critical Gap:** The imperative API (`run`, `runPromise`, `prefetch`) is completely untested. These are core features for vanilla JS usage.
-
----
-
-### 4. Client React Module
-**File:** `src/Client/react.ts` (462 lines)
-**Test:** Indirectly in `test/client.test.ts` (only throws check)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `createProvider` | No | Missing |
-| `useClientContext` | No | Missing |
-| `createUseQuery` | No | Missing |
-| `createUseMutation` | No | Missing |
-| `createUseStream` | No | Missing |
-| Refetch interval | No | Missing |
-| Stale time | No | Missing |
-| Mutation callbacks (onSuccess, etc.) | No | Missing |
-| Stream abort/restart | No | Missing |
-
-**Critical Gap:** All React functionality is untested. The only test verifies hooks throw when used outside Provider, which is not meaningful coverage.
-
----
-
-### 5. Server Module
-**File:** `src/Server/index.ts` (619 lines)
-**Test:** `test/server.test.ts` (334 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Server.make()` | Yes | Good |
-| `Server.handle()` query | Yes | Good |
-| `Server.handle()` with payload | Yes | Good |
-| `Server.handle()` errors | Yes | Good |
-| `Server.handle()` unknown procedure | Yes | Good |
-| `Server.handleStream()` | Yes | Good |
-| `Server.isServer()` | Yes | Good |
-| `Server.middleware()` | Yes | Partial |
-| Handler type inference | Yes | Good |
-| `Server.toHttpHandler()` | Yes | Good |
-| `Server.toFetchHandler()` | Yes | Good |
-| `Server.toNextApiHandler()` | Yes | Good |
-
-**Gaps:**
-- Middleware actually executing and providing context
-- Invalid payload decode errors (tested but shallow)
-- Batch handling (not implemented in HTTP adapter yet)
-
----
-
-### 6. Transport Module
-**File:** `src/Transport/index.ts` (601 lines)
-**Test:** `test/transport.test.ts` (248 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Transport.http()` config options | Yes | Good |
-| `Transport.mock()` | Yes | Good |
-| `TransportError` | Yes | Good |
-| `isTransientError` | Yes | Good |
-| Response envelope types | Yes | Good |
-| Schema type guards | Yes | Good |
-| `Transport.loopback()` | No | Missing |
-| Actual HTTP requests | No | Missing |
-| Batching logic | No | Missing |
-| Timeout handling | No | Missing |
-| Custom fetch | No | Missing |
-| Stream HTTP transport | No | Missing (TODO in source) |
-
-**Critical Gap:** `Transport.loopback()` is used extensively in e2e tests but has no dedicated unit tests. The HTTP transport's actual request/response cycle is untested (would require mocking fetch).
-
----
-
-### 7. Middleware Module
-**File:** `src/Middleware/index.ts` (400 lines)
-**Test:** `test/middleware.test.ts` (290 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Middleware.Tag()` | Yes | Good |
-| `Middleware.implement()` | Yes | Weak |
-| `Middleware.implementWrap()` | No | Missing |
-| `Middleware.all()` combining | Yes | Good |
-| Concurrency options | Yes | Good |
-| Guards | Yes | Good |
-| Procedure.middleware() | Yes | Good |
-| Router.withMiddleware() | Yes | Good |
-| Server.middleware() | Yes | Good |
-| `Middleware.execute()` | No | Missing |
-| Actual middleware providing Context | No | Missing |
-| Middleware failure short-circuiting | No | Missing |
-
-**Critical Gap:** While middleware structure is well-tested, actual execution is not. The `execute()` function that runs middleware chains is never tested directly.
-
----
-
-### 8. Reactivity Module
-**File:** `src/Reactivity/index.ts` (305 lines)
-**Test:** `test/reactivity.test.ts` (288 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `Reactivity.make()` | Yes | Good |
-| `subscribe()` | Yes | Good |
-| `unsubscribe()` | Yes | Good |
-| Multiple callbacks per tag | Yes | Good |
-| `invalidate()` exact match | Yes | Good |
-| `invalidate()` hierarchical | Yes | Good |
-| `invalidate()` reverse hierarchical | Yes | Good |
-| `invalidate()` multiple tags | Yes | Good |
-| Only invokes each callback once | Yes | Good |
-| Error resilience | Yes | Good |
-| `pathsToTags()` | Yes | Good |
-| `shouldInvalidate()` | Yes | Good |
-| Effect-based API | Yes | Good |
-| `ReactivityLive` layer | Yes | Good |
-
-**Excellent coverage** - This is the best-tested module.
-
----
-
-### 9. HTTP Adapter Tests
-**File:** `test/http-adapter.test.ts` (311 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `toHttpHandler` success | Yes | Good |
-| `toHttpHandler` data | Yes | Good |
-| `toHttpHandler` errors | Yes | Good |
-| `toHttpHandler` unknown procedure | Yes | Good |
-| `toHttpHandler` headers passing | Yes | Good |
-| `toHttpHandler` invalid JSON | Yes | Good |
-| `toFetchHandler` | Yes | Good |
-| `toNextApiHandler` | Yes | Good |
-
-**Good coverage** of HTTP adapters.
-
----
-
-### 10. Integration Tests
-**File:** `test/integration.test.ts` (307 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| Server ↔ loopback transport | Yes | Good |
-| Type flow across modules | Yes | Good |
-| Middleware application | Yes | Partial |
-| Error handling through stack | Yes | Good |
-
----
-
-### 11. E2E Test Suite
-**Files:** `test/e2e/suite.ts`, `test/e2e/fixtures.ts`, `test/e2e/loopback.test.ts`
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| Client → Server roundtrip | Yes | Good |
-| Query success | Yes | Good |
-| Query with payload | Yes | Good |
-| Query errors | Yes | Good |
-| Mutation success | Yes | Good |
-| Mutation validation error | Yes | Good |
-| Stream chunks | Yes | Partial |
-| Stream errors | Yes | Good |
-| Middleware blocking (no auth) | Yes | Good |
-| Invalidation callbacks | Yes | Good |
-| Schema round-trip | Yes | Good |
-
-**Good coverage** for happy paths. Some edge cases missing.
-
----
-
-### 12. Type-Level Tests
-**File:** `test/types.test.ts` (305 lines)
-
-| Feature | Covered | Quality |
-|---------|---------|---------|
-| `@ts-expect-error` for invalid usage | Yes | Good |
-| Type extraction utilities | Yes | Good |
-| Cross-module type flow | Yes | Good |
-
-**Excellent** compile-time type safety tests.
-
----
-
-## Critical Untested Paths
-
-### 1. React Hooks (HIGH PRIORITY)
-**Impact:** All React users would encounter untested code
-**Risk:** Bugs in useQuery/useMutation/useStream state management
-**Recommendation:** Add React testing library tests or at minimum unit tests with mocked React
-
-### 2. Client.run/runPromise/prefetch (HIGH PRIORITY)
-**Impact:** Vanilla JS users rely entirely on this API
-**Risk:** Runtime errors when running Effects
-**Recommendation:** Add integration tests that actually run effects through the client
-
-### 3. Middleware.execute() Chain (HIGH PRIORITY)
-**Impact:** Authentication, authorization, logging all use this
-**Risk:** Middleware order issues, context not provided correctly
-**Recommendation:** Add tests that verify:
-- Context is provided to handlers
-- Multiple middlewares execute in order
-- Failures short-circuit
-
-### 4. Transport.loopback() (MEDIUM PRIORITY)
-**Impact:** Used in all e2e tests
-**Risk:** Silent test environment issues
-**Recommendation:** Add dedicated unit tests
-
-### 5. Schema Decode Error Paths (MEDIUM PRIORITY)
-**Impact:** Malformed API responses
-**Risk:** Unclear error messages to users
-**Recommendation:** Test decode failures for payloads, success responses, error responses
-
----
-
-## Weak/Meaningless Tests
-
-### 1. `test/client.test.ts:202-206` - Hooks Throw Outside Context
-```typescript
-it("hooks throw outside React context", () => {
-  expect(() => bound.users.list.useQuery()).toThrow()
-  expect(() => bound.users.create.useMutation()).toThrow()
-})
-```
-**Problem:** Only verifies hooks throw, not that they work correctly when inside context. This is barely more than a smoke test.
-
-### 2. `test/middleware.test.ts:69-82` - Implement Creates Layer
-```typescript
-it("creates a Layer from implementation", () => {
-  const AuthLive = Middleware.implement(AuthMiddleware, (request) =>
-    Effect.gen(function* () {
-      // ...
-    })
-  )
-  expect(Layer.isLayer(AuthLive)).toBe(true)
-})
-```
-**Problem:** Only checks that a Layer is created, not that the middleware actually runs or provides the correct service.
-
-### 3. `test/server.test.ts:286-294` - Middleware Placeholder
-```typescript
-it("adds middleware to server", () => {
-  const middleware = {} as any // Placeholder middleware
-  const server = Server.make(appRouter, handlers).pipe(
-    Server.middleware(middleware)
-  )
-  expect(server.middlewares).toContain(middleware)
-})
-```
-**Problem:** Uses `{} as any` as middleware. This doesn't test actual middleware behavior.
-
-### 4. `test/procedure.test.ts:113-120` - Pipeable Check
-```typescript
-it("is pipeable", () => {
-  const listUsers = Procedure.query({ success: Schema.Array(User) })
-  expect(typeof listUsers.pipe).toBe("function")
-})
-```
-**Problem:** Only checks `.pipe` exists, not that piping works correctly.
+- Network failures during request
+- Timeout handling
+- Connection closed mid-stream
+- Retry logic (when implemented)
 
 ---
 
 ## Test Quality Assessment
 
-| Module | Coverage | Depth | Edge Cases | Integration |
-|--------|----------|-------|------------|-------------|
-| Procedure | Good | Medium | Partial | Good |
-| Router | Good | Good | Partial | Good |
-| Client | Partial | Weak | Poor | Partial |
-| Client/react | None | None | None | None |
-| Server | Good | Good | Partial | Good |
-| Transport | Partial | Medium | Poor | Good (e2e) |
-| Middleware | Structural | Weak | None | Partial |
-| Reactivity | Excellent | Excellent | Good | Good |
-| HTTP Adapter | Good | Good | Partial | Good |
+### Strengths
+
+1. **Type-level tests** - Comprehensive `@ts-expect-error` coverage
+2. **E2E tests** - Realistic client-server scenarios
+3. **Effect tests** - Proper use of `@effect/vitest`
+4. **Fixture organization** - Reusable test schemas and helpers
+5. **Path/tag mapping** - Thorough coverage of hierarchical paths
+
+### Weaknesses
+
+1. **React testing absent** - Needs `@testing-library/react` tests
+2. **No mock injection** - Tests don't verify mock behavior
+3. **Happy path bias** - More error scenario tests needed
+4. **No performance tests** - No batching/caching benchmarks
+5. **No concurrent tests** - Middleware concurrency untested
 
 ---
 
-## Priority Recommendations for New Tests
+## Recommendations
 
-### P0 - Critical (Blocks production use)
-1. **Client imperative API**: `run`, `runPromise`, `prefetch` with actual Effect execution
-2. **Middleware execution**: Verify context is provided, chain executes correctly
-3. **React hooks**: Use React Testing Library or enzyme to test hooks properly
+### Priority 1: React Hook Testing
 
-### P1 - High (Significant user impact)
-4. **Schema decode errors**: Test all paths that decode payloads/responses
-5. **Transport.loopback()**: Dedicated unit tests
-6. **Middleware failure short-circuit**: Verify early return on middleware failure
+```typescript
+// test/react.test.tsx (new file)
+import { renderHook, waitFor } from "@testing-library/react"
+import { describe, it, expect } from "vitest"
 
-### P2 - Medium (Edge cases)
-7. **Empty router definitions**
-8. **Very deep nesting** (5+ levels)
-9. **Concurrent middleware execution** (with `concurrency: "unbounded"`)
-10. **Mutation invalidation actually triggering refetch**
+describe("useQuery", () => {
+  it("returns loading state initially", () => {
+    const { result } = renderHook(() => 
+      api.users.list.useQuery(),
+      { wrapper: createWrapper() }
+    )
+    expect(result.current.isLoading).toBe(true)
+  })
 
-### P3 - Nice to have
-11. **HTTP transport with mocked fetch**
-12. **Batching logic** (when implemented)
-13. **Stream abort handling in React**
-14. **Memory leak tests for long-running subscriptions**
+  it("returns data on success", async () => {
+    // ...
+  })
+
+  it("handles errors correctly", async () => {
+    // ...
+  })
+})
+```
+
+### Priority 2: SSR Testing
+
+```typescript
+// test/ssr.test.ts (new file)
+describe("SSR.dehydrate", () => {
+  it("serializes query results", () => {
+    const state = SSR.dehydrate({ "users.list": [user1, user2] })
+    expect(state.queries["users.list"]).toBeDefined()
+  })
+})
+
+describe("SSR.Hydrate", () => {
+  it("restores state on mount", () => {
+    // Test with React Testing Library
+  })
+})
+```
+
+### Priority 3: Client Imperative API
+
+```typescript
+// Add to client.test.ts
+describe("Client.run", () => {
+  it.effect("executes query Effect", () =>
+    Effect.gen(function* () {
+      const bound = api.provide(mockTransport)
+      const result = yield* bound.users.list.run
+      expect(result).toEqual([...])
+    })
+  )
+})
+
+describe("Client.runPromise", () => {
+  it("resolves with data", async () => {
+    const bound = api.provide(mockTransport)
+    const result = await bound.users.list.runPromise()
+    expect(result).toEqual([...])
+  })
+})
+```
+
+### Priority 4: Middleware Execution
+
+```typescript
+// Add to middleware.test.ts
+describe("Middleware.execute", () => {
+  it.effect("runs middleware before handler", () =>
+    Effect.gen(function* () {
+      let order: string[] = []
+      
+      const LogMiddleware = Middleware.implement(LogTag, () => {
+        order.push("middleware")
+        return Effect.succeed(undefined)
+      })
+      
+      // Execute and verify order
+    })
+  )
+
+  it.effect("short-circuits on middleware failure", () => {
+    // Middleware fails, handler should not run
+  })
+})
+```
 
 ---
 
-## Code Coverage Estimation
+## Coverage Metrics
 
-Based on line counts and functionality analysis:
+| Category | Tests | Lines | Coverage Est. |
+|----------|-------|-------|---------------|
+| Procedure | 25 | 315 | ~95% |
+| Router | 20 | 311 | ~90% |
+| Middleware | 18 | 290 | ~60% (structure only) |
+| Server | 15 | 334 | ~85% |
+| Client | 12 | 207 | ~30% |
+| Transport | 15 | 237 | ~70% |
+| HTTP Adapter | 10 | 311 | ~90% |
+| Reactivity | 12 | 201 | ~90% |
+| Integration | 8 | 307 | ~85% |
+| E2E | 20+ | 700+ | ~90% |
+| Types | 15 | 305 | ~95% |
+| **React** | 1 | 3 | **~1%** |
+| **SSR** | 0 | 0 | **0%** |
 
-| Module | Estimated Line Coverage | Branch Coverage |
-|--------|------------------------|-----------------|
-| Procedure | ~85% | ~70% |
-| Router | ~80% | ~75% |
-| Client | ~45% | ~30% |
-| Client/react | ~5% | ~0% |
-| Server | ~75% | ~65% |
-| Transport | ~50% | ~40% |
-| Middleware | ~60% | ~35% |
-| Reactivity | ~95% | ~90% |
+**Overall Estimated Coverage: ~65-70%**
 
-**Overall Estimated Coverage: ~60%**
-
----
-
-## Summary
-
-The test suite is well-structured with good patterns but has critical gaps:
-
-1. **React integration is essentially untested** - Major gap for React users
-2. **Middleware execution is structural only** - Auth could silently fail
-3. **Client imperative API untested** - Vanilla JS users affected
-4. **Transport implementation details untested** - HTTP/batching/streams
-
-The Reactivity module is exemplary - other modules should follow its thorough testing approach.
+**With React/SSR properly tested: ~85-90%**

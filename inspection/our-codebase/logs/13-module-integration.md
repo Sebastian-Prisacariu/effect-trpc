@@ -1,366 +1,422 @@
-# Module Integration Analysis
+# Module Architecture Analysis
 
-## Overview
+**Date:** 2024-03-13
+**Focus:** Dependencies, circular dependencies, module boundaries, public API surface
 
-This analysis examines how modules in effect-trpc integrate and depend on each other, checking for circular dependencies, evaluating module boundary design, and assessing the public API surface.
+---
 
-## Module Structure
-
-```
-src/
-  index.ts          # Main entry point - re-exports all modules
-  server.ts         # Server-only entry point
-  Client/
-    index.ts        # Client module (777 lines)
-    react.ts        # React hooks implementation (462 lines)
-  Server/
-    index.ts        # Server module (619 lines)
-  Router/
-    index.ts        # Router module (420 lines)
-  Procedure/
-    index.ts        # Procedure module (544 lines)
-  Middleware/
-    index.ts        # Middleware module (400 lines)
-  Transport/
-    index.ts        # Transport module (601 lines)
-  Reactivity/
-    index.ts        # Reactivity module (305 lines)
-  Result/
-    index.ts        # Re-export from @effect-atom/atom (10 lines)
-```
-
-## Dependency Graph
+## Module Dependency Graph
 
 ```
-                     External Dependencies
-                            |
-    +-------------------------------------------------------+
-    |                                                       |
-    v                                                       v
-+--------+                                          +---------------+
-| effect |                                          | @effect-atom  |
-| (core) |                                          | /atom/Result  |
-+--------+                                          +---------------+
-    ^                                                       ^
-    |                                                       |
-    +--------------------+----------------------------------+
-                         |
-    +--------------------|------------------------------------+
-    |                    v                                    |
-    |              +-----------+                              |
-    |              | Procedure |  (foundation - no deps)      |
-    |              +-----------+                              |
-    |                    ^                                    |
-    |                    |                                    |
-    |    +---------------+----------------+                   |
-    |    |               |                |                   |
-    |    v               v                v                   |
-    | +--------+   +-----------+   +------------+             |
-    | | Router |   | Transport |   | Middleware |             |
-    | +--------+   | (type-only)|  +------------+             |
-    |    ^         +-----------+                              |
-    |    |               |                                    |
-    |    |    +----------+--------+                           |
-    |    |    |                   |                           |
-    |    v    v                   v                           |
-    | +--------+           +------------+                     |
-    | | Server |           | Reactivity | (standalone)        |
-    | +--------+           +------------+                     |
-    |    ^                       ^                            |
-    |    |                       |                            |
-    |    +-----------+-----------+                            |
-    |                |                                        |
-    |                v                                        |
-    |           +--------+                                    |
-    |           | Client |                                    |
-    |           +--------+                                    |
-    |                ^                                        |
-    |                |                                        |
-    |           +--------+                                    |
-    |           | react  | (circular import!)                 |
-    |           +--------+                                    |
-    +---------------------------------------------------------+
+                    ┌─────────────┐
+                    │   index.ts  │ (barrel export)
+                    │  server.ts  │ (server barrel)
+                    └──────┬──────┘
+                           │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+        ▼                  ▼                  ▼
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│    Client     │  │    Server     │  │     SSR       │
+│   + react.ts  │  │               │  │               │
+└───────┬───────┘  └───────┬───────┘  └───────────────┘
+        │                  │                  │
+        │      ┌───────────┴───────────┐     │
+        │      │                       │     │
+        ▼      ▼                       ▼     ▼
+┌───────────────┐              ┌───────────────┐
+│   Transport   │◄─────────────│   Middleware  │
+└───────┬───────┘              └───────────────┘
+        │                              │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+               ┌───────────────┐
+               │    Router     │
+               └───────┬───────┘
+                       │
+                       ▼
+               ┌───────────────┐
+               │   Procedure   │
+               └───────────────┘
+                       │
+                       ▼
+               ┌───────────────┐
+               │   Reactivity  │
+               └───────────────┘
+                       │
+                       ▼
+               ┌───────────────┐
+               │    Result     │
+               └───────────────┘
+                       │
+                       ▼
+         ┌─────────────────────────┐
+         │   External Libraries    │
+         │ • effect                │
+         │ • @effect-atom/atom     │
+         │ • @effect/experimental  │
+         └─────────────────────────┘
 ```
 
-### Detailed Import Map
+---
 
-| Module | Imports From (Internal) |
-|--------|------------------------|
-| **Procedure** | None (leaf module) |
-| **Router** | Procedure |
-| **Middleware** | None (leaf module) |
-| **Reactivity** | None (leaf module) |
-| **Transport** | Router (type-only), Procedure (type-only) |
-| **Server** | Router, Procedure, Transport, Middleware |
-| **Client** | Router, Procedure, Transport, Reactivity, react.ts |
-| **react.ts** | Transport, Procedure, Router, Reactivity, **Client/index.ts** |
-| **Result** | @effect-atom/atom/Result (external) |
+## Detailed Module Dependencies
 
-## Circular Dependency Check
+### 1. **Procedure** (`src/Procedure/index.ts`)
+**Dependencies:**
+- `effect/Schema`
+- `effect/Pipeable`
 
-### Identified Circular Dependency
+**Dependents:**
+- Router, Server, Client, Transport, Middleware, types.ts
 
-**Location:** `Client/index.ts` <-> `Client/react.ts`
+**Status:** ✅ **Clean leaf module** - no internal dependencies
+
+---
+
+### 2. **Router** (`src/Router/index.ts`)
+**Dependencies:**
+- `effect/Pipeable`
+- `./Procedure/index.js`
+
+**Dependents:**
+- Server, Client, Transport (types only), types.ts
+
+**Status:** ✅ **Clean** - minimal dependencies
+
+---
+
+### 3. **Transport** (`src/Transport/index.ts`)
+**Dependencies:**
+- `effect/Context`, `effect/Effect`, `effect/Layer`, `effect/Stream`, `effect/Schema`, `effect/Duration`, `effect/Ref`, `effect/Deferred`, `effect/Fiber`, `effect/Scope`, `effect/Pipeable`
+- `./Router/index.js` (type import only)
+- `./Procedure/index.js` (type import only)
+
+**Dependents:**
+- Client, Server, SSR (via Client)
+
+**Status:** ✅ **Clean** - only type imports from internal modules
+
+---
+
+### 4. **Middleware** (`src/Middleware/index.ts`)
+**Dependencies:**
+- `effect/Context`, `effect/Effect`, `effect/Layer`, `effect/Schema`
+
+**Dependents:**
+- Server, Client (indirectly via react.ts)
+
+**Status:** ✅ **Clean leaf module** - no internal dependencies
+
+---
+
+### 5. **Reactivity** (`src/Reactivity/index.ts`)
+**Dependencies:**
+- `effect/Context`, `effect/Effect`, `effect/Layer`, `effect/Scope`, `effect/RcMap`, `effect/Ref`, `effect/HashSet`, `effect/Function`
+- `@effect/experimental/Reactivity`
+
+**Dependents:**
+- Client, Client/react.ts
+
+**Status:** ✅ **Clean** - wraps external dependency
+
+---
+
+### 6. **Result** (`src/Result/index.ts`)
+**Dependencies:**
+- `@effect-atom/atom/Result` (re-export)
+
+**Dependents:**
+- Client, types.ts
+
+**Status:** ✅ **Clean** - pure re-export
+
+---
+
+### 7. **Server** (`src/Server/index.ts`)
+**Dependencies:**
+- `effect/Context`, `effect/Effect`, `effect/Layer`, `effect/Pipeable`, `effect/Record`, `effect/Schema`, `effect/Stream`
+- `./Router/index.js`
+- `./Procedure/index.js`
+- `./Transport/index.js`
+- `./Middleware/index.js`
+
+**Dependents:**
+- Transport (via loopback interface type)
+
+**Status:** ✅ **Clean** - imports only from lower-level modules
+
+---
+
+### 8. **Client** (`src/Client/index.ts`)
+**Dependencies:**
+- `effect/Context`, `effect/Effect`, `effect/Layer`, `effect/ManagedRuntime`, `effect/Record`, `effect/Schema`, `effect/Stream`, `effect/Scope`
+- `./Router/index.js`
+- `./Procedure/index.js`
+- `./Transport/index.js`
+- `./Reactivity/index.js`
+- `./react.js` (internal)
+
+**Dependents:**
+- SSR, Client/react.ts (circular!)
+
+**Status:** ⚠️ **Circular dependency detected** - see below
+
+---
+
+### 9. **Client/react.ts** (`src/Client/react.ts`)
+**Dependencies:**
+- `react`
+- `effect/Effect`, `effect/Layer`, `effect/Stream`, `effect/Scope`, `effect/Function`
+- `@effect-atom/atom-react`
+- `@effect/experimental/Reactivity`
+- `./Transport/index.js`
+- `./Procedure/index.js`
+- `./Router/index.js`
+- `./index.js` (ClientServiceTag, ClientServiceLive) **← CIRCULAR**
+
+**Status:** ❌ **Circular dependency with Client/index.ts**
+
+---
+
+### 10. **SSR** (`src/SSR/index.ts`)
+**Dependencies:**
+- `react`
+- `@effect-atom/atom-react`
+
+**Dependents:**
+- None (top-level)
+
+**Status:** ✅ **Clean** - top-level module
+
+---
+
+### 11. **types.ts** (`src/types.ts`)
+**Dependencies:**
+- `./Procedure/index.js` (type only)
+- `./Router/index.js` (type only)
+- `./Transport/index.js` (type only)
+- `./Middleware/index.js` (type only)
+- `./Reactivity/index.js` (type only)
+
+**Status:** ✅ **Clean** - type-only imports
+
+---
+
+## Circular Dependency Analysis
+
+### ❌ Critical Circular Dependency Found
 
 ```
 Client/index.ts
-  imports from "./react.js":
-    - createProvider
-    - createUseQuery  
-    - createUseMutation
-    - createUseStream
-
+    ↓ imports
 Client/react.ts
-  imports from "./index.js":
-    - ClientServiceTag
-    - ClientServiceLive
-    - QueryOptions
-    - QueryResult
-    - MutationOptions
-    - MutationResult
-    - StreamOptions
-    - StreamResult
+    ↓ imports
+Client/index.ts (ClientServiceTag, ClientServiceLive)
 ```
 
-### Circular Dependency Analysis
-
-**Severity:** Medium-High
-
-**Current Mitigation:** The code uses try-catch around the react imports:
+**Location in code:**
+- `src/Client/react.ts:38`:
 ```typescript
-// Client/index.ts:717-726
-const createProvider = <D extends Router.Definition>(
-  router: Router.Router<D>
-): React.FC<ProviderProps> => {
-  try {
-    return createProviderImpl(router)
-  } catch {
-    // React not available - return stub
-    return ({ children }) => children as any
-  }
-}
+import { ClientServiceTag, ClientServiceLive } from "./index.js"
 ```
 
-**Problems:**
-1. **Module initialization order** depends on JavaScript runtime behavior
-2. **Type imports** from `./index.js` in `react.ts` may cause issues during bundling
-3. **Tree-shaking** becomes unreliable due to circular references
-4. **Testing isolation** is compromised - can't test react.ts without loading index.ts
+**Impact:**
+1. Module initialization order could cause runtime issues
+2. Tree-shaking may be impacted
+3. Hot module replacement issues in dev
 
-### Recommendation: Extract Shared Types
-
-Create a shared internal module for types used by both files:
+**Recommendation:**
+Extract shared types/services to a separate file:
 
 ```
 Client/
-  index.ts           # Main client, imports from internal + react
-  react.ts           # React hooks, imports from internal only
-  internal/
-    types.ts         # ClientServiceTag, options types, result types
-    service.ts       # ClientServiceLive
+├── index.ts          # Main exports + createProvider
+├── react.ts          # React hooks
+├── service.ts        # NEW: ClientService, ClientServiceTag, ClientServiceLive
+└── types.ts          # NEW: Shared types
 ```
 
-## Module Boundary Analysis
-
-### Well-Designed Boundaries
-
-| Module | Grade | Notes |
-|--------|-------|-------|
-| **Procedure** | A | Pure leaf module, no internal dependencies |
-| **Router** | A | Single dependency on Procedure, clear purpose |
-| **Middleware** | A | Standalone, clear API |
-| **Reactivity** | A | Standalone, no internal dependencies |
-| **Transport** | A- | Type-only imports from Router/Procedure |
-| **Result** | A | Clean re-export pattern |
-
-### Boundaries Needing Improvement
-
-| Module | Grade | Issues |
-|--------|-------|--------|
-| **Client** | C+ | Circular dependency with react.ts, too many responsibilities |
-| **Server** | B | Many dependencies but justified |
-| **react.ts** | C | Circular dependency, should be isolated |
-
-### Client Module Responsibilities (Too Many)
-
-The Client module currently handles:
-1. ClientService interface and implementation
-2. Client type definitions
-3. Hook type definitions (QueryOptions, QueryResult, etc.)
-4. Proxy builder logic
-5. Bound client logic
-6. Provider creation
-7. Hook wrappers
-
-**Recommendation:** Split into:
-- `Client/types.ts` - All type definitions
-- `Client/service.ts` - ClientService implementation
-- `Client/proxy.ts` - Proxy building logic  
-- `Client/index.ts` - Main exports and composition
-
-## Import/Export Cleanliness
-
-### Public API Surface (index.ts)
-
+**Proposed fix:**
 ```typescript
-export * as Procedure from "./Procedure/index.js"
-export * as Router from "./Router/index.js"
-export * as Client from "./Client/index.js"
-export * as Server from "./Server/index.js"
-export * as Transport from "./Transport/index.js"
-export * as Result from "./Result/index.js"
-export * as Middleware from "./Middleware/index.js"
-export * as Reactivity from "./Reactivity/index.js"
+// src/Client/service.ts
+export interface ClientService { ... }
+export class ClientServiceTag extends Context.Tag(...) {}
+export const ClientServiceLive: Layer.Layer<...> = ...
+
+// src/Client/index.ts
+export * from "./service.js"
+// ... rest of client
+
+// src/Client/react.ts
+import { ClientServiceTag, ClientServiceLive } from "./service.js"
 ```
 
-**Assessment:** Clean namespace-style exports. Each module is isolated under its name.
+---
 
-### Server Entry Point (server.ts)
+## Module Boundary Design
 
-```typescript
-export * as Procedure from "./Procedure/index.js"
-export * as Router from "./Router/index.js"
-export * as Result from "./Result/index.js"
-export * as Middleware from "./Middleware/index.js"
-export * as Server from "./Server/index.js"
-```
+### Strengths
 
-**Assessment:** Correctly excludes Client, Transport, and Reactivity which are client-side concerns.
+1. **Clear Layering:** 
+   - Foundation: Procedure, Middleware
+   - Core: Router, Transport
+   - Integration: Server, Client
+   - UI: SSR, react.ts
 
-### Missing Entry Points
+2. **Type-only imports for cross-cutting concerns:**
+   - Transport uses type-only imports from Router/Procedure
+   - types.ts uses type-only imports throughout
 
-The package.json defines:
-- `.` -> index.ts (all modules)
-- `./server` -> server.ts (server modules)
-- `./client` -> Missing! (no client.ts exists)
+3. **Single responsibility:**
+   - Each module has clear, focused responsibilities
+   - Procedure defines shapes, Router composes, Server handles, Client consumes
 
-**Issue:** The `./client` export path is defined but there's no `src/client.ts` file.
+4. **Clean external dependency boundaries:**
+   - Effect dependencies are consistent
+   - React is optional (peerDep)
+   - @effect-atom/atom is properly isolated to React layer
 
-## Architectural Recommendations
+### Weaknesses
 
-### 1. Fix Circular Dependency (Priority: High)
+1. **Mixed concerns in Client:**
+   - Client/index.ts handles both Effect client AND React Provider creation
+   - Should separate vanilla client from React integration
 
-**Option A: Extract Internal Types**
-```
-src/Client/
-  internal/
-    types.ts      # ClientServiceTag, QueryOptions, etc.
-    service.ts    # ClientServiceLive
-  index.ts        # Main exports
-  react.ts        # React hooks (imports from internal only)
-```
+2. **Server has implicit dependency on Transport types:**
+   - Server uses `Transport.TransportRequest`, `Transport.TransportResponse`
+   - Creates tight coupling between layers
 
-**Option B: Lazy Loading**
-```typescript
-// Client/index.ts
-let createProviderImpl: typeof import("./react.js").createProvider | null = null
+3. **Reactivity wrapping is inconsistent:**
+   - Client/react.ts imports `@effect/experimental/Reactivity` directly
+   - Should use the PathReactivity wrapper consistently
 
-const loadReactModule = async () => {
-  if (!createProviderImpl) {
-    const mod = await import("./react.js")
-    createProviderImpl = mod.createProvider
-  }
-  return createProviderImpl
-}
-```
+---
 
-### 2. Create Missing Client Entry Point (Priority: Medium)
+## Public API Surface Analysis
 
+### Entry Points
+
+| Export | Module | Purpose |
+|--------|--------|---------|
+| `effect-trpc` | index.ts | Full client+server bundle |
+| `effect-trpc/server` | server.ts | Server-only bundle |
+| `effect-trpc/client` | (missing) | Should exist for client-only |
+
+### Missing Entry Point: `effect-trpc/client`
+
+**Issue:** package.json defines `./client` export but no `src/client.ts` exists!
+
+**Fix needed:**
 ```typescript
 // src/client.ts
 export * as Client from "./Client/index.js"
 export * as Transport from "./Transport/index.js"
-export * as Reactivity from "./Reactivity/index.js"
 export * as Result from "./Result/index.js"
-
-// Re-export shared types
-export * as Procedure from "./Procedure/index.js"
-export * as Router from "./Router/index.js"
+export * as Reactivity from "./Reactivity/index.js"
+export * as SSR from "./SSR/index.js"
 ```
 
-### 3. Add TypeID Guards Module (Priority: Low)
+### Namespace Exports (index.ts)
 
-Currently each module defines its own TypeId symbols. Consider:
+| Namespace | Exported Items | Notes |
+|-----------|---------------|-------|
+| `Procedure` | query, mutation, stream, isProcedure, isQuery, isMutation, isStream, types | ✅ Complete |
+| `Router` | make, paths, get, tagOf, pathOf, tagsToInvalidate, withMiddleware, types | ✅ Complete |
+| `Client` | make, ClientServiceTag, ClientServiceLive, types | ⚠️ Leaks internal ClientServiceTag |
+| `Server` | make, toHttpHandler, toFetchHandler, toNextApiHandler, middleware, isServer, types | ✅ Complete |
+| `Transport` | http, mock, make, loopback, Transport (tag), TransportError, types | ✅ Complete |
+| `Result` | re-export from @effect-atom/atom | ✅ Thin wrapper |
+| `Middleware` | Tag, implement, implementWrap, all, execute, types | ✅ Complete |
+| `Reactivity` | PathReactivity, register, invalidate, layer, InnerReactivity | ⚠️ Exposes internal InnerReactivity |
+| `SSR` | dehydrate, createPrefetch, Hydrate, isServer, isClient | ✅ Complete |
 
-```typescript
-// src/internal/type-ids.ts
-export const ProcedureTypeId = Symbol.for("effect-trpc/Procedure")
-export const RouterTypeId = Symbol.for("effect-trpc/Router")
-export const ServerTypeId = Symbol.for("effect-trpc/Server")
-// ... etc
-```
+### Convenience Type Exports (types.ts)
 
-This prevents Symbol.for collision issues if the library is loaded multiple times.
+| Type | Source | Status |
+|------|--------|--------|
+| `InferProcedurePayload` | Procedure.Payload | ✅ |
+| `InferProcedureSuccess` | Procedure.Success | ✅ |
+| `InferProcedureError` | Procedure.Error | ✅ |
+| `InferMutationInvalidates` | Procedure.Invalidates | ✅ |
+| `InferRouterPaths` | Router.Paths | ✅ |
+| `InferRouterDefinition` | Router.DefinitionOf | ✅ |
+| `InferRouterProcedure` | Router.ProcedureAt | ✅ |
+| `TransportRequest` | Transport.TransportRequest | ✅ |
+| `TransportResponse` | Transport.TransportResponse | ✅ |
+| `TransportError` | Transport.TransportError | ✅ |
+| `MiddlewareRequest` | Middleware.MiddlewareRequest | ✅ |
+| `ProcedureType` | Middleware.ProcedureType | ✅ |
+| `PathReactivityService` | Reactivity.PathReactivityService | ✅ |
 
-### 4. Consider Effect-Style Internal Modules (Priority: Low)
+---
 
-Effect uses an `internal/` pattern for implementation details:
+## Recommendations
 
-```
-src/
-  Procedure/
-    index.ts       # Public API only
-  internal/
-    procedure.ts   # Implementation details
-```
+### Critical (Fix Now)
 
-Benefits:
-- Clear public/private boundary
-- Easier to refactor internals
-- Smaller public API surface
+1. **Fix Client ↔ react.ts circular dependency**
+   - Extract `ClientService` to `src/Client/service.ts`
+   - Both index.ts and react.ts import from service.ts
 
-## Type-Only vs Value Imports
+2. **Create missing `src/client.ts` entry point**
+   - package.json references it but file doesn't exist
 
-### Good Patterns Found
+### High Priority
 
-```typescript
-// Transport/index.ts - correctly uses type-only imports
-import type * as Router from "../Router/index.js"
-import type * as Procedure from "../Procedure/index.js"
-```
+3. **Hide internal exports from public API**
+   - `InnerReactivity` should not be exposed
+   - `ClientServiceTag` / `ClientServiceLive` should be internal
+   - Consider `@internal` tags and separate internal barrel
 
-### Missing Type-Only Annotations
+4. **Consistent Reactivity usage**
+   - Client/react.ts should use PathReactivity, not direct @effect/experimental
 
-Some imports could be type-only but aren't marked:
+### Medium Priority
 
-```typescript
-// Client/index.ts:40
-import type * as Scope from "effect/Scope"  // Correct!
+5. **Separate vanilla Client from React**
+   - Move React Provider creation to react.ts
+   - Keep Client/index.ts pure Effect
+   - Lazy-load React parts
 
-// But in react.ts:17
-import * as Option from "effect/Option"  // Could be `import type`
-```
+6. **Document module boundaries**
+   - Add README.md in src/ describing module relationships
+   - Define clear import rules in CLAUDE.md
+
+### Low Priority
+
+7. **Consider monorepo structure**
+   - If React becomes heavyweight, split to `effect-trpc-react`
+   - Keep core runtime-agnostic
+
+---
+
+## Dependency Version Matrix
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `effect` | ^3.12.0 | Core runtime |
+| `@effect-atom/atom` | ^0.5.0 | State management |
+| `@effect-atom/atom-react` | ^0.5.0 | React hooks |
+| `@effect/experimental` | ^0.58.0 | Reactivity system |
+| `@effect/platform` | ^0.70.0 | HTTP (peer) |
+| `@effect/rpc` | ^0.73.2 | RPC protocol (peer, unused?) |
+| `react` | ^18/19 | UI (optional peer) |
+
+**Note:** `@effect/rpc` is listed as peer dependency but not imported anywhere. Consider removing or documenting planned usage.
+
+---
 
 ## Summary
 
-### Strengths
-- Clean namespace-based public API
-- Most modules have clear single responsibilities
-- Good use of Effect patterns (Context.Tag, Layer, etc.)
-- Type-only imports where appropriate (mostly)
-- Separate server entry point
+| Metric | Status |
+|--------|--------|
+| Circular Dependencies | ❌ 1 found (Client ↔ react.ts) |
+| Missing Entry Points | ❌ client.ts missing |
+| Module Layering | ✅ Good (foundation → core → integration → UI) |
+| API Surface Cleanliness | ⚠️ Some internal exports leaked |
+| Type-only Import Usage | ✅ Well-used where appropriate |
+| External Dependency Isolation | ✅ Good boundaries |
 
-### Issues to Address
-
-| Priority | Issue | Impact |
-|----------|-------|--------|
-| High | Circular dependency Client <-> react | Build/bundle reliability |
-| Medium | Missing `./client` entry point file | Package export broken |
-| Medium | Client module has too many responsibilities | Maintainability |
-| Low | TypeId symbols not centralized | Potential collision |
-| Low | Some imports could be type-only | Bundle size |
-
-### Module Coupling Score
-
-| Module Pair | Coupling | Assessment |
-|-------------|----------|------------|
-| Client-react | High (circular) | Needs refactoring |
-| Server-Router | Medium | Acceptable |
-| Server-Procedure | Medium | Acceptable |
-| Server-Transport | Low | Good |
-| Router-Procedure | Low | Good |
-| All others | None/Minimal | Excellent |
-
-**Overall Grade: B**
-
-The module structure is generally well-designed with clear boundaries, but the circular dependency in the Client module is a significant issue that should be resolved before the library is considered production-ready.
+**Overall:** Architecture is sound but needs cleanup of the Client circular dependency and API surface refinement.

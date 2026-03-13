@@ -1,18 +1,36 @@
-# Effect RPC Schema Encoding Patterns
+# Schema Encoding Error Handling in Effect RPC
 
 ## Overview
 
-Effect RPC uses a sophisticated schema encoding/decoding system with proper error propagation. This document analyzes how Effect RPC handles encoding failures and compares it to the current `orElseSucceed` fallback pattern in effect-trpc.
+Effect RPC has a **comprehensive, typed encoding error handling system**. Encoding failures are **never silently returned as raw values**. Instead, they are either:
 
-## Key Finding: Effect RPC Does NOT Use `orElseSucceed`
+1. **Propagated as defects** (via `Effect.orDie`)
+2. **Converted to typed RpcClientError/defect messages**
+3. **Handled through the cause system** with proper cleanup
 
-Effect RPC propagates encoding errors as defects, ensuring failures are visible rather than silently swallowed.
+## Key Encoding Patterns
 
----
+### 1. Client-Side Payload Encoding (RpcClient.ts:670-681)
 
-## 1. Server-Side Encoding Pattern
+```typescript
+// Client encodes payload before sending
+return Schema.encode(rpc.payloadSchema)(message.payload).pipe(
+  Effect.locally(FiberRef.currentContext, entry.context),
+  Effect.orDie,  // <-- Encoding errors become defects (will crash)
+  Effect.flatMap((payload) =>
+    send({
+      ...message,
+      id: String(message.id),
+      payload,
+      headers: Object.entries(message.headers)
+    }, collector && collector.unsafeClear())
+  )
+) as Effect.Effect<void, RpcClientError>
+```
 
-### Location: `RpcServer.ts:588-606`
+**Pattern**: `Effect.orDie` - encoding failures kill the fiber
+
+### 2. Server-Side Response Encoding (RpcServer.ts:588-606)
 
 ```typescript
 const handleEncode = <A, R>(
@@ -36,114 +54,13 @@ const handleEncode = <A, R>(
   )
 ```
 
-**Key observations:**
-1. **No fallback**: Encoding failures are caught and converted to defects
-2. **Error formatting**: Uses `TreeFormatter.formatErrorSync` for readable error messages
-3. **Client notification**: Sends defect to client AND interrupts the request
-4. **Request cleanup**: Deletes schema entry to prevent memory leaks
+**Pattern**: 
+- Catch ALL causes (including encoding failures)
+- Format errors with `TreeFormatter.formatErrorSync`
+- Send defect message to client
+- Interrupt the request
 
-### Encoding Flow
-
-```
-Handler Result
-    |
-    v
-[Schema.encode] -----> Success: Send encoded response
-    |
-    v (ParseError)
-[catchAllCause]
-    |
-    v
-[sendRequestDefect] --> Client receives defect with formatted message
-    |
-    v
-[server.write(Interrupt)] --> Request terminated
-```
-
----
-
-## 2. Schema Setup Pattern
-
-### Location: `RpcServer.ts:563-580`
-
-```typescript
-const getSchemas = (rpc: Rpc.AnyWithProps) => {
-  let schemas = schemasCache.get(rpc)
-  if (!schemas) {
-    const entry = context.unsafeMap.get(rpc.key) as Rpc.Handler<Rpcs["_tag"]>
-    const streamSchemas = RpcSchema.getStreamSchemas(rpc.successSchema.ast)
-    schemas = {
-      decode: Schema.decodeUnknown(rpc.payloadSchema as any),
-      encodeChunk: Schema.encodeUnknown(
-        Schema.Array(Option.isSome(streamSchemas) ? streamSchemas.value.success : Schema.Any)
-      ) as any,
-      encodeExit: Schema.encodeUnknown(Rpc.exitSchema(rpc as any)) as any,
-      encodeDefect: Schema.encodeUnknown(rpc.defectSchema) as any,
-      context: entry.context
-    }
-    schemasCache.set(rpc, schemas)
-  }
-  return schemas
-}
-```
-
-**Key observations:**
-1. **Cached schemas**: Performance optimization with WeakMap
-2. **Separate encoders**: Different encoders for chunks, exits, and defects
-3. **Custom defect schema**: Each RPC can define its own defect encoding via `rpc.defectSchema`
-
----
-
-## 3. Defect Encoding & Transmission
-
-### Location: `RpcServer.ts:608-641`
-
-```typescript
-const encodeDefect = Schema.encodeSync(Schema.Defect)
-
-const sendRequestDefect = (
-  client: Client,
-  requestId: RequestId,
-  encodeDefect: (u: unknown) => Effect.Effect<unknown, ParseError>,
-  defect: unknown
-) =>
-  Effect.catchAllCause(
-    encodeDefect(defect).pipe(Effect.flatMap((encodedDefect) =>
-      send(client.id, {
-        _tag: "Exit",
-        requestId: String(requestId),
-        exit: {
-          _tag: "Failure",
-          cause: {
-            _tag: "Die",
-            defect: encodedDefect
-          }
-        }
-      })
-    )),
-    (cause) => sendDefect(client, Cause.squash(cause))
-  )
-
-const sendDefect = (client: Client, defect: unknown) =>
-  Effect.catchAllCause(
-    send(client.id, { _tag: "Defect", defect: encodeDefect(defect) }),
-    (cause) =>
-      Effect.annotateLogs(Effect.logDebug(cause), {
-        module: "RpcServer",
-        method: "sendDefect"
-      })
-  )
-```
-
-**Two-tier defect handling:**
-1. **Request-level defect**: Wrapped in Exit with Die cause (per-request)
-2. **Connection-level defect**: Broadcasted as Defect message (affects all requests)
-
----
-
-## 4. Payload Decoding Pattern
-
-### Location: `RpcServer.ts:673-696`
+### 3. Decoding Incoming Requests (RpcServer.ts:673-696)
 
 ```typescript
 return Effect.matchEffect(
@@ -152,179 +69,205 @@ return Effect.matchEffect(
     onFailure: (error) =>
       sendRequestDefect(client, requestId, schemas.encodeDefect, TreeFormatter.formatErrorSync(error)),
     onSuccess: (payload) => {
-      client.schemas.set(
-        requestId,
-        supportsTransferables ?
-          { ...schemas, collector: Transferable.unsafeMakeCollector() } :
-          schemas
-      )
-      return server.write(clientId, {
-        ...request,
-        id: requestId,
-        payload,
-        headers: Headers.fromInput(request.headers)
-      } as any)
+      client.schemas.set(requestId, supportsTransferables ? {...schemas, collector: ...} : schemas)
+      return server.write(clientId, {...request, id: requestId, payload, headers: Headers.fromInput(request.headers)} as any)
     }
   }
 )
 ```
 
-**Key observations:**
-1. **Immediate error propagation**: Decode failures become defects
-2. **Human-readable errors**: Uses `TreeFormatter.formatErrorSync`
-3. **No silent failures**: Client always receives notification
+**Pattern**: Decode failures -> formatted defect sent to client
 
----
-
-## 5. Client-Side Pattern
-
-### Location: `RpcClient.ts:713-741`
+### 4. Stream Schema Parsing (RpcSchema.ts:97-120)
 
 ```typescript
-case "Exit": {
-  const requestId = RequestId(message.requestId)
-  const entry = entries.get(requestId)
-  if (!entry) return Effect.void
-  entries.delete(requestId)
-  return Schema.decode(Rpc.exitSchema(entry.rpc as any))(message.exit).pipe(
-    Effect.locally(FiberRef.currentContext, entry.context),
-    Effect.orDie,  // <-- Decode failures die
-    Effect.matchCauseEffect({
-      onSuccess: (exit) => write({ _tag: "Exit", clientId: 0, requestId, exit }),
-      onFailure: (cause) => write({ _tag: "Exit", clientId: 0, requestId, exit: Exit.failCause(cause) })
-    })
-  ) as Effect.Effect<void>
+const parseStream = <A, E, RA, RE>(
+  decodeSuccess: (u: Chunk<unknown>, overrideOptions?: AST.ParseOptions) => Effect.Effect<Chunk<A>, ParseResult.ParseIssue, RA>,
+  decodeFailure: (u: unknown, overrideOptions?: AST.ParseOptions) => Effect.Effect<E, ParseResult.ParseIssue, RE>
+) =>
+(u: unknown, options: AST.ParseOptions, ast: AST.AST) =>
+  Effect.flatMap(
+    Effect.context<RA | RE>(),
+    (context) => {
+      if (!isStream(u)) return Effect.fail(new ParseResult.Type(ast, u))
+      return Effect.succeed(u.pipe(
+        Stream_.mapChunksEffect((value) => decodeSuccess(value, options)),
+        Stream_.catchAll((error) => {
+          if (ParseResult.isParseError(error)) return Stream_.die(error)  // <-- Parse errors die
+          return Effect.matchEffect(decodeFailure(error, options), {
+            onFailure: Effect.die,   // <-- Failures die
+            onSuccess: Effect.fail   // <-- Success becomes typed error
+          })
+        }),
+        Stream_.provideContext(context)
+      ))
+    }
+  )
+```
+
+**Pattern**: Parse errors in streams become `die` (fiber-killing defects)
+
+## Error Types
+
+### RpcClientError (RpcClientError.ts:22-31)
+
+```typescript
+export class RpcClientError extends Schema.TaggedError<RpcClientError>("@effect/rpc/RpcClientError")("RpcClientError", {
+  reason: Schema.Literal("Protocol", "Unknown"),
+  message: Schema.String,
+  cause: Schema.optional(Schema.Defect)
+}) {
+  readonly [TypeId]: TypeId = TypeId
 }
 ```
 
-**Key observations:**
-1. **`Effect.orDie`**: Decode failures become defects (die)
-2. **Cause propagation**: Even decoding failures reach the caller
+Used for:
+- Protocol errors (decoding failures, transport errors)
+- Unknown errors (unexpected conditions)
 
----
-
-## 6. Comparison with effect-trpc
-
-### Current effect-trpc Pattern (Server/index.ts:249-265)
+### Defect Messages (RpcMessage.ts, RpcSerialization.ts)
 
 ```typescript
-onFailure: (error) =>
-  Schema.encode(procedure.errorSchema)(error).pipe(
-    Effect.orElseSucceed(() => error),  // <-- Fallback!
-    Effect.map((encodedError) => new Transport.Failure({
-      id: request.id,
-      error: encodedError,
-    }))
-  ),
-onSuccess: (value) =>
-  Schema.encode(procedure.successSchema)(value).pipe(
-    Effect.orElseSucceed(() => value),  // <-- Fallback!
-    Effect.map((encodedValue) => new Transport.Success({
-      id: request.id,
-      value: encodedValue,
-    }))
-  ),
+interface ResponseDefectEncoded {
+  readonly _tag: "Defect"
+  readonly defect: unknown
+}
 ```
 
-### Problems with `orElseSucceed`:
+Sent when:
+- Server encounters unhandled error
+- Encoding fails
+- Schema validation fails
 
-| Issue | Description |
-|-------|-------------|
-| **Silent failures** | Encoding errors are swallowed |
-| **Type unsafety** | Raw value may not be JSON-serializable |
-| **Hidden bugs** | Schema mismatches go unnoticed |
-| **Client confusion** | May receive undecodable data |
+## Serialization Layer Error Handling (RpcSerialization.ts)
 
----
-
-## 7. Recommendations
-
-### 7.1 Replace `orElseSucceed` with Defect Pattern
+### JSON-RPC Error Encoding (lines 292-324)
 
 ```typescript
-// BEFORE (effect-trpc)
-Schema.encode(procedure.successSchema)(value).pipe(
-  Effect.orElseSucceed(() => value),  // BAD: silent failure
-  Effect.map((v) => new Transport.Success({ id, value: v }))
-)
-
-// AFTER (Effect RPC pattern)
-Schema.encode(procedure.successSchema)(value).pipe(
-  Effect.catchAllCause((cause) =>
-    Effect.succeed(new Transport.Failure({
-      id,
-      error: {
-        _tag: "EncodingError",
-        message: TreeFormatter.formatErrorSync(Cause.squash(cause)),
-      },
-    }))
-  ),
-  Effect.map((v) => new Transport.Success({ id, value: v }))
-)
+case "Exit":
+  return {
+    jsonrpc: "2.0",
+    id: response.requestId ? Number(response.requestId) : undefined,
+    result: response.exit._tag === "Success" ? response.exit.value : undefined,
+    error: response.exit._tag === "Failure" ?
+      {
+        _tag: "Cause",
+        code: response.exit.cause._tag === "Fail" && hasProperty(response.exit.cause.error, "code")
+          ? Number(response.exit.cause.error.code) : 0,
+        message: response.exit.cause._tag === "Fail" && hasProperty(response.exit.cause.error, "message")
+          ? response.exit.cause.error.message
+          : JSON.stringify(response.exit.cause),
+        data: response.exit.cause
+      } :
+      undefined
+  }
+case "Defect":
+  return {
+    jsonrpc: "2.0",
+    id: jsonRpcInternalError,  // -32603
+    error: {
+      _tag: "Defect",
+      code: 1,
+      message: "A defect occurred",
+      data: response.defect
+    }
+  }
 ```
 
-### 7.2 Add Defect Schema Support
+**Pattern**: Full cause data preserved in `data` field
 
-Allow procedures to define custom defect encoding:
+## Schema Usage Patterns
+
+### Exit Schema with Defect Support (Rpc.ts:745-767)
 
 ```typescript
-const myProcedure = Procedure.query({
-  payload: MyPayload,
-  success: MySuccess,
-  error: MyError,
-  defect: Schema.Struct({  // New field
-    message: Schema.String,
-    stack: Schema.optional(Schema.String),
-  }),
-})
+export const exitSchema = <R extends Any>(self: R): Schema.Schema<Exit<R>, ExitEncoded<R>, Context<R>> => {
+  if (exitSchemaCache.has(self)) {
+    return exitSchemaCache.get(self) as any
+  }
+  const rpc = self as any as AnyWithProps
+  const failures = new Set<Schema.Schema.All>([rpc.errorSchema])
+  const streamSchemas = RpcSchema.getStreamSchemas(rpc.successSchema.ast)
+  if (Option.isSome(streamSchemas)) {
+    failures.add(streamSchemas.value.failure)
+  }
+  for (const middleware of rpc.middlewares) {
+    failures.add(middleware.failure)
+  }
+  const schema = Schema.Exit({
+    success: Option.isSome(streamSchemas) ? Schema.Void : rpc.successSchema,
+    failure: Schema.Union(...failures),
+    defect: rpc.defectSchema  // <-- Custom defect schema!
+  })
+  exitSchemaCache.set(self, schema)
+  return schema as any
+}
 ```
 
-### 7.3 Use `Schema.Defect` for Unknown Errors
+**Key**: Each RPC can define its own `defectSchema` for encoding unexpected errors.
+
+## Comparison with effect-trpc Silent Failures
+
+### effect-trpc Problem
 
 ```typescript
-import { Schema } from "effect"
-
-// Schema.Defect handles circular references, functions, etc.
-const encodeDefect = Schema.encodeSync(Schema.Defect)
-
-const sendDefect = (error: unknown) =>
-  Effect.succeed(new Transport.Failure({
-    id,
-    error: { _tag: "Defect", defect: encodeDefect(error) },
-  }))
+// Hypothetical effect-trpc pattern
+const encoded = Schema.encodeUnknownSync(schema)(value)
+// If this throws, raw value might be returned
 ```
 
-### 7.4 Separate Exit Encoding for Streams
+### Effect RPC Solution
 
-Effect RPC has distinct exit schemas for streams vs effects:
+1. **Never use sync encoding for wire data** - always Effect-based
+2. **All encoding paths have explicit error handlers**
+3. **Errors become typed defect messages**
+4. **Cause system preserves full error context**
+
+## Critical Differences
+
+| Aspect | Effect RPC | Silent Failure Pattern |
+|--------|-----------|------------------------|
+| Encoding errors | `Effect.orDie` or caught | Raw value returned |
+| Error visibility | RpcClientError / Defect | No error indication |
+| Type safety | Preserved through Exit | Lost |
+| Debugging | Full cause chain | Hidden |
+| Client notification | Explicit defect message | None |
+
+## Recommendations for effect-trpc
+
+1. **Use `Effect.orDie`** for encoding that should never fail
+2. **Use `Effect.catchAllCause`** to handle encoding failures
+3. **Send typed error responses** when encoding fails
+4. **Never silently return raw values**
+5. **Format errors** with `TreeFormatter.formatErrorSync`
+6. **Support custom defect schemas** per procedure
+
+## Code Patterns to Adopt
+
+### Safe Encoding Pattern
 
 ```typescript
-// For effects: Schema.Exit({ success, failure, defect })
-// For streams: void success (stream ended), but failures can occur
-
-const exitSchema = Rpc.exitSchema(rpc)  // Computed per-RPC
+const encodeResponse = <A>(schema: Schema.Schema<A>, value: A) =>
+  Schema.encode(schema)(value).pipe(
+    Effect.catchAllCause((cause) =>
+      Effect.succeed({
+        _tag: "EncodingError" as const,
+        cause: Cause.squash(cause),
+        formatted: TreeFormatter.formatErrorSync(Cause.squash(cause))
+      })
+    )
+  )
 ```
 
----
+### Response Encoding with Fallback
 
-## 8. Implementation Priority
-
-| Priority | Change | Effort | Impact |
-|----------|--------|--------|--------|
-| **High** | Replace `orElseSucceed` with error propagation | Low | Prevents silent failures |
-| **Medium** | Add `TreeFormatter` for readable errors | Low | Better debugging |
-| **Medium** | Add defect schema support | Medium | Custom error serialization |
-| **Low** | Cache compiled schemas | Low | Performance optimization |
-
----
-
-## 9. Code References
-
-| File | Lines | Description |
-|------|-------|-------------|
-| `RpcServer.ts` | 588-606 | `handleEncode` - main encoding error handler |
-| `RpcServer.ts` | 608-641 | `sendRequestDefect` / `sendDefect` - defect transmission |
-| `RpcServer.ts` | 563-580 | `getSchemas` - schema caching |
-| `RpcClient.ts` | 713-741 | Client-side exit decoding |
-| `RpcMessage.ts` | 243-252 | `ResponseDefectEncoded` - defect message format |
-| `Rpc.ts` | 739-767 | `exitSchema` - exit schema construction |
+```typescript
+const sendResponse = (client: Client, response: Response) =>
+  encodeResponse(responseSchema, response).pipe(
+    Effect.flatMap((encoded) => 
+      encoded._tag === "EncodingError"
+        ? sendDefect(client, encoded.formatted)
+        : send(client, encoded)
+    )
+  )
+```

@@ -1,31 +1,25 @@
-# Effect RPC Transport Analysis
+# H5: Effect RPC Transport Protocols
 
-## Transport Architecture Overview
+## Summary
 
-Effect RPC uses a **Protocol abstraction** that cleanly separates RPC logic from transport concerns. This design allows the same RPC handlers to work over multiple transports.
+Effect RPC supports **6 transport protocols** through a pluggable `Protocol` abstraction:
 
-```
-+------------------+     +------------------+     +------------------+
-|   RpcClient      |<--->|    Protocol      |<--->|   RpcServer      |
-|  (business logic)|     | (transport-agnostic) | (business logic)|
-+------------------+     +------------------+     +------------------+
-                                 |
-                    +------------+------------+
-                    |            |            |
-              +-----v-----+ +----v----+ +-----v-----+
-              |   HTTP    | | Socket  | |  Worker   |
-              | Protocol  | |Protocol | | Protocol  |
-              +-----------+ +---------+ +-----------+
-```
+| Transport | Streaming | Ack | Transferables | Span Propagation |
+|-----------|-----------|-----|---------------|------------------|
+| HTTP (POST) | Partial | No | No | No |
+| WebSocket | Full | Yes | No | Yes |
+| Socket Server | Full | Yes | No | Yes |
+| Worker | Full | Yes | Yes | Yes |
+| Stdio | Full | Yes | No | Yes |
+| Custom | Configurable | Configurable | Configurable | Configurable |
 
-## Protocol Tag (Transport Interface)
+## Protocol Abstraction
 
-Both client and server define a `Protocol` Context.Tag that abstracts the transport layer.
-
-### Client Protocol (`RpcClient.ts:816-831`)
+Effect RPC uses a `Protocol` Context.Tag that abstracts transport concerns:
 
 ```typescript
-export class Protocol extends Context.Tag("@effect/rpc/RpcClient/Protocol")<Protocol, {
+// RpcClient.ts:816-831
+class Protocol extends Context.Tag("@effect/rpc/RpcClient/Protocol")<Protocol, {
   readonly run: (
     f: (data: FromServerEncoded) => Effect.Effect<void>
   ) => Effect.Effect<never>
@@ -35,13 +29,10 @@ export class Protocol extends Context.Tag("@effect/rpc/RpcClient/Protocol")<Prot
   ) => Effect.Effect<void, RpcClientError>
   readonly supportsAck: boolean
   readonly supportsTransferables: boolean
-}>() {}
-```
+}>()
 
-### Server Protocol (`RpcServer.ts:793-814`)
-
-```typescript
-export class Protocol extends Context.Tag("@effect/rpc/RpcServer/Protocol")<Protocol, {
+// RpcServer.ts:793-814
+class Protocol extends Context.Tag("@effect/rpc/RpcServer/Protocol")<Protocol, {
   readonly run: (
     f: (clientId: number, data: FromClientEncoded) => Effect.Effect<void>
   ) => Effect.Effect<never>
@@ -57,189 +48,300 @@ export class Protocol extends Context.Tag("@effect/rpc/RpcServer/Protocol")<Prot
   readonly supportsAck: boolean
   readonly supportsTransferables: boolean
   readonly supportsSpanPropagation: boolean
-}>() {}
+}>()
 ```
 
-## Supported Transports
+## Transport Implementations
 
-### 1. HTTP Transport
+### 1. HTTP Transport (POST-based)
 
-**Client:** `makeProtocolHttp`, `layerProtocolHttp`
+**Location:** `RpcClient.ts:837-929`, `RpcServer.ts:945-1124`
 
-**Server:** `makeProtocolHttp`, `layerProtocolHttp`, `layerProtocolHttpRouter`
+```typescript
+// Client
+export const makeProtocolHttp = (client: HttpClient.HttpClient): Effect.Effect<
+  Protocol["Type"],
+  never,
+  RpcSerialization.RpcSerialization
+>
+
+export const layerProtocolHttp = (options: {
+  readonly url: string
+  readonly transformClient?: <E, R>(client: HttpClient.HttpClient.With<E, R>) => HttpClient.HttpClient.With<E, R>
+}): Layer.Layer<Protocol, never, RpcSerialization.RpcSerialization | HttpClient.HttpClient>
+```
 
 **Characteristics:**
-- Request/response model
-- No streaming backpressure (supportsAck: false)
-- No transferables (supportsTransferables: false)
-- Response can be streamed via NDJSON or msgpack framing
-
-**HTTP Protocol Flow:**
-```
-Client                          Server
-   |--- POST /rpc ------------->|
-   |    [Request message]       |
-   |<-- Response (streamed) ----|
-   |    [Exit/Chunk messages]   |
-```
+- Request/response per procedure call
+- JSON or streaming (NDJSON) body
+- **No acknowledgments** (`supportsAck: false`)
+- **No transferables** (`supportsTransferables: false`)
+- **No span propagation** (`supportsSpanPropagation: false`)
+- Supports streaming responses via HTTP streaming
 
 ### 2. WebSocket Transport
 
-**Client:** `makeProtocolSocket`, `layerProtocolSocket`
-
-**Server:** `makeProtocolWebsocket`, `layerProtocolWebsocket`, `layerProtocolWebsocketRouter`, `makeProtocolSocketServer`, `layerProtocolSocketServer`
-
-**Characteristics:**
-- Full duplex bidirectional
-- Supports backpressure via Ack messages (supportsAck: true)
-- Automatic reconnection with configurable retry schedule
-- Ping/pong keep-alive mechanism
-- Span propagation support (supportsSpanPropagation: true)
-
-**WebSocket Protocol Flow:**
-```
-Client                          Server
-   |<-- WebSocket Upgrade ----->|
-   |                            |
-   |--- Request --------------->|
-   |<-- Chunk ------------------|
-   |--- Ack ------------------->|  (backpressure)
-   |<-- Chunk ------------------|
-   |--- Ack ------------------->|
-   |<-- Exit -------------------|
-   |                            |
-   |--- Ping ------------------>|  (keep-alive)
-   |<-- Pong -------------------|
-```
-
-### 3. Worker Transport (Web Workers/Node Workers)
-
-**Client:** `makeProtocolWorker`, `layerProtocolWorker`
-
-**Server:** `makeProtocolWorkerRunner`, `layerProtocolWorkerRunner`
-
-**Characteristics:**
-- For same-process communication (Web Workers, Node Worker Threads)
-- Supports transferables (supportsTransferables: true)
-- Supports backpressure (supportsAck: true)
-- Worker pooling with configurable size, concurrency, TTL
-- Initial message passing for worker initialization
-
-**Worker Protocol Features:**
-- Fixed pool: `{ size: number, concurrency?, targetUtilization? }`
-- Dynamic pool: `{ minSize, maxSize, timeToLive, concurrency?, targetUtilization? }`
-
-### 4. Stdio Transport (Streams)
-
-**Server:** `makeProtocolStdio`, `layerProtocolStdio`
-
-**Characteristics:**
-- For CLI tools and subprocess communication
-- Uses Effect Streams and Sinks
-- Single client (clientId: 0)
-- Supports backpressure (supportsAck: true)
-- Supports span propagation (supportsSpanPropagation: true)
+**Location:** `RpcClient.ts:935-1069`, `RpcServer.ts:820-939`
 
 ```typescript
+// Client
+export const makeProtocolSocket = (options?: {
+  readonly retryTransientErrors?: boolean | undefined
+  readonly retrySchedule?: Schedule.Schedule<any, Socket.SocketError> | undefined
+}): Effect.Effect<
+  Protocol["Type"],
+  never,
+  Scope.Scope | RpcSerialization.RpcSerialization | Socket.Socket
+>
+
+// Server
+export const layerProtocolWebsocket = <I = HttpRouter.Default>(options: {
+  readonly path: HttpRouter.PathInput
+  readonly routerTag?: HttpRouter.HttpRouter.TagClass<I, string, any, any>
+}): Layer.Layer<Protocol, never, RpcSerialization.RpcSerialization>
+```
+
+**Characteristics:**
+- Full duplex communication
+- **Supports acknowledgments** (`supportsAck: true`)
+- **No transferables** (`supportsTransferables: false`)
+- **Supports span propagation** (`supportsSpanPropagation: true`)
+- Built-in ping/pong for keepalive (10 second interval)
+- Automatic reconnection with exponential backoff
+- Integrates with HttpRouter or HttpLayerRouter
+
+### 3. Socket Server Transport
+
+**Location:** `RpcServer.ts:820-840`
+
+```typescript
+export const makeProtocolSocketServer: Effect.Effect<
+  Protocol["Type"],
+  never,
+  RpcSerialization.RpcSerialization | SocketServer.SocketServer
+>
+
+export const layerProtocolSocketServer: Layer.Layer<
+  Protocol,
+  never,
+  RpcSerialization.RpcSerialization | SocketServer.SocketServer
+>
+```
+
+**Characteristics:**
+- Server-side socket handling
+- Multi-client support via `clientId`
+- **Supports acknowledgments** (`supportsAck: true`)
+- **Supports span propagation** (`supportsSpanPropagation: true`)
+
+### 4. Worker Transport (Web Workers / Node Workers)
+
+**Location:** `RpcClient.ts:1075-1239`, `RpcServer.ts:1130-1191`
+
+```typescript
+// Client
+export const makeProtocolWorker = (
+  options: {
+    readonly size: number
+    readonly concurrency?: number | undefined
+    readonly targetUtilization?: number | undefined
+  } | {
+    readonly minSize: number
+    readonly maxSize: number
+    readonly concurrency?: number | undefined
+    readonly targetUtilization?: number | undefined
+    readonly timeToLive: Duration.DurationInput
+  }
+): Effect.Effect<
+  Protocol["Type"],
+  WorkerError,
+  Scope.Scope | Worker.PlatformWorker | Worker.Spawner
+>
+
+// Server (Worker Runner)
+export const makeProtocolWorkerRunner: Effect.Effect<
+  Protocol["Type"],
+  WorkerError,
+  WorkerRunner.PlatformRunner | Scope.Scope
+>
+```
+
+**Characteristics:**
+- Worker pool management with fixed or dynamic sizing
+- **Supports acknowledgments** (`supportsAck: true`)
+- **Supports transferables** (`supportsTransferables: true`) - Structured cloning + transfer
+- **Supports span propagation** (`supportsSpanPropagation: true`)
+- Initial message support for worker configuration
+- Auto-scaling based on target utilization
+
+### 5. Stdio Transport (Standard I/O)
+
+**Location:** `RpcServer.ts:1343-1412`
+
+```typescript
+export const makeProtocolStdio = Effect.fnUntraced(function*<EIn, EOut, RIn, ROut>(options: {
+  readonly stdin: Stream.Stream<Uint8Array, EIn, RIn>
+  readonly stdout: Sink.Sink<void, Uint8Array | string, unknown, EOut, ROut>
+})
+
 export const layerProtocolStdio = <EIn, EOut, RIn, ROut>(options: {
   readonly stdin: Stream.Stream<Uint8Array, EIn, RIn>
   readonly stdout: Sink.Sink<void, Uint8Array | string, unknown, EOut, ROut>
 }): Layer.Layer<Protocol, never, RpcSerialization.RpcSerialization | RIn | ROut>
 ```
 
-## Serialization Layer
+**Characteristics:**
+- Stream-based I/O for CLI tools and subprocess communication
+- **Supports acknowledgments** (`supportsAck: true`)
+- **No transferables** (`supportsTransferables: false`)
+- **Supports span propagation** (`supportsSpanPropagation: true`)
+- Single client (clientId: 0)
 
-Effect RPC separates serialization from transport via `RpcSerialization`:
+## Serialization Formats
 
-| Format | Content-Type | Framing | Use Case |
-|--------|--------------|---------|----------|
-| `json` | application/json | No | Simple HTTP request/response |
-| `ndjson` | application/ndjson | Yes | Streaming responses |
-| `jsonRpc` | application/json | No | JSON-RPC 2.0 compatibility |
-| `ndJsonRpc` | application/json-rpc | Yes | Streaming JSON-RPC |
-| `msgPack` | application/msgpack | Yes | Binary efficiency |
+Effect RPC provides pluggable serialization via `RpcSerialization`:
+
+```typescript
+// RpcSerialization.ts:14-18
+export class RpcSerialization extends Context.Tag("@effect/rpc/RpcSerialization")<RpcSerialization, {
+  unsafeMake(): Parser
+  readonly contentType: string
+  readonly includesFraming: boolean
+}>() {}
+```
+
+### Available Formats
+
+| Format | Content-Type | Framing | Binary | Use Case |
+|--------|-------------|---------|--------|----------|
+| `json` | application/json | No | No | HTTP single request |
+| `ndjson` | application/ndjson | Yes | No | HTTP streaming |
+| `jsonRpc` | application/json | No | No | JSON-RPC compatibility |
+| `ndJsonRpc` | application/json-rpc | Yes | No | Streaming JSON-RPC |
+| `msgPack` | application/msgpack | Yes | Yes | Compact binary |
+
+```typescript
+// Layer constructors
+export const layerJson: Layer.Layer<RpcSerialization>
+export const layerNdjson: Layer.Layer<RpcSerialization>
+export const layerJsonRpc: (options?: { contentType?: string }) => Layer.Layer<RpcSerialization>
+export const layerNdJsonRpc: (options?: { contentType?: string }) => Layer.Layer<RpcSerialization>
+export const layerMsgPack: Layer.Layer<RpcSerialization>
+```
 
 ## Streaming Support
 
 Effect RPC has first-class streaming support via `RpcSchema.Stream`:
 
 ```typescript
-// Define a streaming RPC
-const ListUsers = Rpc.make("ListUsers", {
-  success: RpcSchema.Stream({
-    success: User,
-    failure: Schema.Never
-  })
-})
-
-// Returns Stream<User, never>
+// RpcSchema.ts:48-57
+export interface Stream<A extends Schema.Schema.Any, E extends Schema.Schema.All> extends
+  Schema.Schema<
+    Stream_.Stream<A["Type"], E["Type"]>,
+    Stream_.Stream<A["Encoded"], E["Encoded"]>,
+    A["Context"] | E["Context"]
+  >
+{
+  readonly success: A
+  readonly failure: E
+}
 ```
 
-**Streaming Protocol:**
-1. Client sends Request
-2. Server sends multiple Chunk messages with batched values
-3. Client sends Ack after processing each Chunk (on ack-supporting transports)
-4. Server sends Exit when stream completes
+**Streaming protocol features:**
+- Chunked responses via `ResponseChunk` messages
+- Acknowledgment mechanism for flow control (when `supportsAck: true`)
+- Stream interruption support
+- Error propagation within streams
 
-## Transport Feature Matrix
+```typescript
+// Message types for streaming
+interface ResponseChunk<A extends Rpc.Any> {
+  readonly _tag: "Chunk"
+  readonly clientId: number
+  readonly requestId: RequestId
+  readonly values: NonEmptyReadonlyArray<Rpc.SuccessChunk<A>>
+}
 
-| Transport | Duplex | Ack | Transferables | Span Propagation | Reconnect |
-|-----------|--------|-----|---------------|------------------|-----------|
-| HTTP | No | No | No | No | No |
-| WebSocket | Yes | Yes | No | Yes | Yes |
-| Worker | Yes | Yes | Yes | Yes | N/A |
-| Stdio | Yes | Yes | No | Yes | Via retry |
+interface Ack {
+  readonly _tag: "Ack"
+  readonly requestId: RequestId
+}
+```
 
-## Message Types
+## Server-Sent Events (SSE) Support
 
-### Client -> Server (FromClient)
+**Not directly supported.** Effect RPC uses:
+- HTTP streaming with NDJSON for unidirectional streaming
+- WebSocket for bidirectional streaming
 
-| Message | Purpose |
-|---------|---------|
-| `Request` | RPC invocation |
-| `Ack` | Backpressure acknowledgment |
-| `Interrupt` | Cancel request |
-| `Eof` | Client done sending |
-| `Ping` | Keep-alive |
+SSE could be implemented as a custom protocol, but the current architecture favors WebSocket for real-time scenarios.
 
-### Server -> Client (FromServer)
+## WebSocket Details
 
-| Message | Purpose |
-|---------|---------|
-| `Chunk` | Streaming data batch |
-| `Exit` | Request completion |
-| `Defect` | Unrecoverable error |
-| `Pong` | Keep-alive response |
-| `ClientEnd` | Client disconnected |
+**Client connection flow:**
+1. Connect via `Socket.Socket`
+2. Send serialized `Request` messages
+3. Receive `ResponseChunk` or `ResponseExit` messages
+4. Ping/Pong keepalive every 10 seconds
+5. Automatic reconnection with exponential backoff (500ms base, 1.5x factor, max 5s)
 
-## Key Insights for effect-trpc
+**Server setup options:**
+```typescript
+// Using HttpRouter
+export const layerProtocolWebsocket = <I = HttpRouter.Default>(options: {
+  readonly path: HttpRouter.PathInput
+  readonly routerTag?: HttpRouter.HttpRouter.TagClass<I, string, any, any>
+}): Layer.Layer<Protocol, never, RpcSerialization.RpcSerialization>
 
-1. **Protocol abstraction is powerful** - Same handler code works across all transports
-2. **HTTP is simple but limited** - No backpressure, no bidirectional streaming
-3. **WebSocket is full-featured** - Backpressure, reconnection, keep-alive
-4. **Workers enable structured concurrency** - Pooling, transferables
-5. **Stdio enables CLI tooling** - Process-based RPC
+// Using HttpLayerRouter
+export const layerProtocolWebsocketRouter = (options: {
+  readonly path: HttpLayerRouter.PathInput
+}): Layer.Layer<Protocol, never, RpcSerialization.RpcSerialization | HttpLayerRouter.HttpRouter>
 
-### Integration Options for effect-trpc
+// Using SocketServer directly
+export const layerProtocolSocketServer: Layer.Layer<
+  Protocol,
+  never,
+  RpcSerialization.RpcSerialization | SocketServer.SocketServer
+>
+```
 
-| tRPC Transport | Effect RPC Equivalent | Notes |
-|----------------|----------------------|-------|
-| HTTP | `layerProtocolHttp` | Direct mapping |
-| WebSocket | `layerProtocolWebsocket` | tRPC uses ws adapter |
-| SSE | None built-in | Could use `makeProtocolWithHttpApp` with SSE response |
-| Fetch adapter | `toWebHandler` | For serverless |
+## Custom Protocol Implementation
 
-### Missing from Effect RPC (that tRPC has)
+The `Protocol.make` helper enables custom transport creation:
 
-- **Server-Sent Events (SSE)** - tRPC supports SSE for subscriptions
-- **Lambda/Edge adapters** - tRPC has first-class serverless support
-- **Batch HTTP** - tRPC supports request batching
+```typescript
+// RpcClient.ts:830
+Protocol.make = withRun<Protocol["Type"]>()
 
-### Effect RPC has (that tRPC lacks)
+// Usage pattern
+const customProtocol = Protocol.make((writeResponse) => 
+  Effect.succeed({
+    send: (request, transferables?) => Effect.void,
+    supportsAck: true,
+    supportsTransferables: false
+  })
+)
+```
 
-- **MessagePack serialization** - Binary efficiency
-- **Worker transport** - Structured concurrency
-- **Stdio transport** - CLI tooling
-- **Automatic reconnection** - Built into WebSocket protocol
-- **Backpressure** - Ack-based flow control for streams
-- **Transferables** - Zero-copy data transfer in workers
+## Key Observations
+
+1. **No native SSE** - WebSocket preferred for bidirectional, NDJSON for unidirectional
+2. **Protocol abstraction** - Clean separation allows custom transports
+3. **Worker-first for heavy compute** - Full transferable support for zero-copy
+4. **Streaming is first-class** - Not an afterthought, built into the type system
+5. **Acknowledgments for flow control** - Back-pressure support on streaming transports
+6. **Trace propagation** - Distributed tracing via span ID/trace ID in messages
+
+## Comparison with tRPC
+
+| Feature | Effect RPC | tRPC |
+|---------|-----------|------|
+| HTTP | Yes (POST) | Yes (GET/POST) |
+| WebSocket | Yes (native) | Via subscription links |
+| SSE | No (use NDJSON) | Via httpSubscriptionLink |
+| Workers | Yes (pool) | Manual |
+| Streaming | RpcSchema.Stream | Subscription/AsyncIterable |
+| Serialization | Pluggable (JSON/MsgPack) | superjson/custom |
+| Flow control | Ack messages | None |
+| Batching | JSON-RPC mode | httpBatchLink |

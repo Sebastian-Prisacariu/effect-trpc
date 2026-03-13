@@ -1,16 +1,16 @@
-# Effect RPC: Request Batching Analysis
+# Effect RPC Batching Analysis
 
 ## Summary
 
-**Effect RPC does NOT implement automatic client-side request batching** like tRPC's `httpBatchLink`.
+**Effect RPC does NOT have automatic request batching** in the traditional sense (like tRPC's httpBatchLink or DataLoader). However, it has a different batching mechanism specifically for JSON-RPC serialization response collection.
 
-There is no DataLoader-style batching that combines multiple concurrent RPC calls into a single HTTP request. Each `client.myMethod()` call results in an independent network request.
+## Batching Mechanisms Found
 
-## What "Batching" Exists
+### 1. Response Batching in JSON-RPC Serialization
 
-### 1. JSON-RPC Response Batching (Serialization Layer)
+Location: `RpcSerialization.ts:97-180` and `RpcSerialization.ts:240-260`
 
-The term "batch" appears in `RpcSerialization.ts` but refers to **response correlation for JSON-RPC**, not request batching:
+Effect RPC has a **response batching** mechanism for JSON-RPC format:
 
 ```typescript
 // RpcSerialization.ts:97-100
@@ -20,11 +20,49 @@ const batches = new Map<string, {
 }>()
 ```
 
-This tracks responses that arrive together in a JSON-RPC batch response format (per JSON-RPC 2.0 spec), correlating them back to their original requests. It's about **parsing**, not request combining.
+When decoding a JSON-RPC **batch request** (array of requests), it tracks how many requests were in the batch. Responses are collected and only sent when all responses for the batch are ready:
 
-### 2. Stream Chunk Batching
+```typescript
+// RpcSerialization.ts:250-257
+const batch = batches.get(response.requestId)
+if (batch) {
+  batches.delete(response.requestId)
+  batch.responses.set(response.requestId, response as any)
+  if (batch.size === batch.responses.size) {
+    return Array.from(batch.responses.values(), encodeJsonRpcMessage)
+  }
+  return undefined  // Wait for more responses
+}
+```
 
-For streaming RPCs, multiple values are batched into chunks:
+This is **server-side response batching** - it waits to collect all responses before sending them back as a single JSON-RPC batch response.
+
+### 2. HTTP Protocol - One Request Per HTTP Call
+
+Location: `RpcClient.ts:846-903`
+
+The HTTP protocol sends **one request per HTTP call**:
+
+```typescript
+// RpcClient.ts:846-849
+const send = (request: FromClientEncoded): Effect.Effect<void, RpcClientError> => {
+  if (request._tag !== "Request") {
+    return Effect.void
+  }
+  // Each request becomes its own POST request
+  const encoded = parser.encode(request)!
+  const body = typeof encoded === "string" ?
+    HttpBody.text(encoded, serialization.contentType) :
+    HttpBody.uint8Array(encoded, serialization.contentType)
+```
+
+**There is no DataLoader-style batching** that would collect multiple concurrent requests and send them as a single HTTP request.
+
+### 3. Stream Chunk Batching
+
+Location: `RpcServer.ts:356-403`
+
+For streaming RPCs, chunks are batched naturally via `Mailbox`:
 
 ```typescript
 // RpcServer.ts:391-402
@@ -36,111 +74,66 @@ return Stream.runForEachChunk(stream, (chunk) => {
     requestId: request.id,
     values: Chunk.toReadonlyArray(chunk)
   })
-  // ...
-})
 ```
 
-This batches stream values for efficiency, not client requests.
+Streaming responses send chunks efficiently, but this is response streaming, not request batching.
 
-## Request Flow Analysis
+## What Effect RPC DOES Have
 
-### Client Side (`RpcClient.ts`)
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Request batching (client) | **NO** | Each request = separate HTTP call |
+| Response batching (JSON-RPC) | **YES** | Server collects responses for batch requests |
+| Stream chunk batching | **YES** | Natural chunking via Effect streams |
+| WebSocket multiplexing | **YES** | Multiple concurrent requests over single connection |
+| Worker pool concurrency | **YES** | Multiple workers process requests in parallel |
 
-Each request is sent independently:
+## What Effect RPC is MISSING
 
-```typescript
-// RpcClient.ts:343-360
-const id = generateRequestId()
-const send = middleware({
-  _tag: "Request",
-  id,
-  tag: rpc._tag as Rpc.Tag<Rpcs>,
-  payload,
-  // ...
-})
-// Immediately sent via protocol
-```
+### 1. DataLoader-style Request Batching
 
-The `generateRequestId()` creates a unique ID per request (line 249):
-```typescript
-const generateRequestId = options?.generateRequestId ?? (() => requestIdCounter++ as RequestId)
-```
-
-### HTTP Protocol (`RpcClient.ts:846-910`)
-
-The HTTP protocol sends each request immediately:
+tRPC's `httpBatchLink` collects requests within a time window and sends them as a single HTTP request:
 
 ```typescript
-const send = (request: FromClientEncoded): Effect.Effect<void, RpcClientError> => {
-  if (request._tag !== "Request") {
-    return Effect.void
-  }
-  // Encodes and sends immediately
-  return client.post("", { body }).pipe(...)
-}
-```
-
-No buffering, no wait time, no combining multiple requests.
-
-## No Batching Configuration
-
-Unlike tRPC which offers:
-```typescript
-// tRPC batching config
+// tRPC example - NOT in Effect RPC
 httpBatchLink({
+  url: '/trpc',
   maxURLLength: 2083,
-  maxBatchSize: 10,
 })
 ```
 
-Effect RPC has **no equivalent options**. The `make` function accepts only:
-- `spanPrefix`
-- `spanAttributes`
-- `generateRequestId`
-- `disableTracing`
-- `flatten`
+Effect RPC has no equivalent. Each `client.myProcedure()` call immediately sends an HTTP request.
 
-## Protocol Comparison
+### 2. Automatic Request Deduplication
 
-| Feature | tRPC `httpBatchLink` | Effect RPC |
-|---------|---------------------|------------|
-| Combine concurrent requests | Yes | No |
-| Configurable batch size | Yes | N/A |
-| Configurable batch window | Yes | N/A |
-| URL length limits | Yes | N/A |
-| DataLoader pattern | Yes | No |
+No mechanism to deduplicate identical requests made within a time window.
 
-## Why This Matters
+### 3. Per-Request Batching Configuration
 
-Without batching:
-1. N concurrent calls = N HTTP requests
-2. Higher network overhead for bulk operations
-3. More TCP connections / HTTP/2 streams
-4. No deduplication of identical requests within a time window
+No way to configure which requests should batch together or batching strategies.
 
-## Historical Context
+## Transport-Level Comparison
 
-The CHANGELOG mentions `BatchedRequestResolver` (line 2534):
-```
-change: BatchedRequestResolver works with NonEmptyArray
-```
+| Transport | Batching Behavior |
+|-----------|-------------------|
+| HTTP | One request per POST - no batching |
+| WebSocket | Multiplexed - multiple requests share connection |
+| Worker | Pooled - requests distributed across workers |
 
-This refers to Effect's `RequestResolver` for batching at the application layer, but Effect RPC doesn't integrate with it automatically.
+## Architecture Implication for effect-trpc
 
-## Implications for effect-trpc
+Effect RPC's lack of client-side request batching is significant for effect-trpc:
 
-If we expose batching configuration from tRPC:
-- **It will be ignored** - Effect RPC has no batching implementation
-- We should either:
-  1. Document this limitation clearly
-  2. Build a batching layer on top of Effect RPC
-  3. Not expose batching config (prevents user confusion)
+1. **Preserve tRPC batching**: If effect-trpc wraps tRPC, it can use tRPC's batching links
+2. **Add batching layer**: Could implement a batching layer between effect-trpc client and Effect RPC
+3. **Leverage WebSocket**: For real-time apps, WebSocket transport provides implicit efficiency
 
-## Recommendation
+## Recommendation for effect-trpc
 
-Consider implementing a batching layer using Effect's `RequestResolver` or similar pattern if batching is required. This would need to:
-1. Buffer requests for a configurable time window
-2. Combine them into a single transport call
-3. Distribute responses back to callers
+Given Effect RPC doesn't have DataLoader-style batching:
 
-This is non-trivial and would require changes to both client and server protocols.
+1. **Option A**: Use Effect RPC's WebSocket protocol for efficiency (multiplexed connection)
+2. **Option B**: Implement custom batching in effect-trpc's HTTP layer
+3. **Option C**: Keep tRPC's transport layer and only use Effect RPC for handler definition
+
+The WebSocket approach may be more idiomatic for Effect's streaming-first design philosophy.

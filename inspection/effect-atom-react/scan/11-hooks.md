@@ -1,36 +1,15 @@
-# H11: Effect Atom React Hook Implementation
+# H11: Effect Atom React Hook Implementation Analysis
 
 ## Overview
 
-Effect Atom React implements reactive hooks using **`React.useSyncExternalStore`** - the standard React 18 API for subscribing to external stores. This ensures proper concurrent rendering behavior and SSR compatibility.
+Effect Atom React implements React hooks using `useSyncExternalStore` correctly, following React 18+ best practices for external store integration. The implementation is sophisticated, handling SSR, hydration, suspense, and proper cleanup.
 
-## Architecture
+## Core Hook Architecture
 
-```
-                   +------------------+
-                   | RegistryContext  |
-                   | (React.Context)  |
-                   +--------+---------+
-                            |
-                            v
-                   +------------------+
-                   |   AtomStore<A>   |
-                   | - subscribe()    |
-                   | - snapshot()     |
-                   | - getServerSnap()|
-                   +--------+---------+
-                            |
-                            v
-              +----------------------------+
-              | React.useSyncExternalStore |
-              +----------------------------+
-```
-
-## Core Implementation
-
-### AtomStore Interface (Hooks.ts:17-21)
+### AtomStore Interface
 
 ```typescript
+// Hooks.ts:17-21
 interface AtomStore<A> {
   readonly subscribe: (f: () => void) => () => void
   readonly snapshot: () => A
@@ -38,14 +17,20 @@ interface AtomStore<A> {
 }
 ```
 
-This interface matches exactly what `useSyncExternalStore` expects:
-- `subscribe` - returns unsubscribe function
-- `snapshot` - returns current value
-- `getServerSnapshot` - returns server-side value for SSR
+This matches exactly what `useSyncExternalStore` requires:
+- `subscribe` - takes callback, returns cleanup function
+- `snapshot` - synchronous getter for current value
+- `getServerSnapshot` - value for SSR/hydration
 
-### Store Factory (Hooks.ts:28-51)
+### Store Factory with WeakMap Caching
 
 ```typescript
+// Hooks.ts:23-51
+const storeRegistry = globalValue(
+  "@effect-atom/atom-react/storeRegistry",
+  () => new WeakMap<Registry.Registry, WeakMap<Atom.Atom<any>, AtomStore<any>>>()
+)
+
 function makeStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): AtomStore<A> {
   let stores = storeRegistry.get(registry)
   if (stores === undefined) {
@@ -54,7 +39,7 @@ function makeStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): AtomStor
   }
   const store = stores.get(atom)
   if (store !== undefined) {
-    return store
+    return store  // Return cached store
   }
   const newStore: AtomStore<A> = {
     subscribe(f) {
@@ -72,27 +57,33 @@ function makeStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): AtomStor
 }
 ```
 
-**Key patterns:**
-1. **WeakMap caching** - Stores are cached per registry, per atom using nested WeakMaps
-2. **Memory-safe** - WeakMaps allow GC when atoms/registries are disposed
-3. **Delegation** - All actual logic delegates to Registry methods
+**Key design choices:**
+1. **Two-level WeakMap** - Registry -> Atom -> Store (prevents memory leaks)
+2. **Store caching** - Same atom always returns same store object (referential stability)
+3. **GlobalValue** - Singleton across module reloads (HMR-safe)
+4. **Delegates to Registry** - All actual work done by Registry
 
-### useStore Hook (Hooks.ts:53-57)
+### Core useStore Hook
 
 ```typescript
+// Hooks.ts:53-57
 function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
   const store = makeStore(registry, atom)
   return React.useSyncExternalStore(store.subscribe, store.snapshot, store.getServerSnapshot)
 }
 ```
 
-This is the foundation - a simple wrapper around `useSyncExternalStore`.
+**Why this works correctly:**
+- `useSyncExternalStore` handles concurrent mode, tearing prevention
+- Server snapshot enables SSR without hydration mismatches
+- Store object stability prevents unnecessary resubscriptions
 
-## Public Hooks API
+## Public Hooks
 
-### useAtomValue (Hooks.ts:87-97)
+### useAtomValue
 
 ```typescript
+// Hooks.ts:87-97
 export const useAtomValue: {
   <A>(atom: Atom.Atom<A>): A
   <A, B>(atom: Atom.Atom<A>, f: (_: A) => B): B
@@ -107,22 +98,18 @@ export const useAtomValue: {
 ```
 
 **Features:**
-- Read-only subscription to atom value
-- Optional selector function `f` for derived values
-- Selector creates derived atom via `Atom.map`
+- Optional selector function for derived values
+- `useMemo` ensures derived atom stability
+- No mount side effect (read-only)
 
-### useAtom (Hooks.ts:187-207)
+### useAtom
 
 ```typescript
+// Hooks.ts:187-207
 export const useAtom = <R, W, const Mode extends "value" | "promise" | "promiseExit" = never>(
   atom: Atom.Writable<R, W>,
-  options?: {
-    readonly mode?: ([R] extends [Result.Result<any, any>] ? Mode : "value") | undefined
-  }
-): readonly [
-  value: R,
-  write: SetterType  // varies based on Mode
-] => {
+  options?: { readonly mode?: ... }
+): readonly [value: R, write: ...] => {
   const registry = React.useContext(RegistryContext)
   return [
     useStore(registry, atom),
@@ -132,30 +119,46 @@ export const useAtom = <R, W, const Mode extends "value" | "promise" | "promiseE
 ```
 
 **Features:**
-- Returns `[value, setter]` tuple (like React's useState)
-- Three setter modes:
-  - `"value"` - synchronous set (default)
-  - `"promise"` - returns Promise that resolves on success
-  - `"promiseExit"` - returns Promise<Exit> for full error handling
+- Returns `[value, setter]` tuple
+- Supports three write modes: `value`, `promise`, `promiseExit`
+- Type-safe conditional return types based on mode
 
-### useAtomSet (Hooks.ts:149-169)
-
-Write-only hook - mounts atom and returns setter without subscribing to value.
-
-### useAtomMount (Hooks.ts:140-143)
+### useAtomSet (Write-Only with Mount)
 
 ```typescript
+// Hooks.ts:149-169
+export const useAtomSet = <R, W, Mode extends "value" | "promise" | "promiseExit" = never>(
+  atom: Atom.Writable<R, W>,
+  options?: { readonly mode?: ... }
+): ... => {
+  const registry = React.useContext(RegistryContext)
+  mountAtom(registry, atom)  // Side effect: mounts atom
+  return setAtom(registry, atom, options)
+}
+```
+
+**Key difference from useAtom:** Calls `mountAtom` for lifecycle effects.
+
+### useAtomMount
+
+```typescript
+// Hooks.ts:99-101, 140-143
+function mountAtom<A>(registry: Registry.Registry, atom: Atom.Atom<A>): void {
+  React.useEffect(() => registry.mount(atom), [atom, registry])
+}
+
 export const useAtomMount = <A>(atom: Atom.Atom<A>): void => {
   const registry = React.useContext(RegistryContext)
   mountAtom(registry, atom)
 }
 ```
 
-Mounts an atom without subscribing - useful for side effects.
+**Purpose:** Triggers atom lifecycle (onMount effects, async initialization).
 
-### useAtomRefresh (Hooks.ts:175-181)
+### useAtomRefresh
 
 ```typescript
+// Hooks.ts:175-181
 export const useAtomRefresh = <A>(atom: Atom.Atom<A>): () => void => {
   const registry = React.useContext(RegistryContext)
   mountAtom(registry, atom)
@@ -165,11 +168,14 @@ export const useAtomRefresh = <A>(atom: Atom.Atom<A>): () => void => {
 }
 ```
 
-Returns a stable refresh function to invalidate/refetch atom data.
+**Purpose:** Returns callback to re-run async atoms (like React Query's `refetch`).
 
-### useAtomSuspense (Hooks.ts:257-270)
+## Suspense Integration
+
+### useAtomSuspense
 
 ```typescript
+// Hooks.ts:257-270
 export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = false>(
   atom: Atom.Atom<Result.Result<A, E>>,
   options?: {
@@ -186,32 +192,61 @@ export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = fal
 }
 ```
 
-**Suspense integration:**
-- Works with `Result.Result<A, E>` atoms
-- Throws Promise when Initial or (optionally) Waiting
-- Throws error on Failure unless `includeFailure: true`
-
-### useAtomSubscribe (Hooks.ts:276-286)
+### Promise Management for Suspense
 
 ```typescript
-export const useAtomSubscribe = <A>(
-  atom: Atom.Atom<A>,
-  f: (_: A) => void,
-  options?: { readonly immediate?: boolean }
-): void => {
-  const registry = React.useContext(RegistryContext)
-  React.useEffect(
-    () => registry.subscribe(atom, f, options),
-    [registry, atom, f, options?.immediate]
-  )
+// Hooks.ts:209-251
+const atomPromiseMap = globalValue(
+  "@effect-atom/atom-react/atomPromiseMap",
+  () => ({
+    suspendOnWaiting: new Map<Atom.Atom<any>, Promise<void>>(),
+    default: new Map<Atom.Atom<any>, Promise<void>>()
+  })
+)
+
+function atomToPromise<A, E>(
+  registry: Registry.Registry,
+  atom: Atom.Atom<Result.Result<A, E>>,
+  suspendOnWaiting: boolean
+) {
+  const map = suspendOnWaiting ? atomPromiseMap.suspendOnWaiting : atomPromiseMap.default
+  let promise = map.get(atom)
+  if (promise !== undefined) {
+    return promise  // Reuse existing promise
+  }
+  promise = new Promise<void>((resolve) => {
+    const dispose = registry.subscribe(atom, (result) => {
+      if (result._tag === "Initial" || (suspendOnWaiting && result.waiting)) {
+        return
+      }
+      setTimeout(dispose, 1000)  // Cleanup subscription after delay
+      resolve()
+      map.delete(atom)
+    })
+  })
+  map.set(atom, promise)
+  return promise
+}
+
+function atomResultOrSuspend<A, E>(...) {
+  const value = useStore(registry, atom)
+  if (value._tag === "Initial" || (suspendOnWaiting && value.waiting)) {
+    throw atomToPromise(registry, atom, suspendOnWaiting)  // Suspend!
+  }
+  return value
 }
 ```
 
-Effect-based subscription for imperative side effects.
+**Suspense mechanism:**
+1. Get current value via `useStore` (useSyncExternalStore)
+2. If `Initial` or `waiting` (when configured), throw a Promise
+3. Promise resolves when atom settles
+4. React re-renders, value is now ready
 
-### AtomRef Hooks (Hooks.ts:292-310)
+## AtomRef Hooks (Imperative Refs)
 
 ```typescript
+// Hooks.ts:292-310
 export const useAtomRef = <A>(ref: AtomRef.ReadonlyRef<A>): A => {
   const [, setValue] = React.useState(ref.value)
   React.useEffect(() => ref.subscribe(setValue), [ref])
@@ -225,49 +260,71 @@ export const useAtomRefPropValue = <A, K extends keyof A>(ref: AtomRef.AtomRef<A
   useAtomRef(useAtomRefProp(ref, prop))
 ```
 
-Hooks for working with AtomRef (mutable reference cells).
+**Note:** `useAtomRef` uses `useState` + `useEffect` pattern instead of `useSyncExternalStore`. This is for imperative refs that may not follow store semantics.
 
-## Registry Context (RegistryContext.ts)
+## Registry Context
+
+```typescript
+// RegistryContext.ts:14-25
+export function scheduleTask(f: () => void): void {
+  Scheduler.unstable_scheduleCallback(Scheduler.unstable_LowPriority, f)
+}
+
+export const RegistryContext = React.createContext<Registry.Registry>(Registry.make({
+  scheduleTask,
+  defaultIdleTTL: 400
+}))
+```
+
+**Key features:**
+- Uses React's Scheduler for batching (same scheduler React uses internally)
+- `LowPriority` allows React to prioritize user interactions
+- Default registry created for context (works without provider)
 
 ### RegistryProvider
 
 ```typescript
-export const RegistryProvider = (options: {
-  readonly children?: React.ReactNode | undefined
-  readonly initialValues?: Iterable<readonly [Atom.Atom<any>, any]> | undefined
-  readonly scheduleTask?: ((f: () => void) => void) | undefined
-  readonly timeoutResolution?: number | undefined
-  readonly defaultIdleTTL?: number | undefined
-}) => {
+// RegistryContext.ts:31-64
+export const RegistryProvider = (options: {...}) => {
   const ref = React.useRef<{
     readonly registry: Registry.Registry
     timeout?: number | undefined
   }>(null)
-  // Creates registry once, disposes with delay on unmount
-  // ...
+  if (ref.current === null) {
+    ref.current = {
+      registry: Registry.make({
+        scheduleTask: options.scheduleTask ?? scheduleTask,
+        initialValues: options.initialValues,
+        timeoutResolution: options.timeoutResolution,
+        defaultIdleTTL: options.defaultIdleTTL
+      })
+    }
+  }
+  React.useEffect(() => {
+    if (ref.current?.timeout !== undefined) {
+      clearTimeout(ref.current.timeout)
+    }
+    return () => {
+      ref.current!.timeout = setTimeout(() => {
+        ref.current?.registry.dispose()
+        ref.current = null
+      }, 500)
+    }
+  }, [ref])
+  return React.createElement(RegistryContext.Provider, { value: ref.current.registry }, options?.children)
 }
 ```
 
-**Key behaviors:**
-- Registry created once on first render
-- 500ms delayed disposal on unmount (prevents flicker on remount)
-- Configurable scheduling via React Scheduler
+**Key features:**
+1. **Lazy initialization** - Registry created in render (not effect)
+2. **Stable reference** - useRef ensures same registry across renders
+3. **Delayed cleanup** - 500ms delay prevents rapid mount/unmount issues (Strict Mode)
+4. **Timeout clearing** - Re-mount cancels pending disposal
 
-### Scheduler Integration
-
-```typescript
-import * as Scheduler from "scheduler"
-
-export function scheduleTask(f: () => void): void {
-  Scheduler.unstable_scheduleCallback(Scheduler.unstable_LowPriority, f)
-}
-```
-
-Uses React's internal scheduler for low-priority updates.
-
-## Scoped Atoms (ScopedAtom.ts)
+## ScopedAtom (Component-Scoped State)
 
 ```typescript
+// ScopedAtom.ts:36-66
 export const make = <A extends Atom.Atom<any>, Input = never>(
   f: (() => A) | ((input: Input) => A)
 ): ScopedAtom<A, Input> => {
@@ -289,93 +346,75 @@ export const make = <A extends Atom.Atom<any>, Input = never>(
     return React.createElement(Context.Provider, { value: atom.current }, children)
   }
 
-  return { [TypeId]: TypeId, use, Provider, Context }
+  return { [TypeId]: TypeId, use, Provider: Provider as any, Context }
 }
 ```
 
-**Pattern:** Factory creates scoped atom instances per Provider.
+**Purpose:** Creates component-scoped atom instances (like React Query's query instances per key).
 
-## SSR/Hydration (ReactHydration.ts)
+## HydrationBoundary
 
 ```typescript
+// ReactHydration.ts:22-84
 export const HydrationBoundary: React.FC<HydrationBoundaryProps> = ({ children, state }) => {
   const registry = React.useContext(RegistryContext)
-  
-  // In render phase: hydrate NEW atoms immediately
-  // Queue EXISTING atoms for post-render hydration
+
+  // Hydrate during render phase for new atoms
   const hydrationQueue = React.useMemo(() => {
-    // Separate new vs existing atoms
-    // Hydrate new atoms in render
-    // Return existing atoms for useEffect
+    if (state) {
+      const nodes = registry.getNodes()
+      const newDehydratedAtoms = []
+      const existingDehydratedAtoms = []
+
+      for (const dehydratedAtom of dehydratedAtoms) {
+        if (!nodes.get(dehydratedAtom.key)) {
+          newDehydratedAtoms.push(dehydratedAtom)  // New: hydrate now
+        } else {
+          existingDehydratedAtoms.push(dehydratedAtom)  // Existing: queue
+        }
+      }
+
+      if (newDehydratedAtoms.length > 0) {
+        Hydration.hydrate(registry, newDehydratedAtoms)  // Immediate!
+      }
+      return existingDehydratedAtoms.length > 0 ? existingDehydratedAtoms : undefined
+    }
   }, [registry, state])
 
-  // Post-render: hydrate existing atoms
+  // Hydrate existing atoms after render (for transitions)
   React.useEffect(() => {
     if (hydrationQueue) {
       Hydration.hydrate(registry, hydrationQueue)
     }
   }, [registry, hydrationQueue])
+
+  return React.createElement(React.Fragment, {}, children)
 }
 ```
 
-**Smart hydration:**
-- New atoms hydrated immediately (safe)
-- Existing atoms queued until after render (avoids transition issues)
-- Safe for concurrent React features
+**Clever hydration strategy:**
+1. **New atoms** - Hydrated immediately in render (needed before children render)
+2. **Existing atoms** - Queued for effect (avoids tearing during transitions)
+3. **Transition safety** - If transition aborts, existing atoms keep old values
 
-## Key Implementation Patterns
+## Summary: Key Patterns
 
-### 1. useSyncExternalStore Foundation
+| Pattern | Implementation | Why |
+|---------|---------------|-----|
+| External store | `useSyncExternalStore` | Concurrent mode safe, prevents tearing |
+| Store stability | WeakMap caching | Prevents resubscription on every render |
+| SSR support | `getServerSnapshot` | Hydration without mismatches |
+| Suspense | Throw cached Promise | Standard React suspense pattern |
+| Scheduler | `scheduler` package | Integrates with React's priority system |
+| Cleanup | Delayed disposal (500ms) | Handles Strict Mode double-mount |
+| Hydration | Split render/effect | Transition-safe SSR hydration |
 
-All reactive subscriptions go through `useSyncExternalStore`:
-- Proper concurrent rendering support
-- SSR compatibility via `getServerSnapshot`
-- Automatic tearing prevention
+## Implications for effect-trpc
 
-### 2. WeakMap Store Caching
-
-```typescript
-const storeRegistry = globalValue(
-  "@effect-atom/atom-react/storeRegistry",
-  () => new WeakMap<Registry.Registry, WeakMap<Atom.Atom<any>, AtomStore<any>>>()
-)
-```
-
-- Stores are memoized per (registry, atom) pair
-- WeakMaps allow garbage collection
-- Global value ensures singleton across module reloads
-
-### 3. Suspense via Promise Throwing
-
-```typescript
-function atomResultOrSuspend<A, E>(...) {
-  const value = useStore(registry, atom)
-  if (value._tag === "Initial" || (suspendOnWaiting && value.waiting)) {
-    throw atomToPromise(registry, atom, suspendOnWaiting)
-  }
-  return value
-}
-```
-
-Standard Suspense pattern - throw Promise when loading.
-
-### 4. Registry as Single Source of Truth
-
-All hooks delegate to Registry:
-- `registry.get(atom)` - read
-- `registry.set(atom, value)` - write
-- `registry.subscribe(atom, callback)` - subscribe
-- `registry.mount(atom)` - lifecycle
-- `registry.refresh(atom)` - invalidation
-
-## Summary
-
-Effect Atom React provides:
-1. **Standard React 18 integration** via `useSyncExternalStore`
-2. **Full feature set**: read, write, subscribe, suspend, refresh
-3. **SSR-ready** with server snapshots and hydration boundaries
-4. **Memory-safe** with WeakMap caching
-5. **Concurrent-ready** with proper Suspense support
-6. **Scheduler-aware** using React's internal scheduler
-
-The implementation is clean, minimal, and properly delegates all state logic to the Registry while handling React-specific concerns.
+1. **Use `useSyncExternalStore`** - It's the correct primitive for external state
+2. **Cache store objects** - WeakMap keyed by atom/query prevents memory leaks
+3. **Provide `getServerSnapshot`** - Required for SSR
+4. **Use React's Scheduler** - For proper priority integration
+5. **Delayed cleanup** - Essential for Strict Mode compatibility
+6. **Suspense via Promise throwing** - Standard pattern, cache promises per query
+7. **Hydration boundary** - Separate new vs existing state for transitions

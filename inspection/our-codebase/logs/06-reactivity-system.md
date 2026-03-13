@@ -1,275 +1,427 @@
 # Reactivity System Analysis
 
-## Overview
+**Date:** 2024-01-XX  
+**Module:** `/src/Reactivity/index.ts` + React Integration
 
-The `Reactivity` module (`src/Reactivity/index.ts`) is a **pub/sub invalidation coordinator** — it provides **NO actual cache**. It only notifies subscribers when tags are invalidated, triggering refetches.
+---
 
-## What the Module Actually Provides
+## Executive Summary
 
-### Core API
+The Reactivity module wraps `@effect/experimental/Reactivity` with hierarchical path semantics. The **cache itself is NOT in this module** - it's delegated entirely to `@effect-atom/atom` via the Registry. The Reactivity module only handles invalidation signaling.
+
+---
+
+## Architecture Overview
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │           effect-trpc/Reactivity             │
+                    │    (Path-based invalidation wrapper)         │
+                    │                                              │
+                    │  ┌─────────────────────────────────────────┐ │
+                    │  │  PathReactivity Service                 │ │
+                    │  │  - register(path) → Scoped              │ │
+                    │  │  - invalidate(paths)                    │ │
+                    │  │  - Hierarchical: "users" → "users/*"    │ │
+                    │  └───────────────┬─────────────────────────┘ │
+                    └──────────────────│──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │       @effect/experimental/Reactivity        │
+                    │                                              │
+                    │  - handlers: Map<key, Set<() => void>>       │
+                    │  - invalidate(keys) → calls all handlers     │
+                    │  - register(keys, handler) → adds listener   │
+                    │  - NO cache storage - just pub/sub           │
+                    └──────────────────────────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │       @effect-atom/atom Registry             │
+                    │            (ACTUAL CACHE)                    │
+                    │                                              │
+                    │  - nodes: Map<Atom | string, Node<any>>      │
+                    │  - Node contains computed value              │
+                    │  - Subscription-based invalidation           │
+                    │  - TTL-based cleanup                         │
+                    │  - Dependency tracking                       │
+                    └──────────────────────────────────────────────┘
+```
+
+---
+
+## Cache Storage Status
+
+### Where Cache Actually Lives
+
+| Component | Cache Role | Storage |
+|-----------|-----------|---------|
+| `effect-trpc/Reactivity` | Invalidation paths only | `HashSet<string>` (registered paths) |
+| `@effect/experimental/Reactivity` | Pub/sub handlers | `Map<key, Set<handler>>` |
+| `@effect-atom/atom/Registry` | **ACTUAL CACHE** | `Map<Atom, Node>` with computed values |
+
+### Registry Node Structure (from effect-atom)
 
 ```typescript
-interface ReactivityService {
-  subscribe(tag: string, callback: () => void): () => void  // Returns unsubscribe
-  invalidate(tags: ReadonlyArray<string>): void             // Triggers callbacks
-  getSubscribedTags(): ReadonlyArray<string>                // Debug helper
+// From inspection/external-repos/effect-atom/packages/atom/src/internal/registry.ts
+class Node<A> {
+  state: NodeState  // uninitialized | stale | valid | removed
+  _value: A         // Cached computed value
+  parents: Node[]   // Dependencies
+  children: Node[]  // Dependents
+  listeners: Set<() => void>  // Subscribers
+  lifetime: Lifetime | undefined  // Finalizers, disposal
+}
+
+class RegistryImpl {
+  nodes = new Map<Atom<any> | string, Node<any>>()  // THE CACHE
+  timeoutBuckets = new Map<number, [Set<Node>, handle]>()  // TTL cleanup
 }
 ```
+
+---
+
+## PathReactivity Service Analysis
 
 ### Implementation Details
 
-1. **Subscription Storage**: Uses `Map<string, Set<InvalidationCallback>>`
-2. **Hierarchical Invalidation**: Supports parent/child tag relationships
-   - Invalidating `@api/users` triggers `@api/users/list` (child)
-   - Invalidating `@api/users/list` triggers `@api/users` (parent)
-3. **Callback Deduplication**: Uses `Set<InvalidationCallback>` to avoid duplicate invocations
-
-### Utilities
-
 ```typescript
-// Convert procedure paths to tags
-pathsToTags("@api", ["users", "users.list"])
-// → ["@api/users", "@api/users/list"]
+// /src/Reactivity/index.ts
 
-// Check if tag should be invalidated
-shouldInvalidate("@api/users/list", "@api/users")  // true
+// State tracking
+const registeredPathsRef = yield* Ref.make(HashSet.empty<string>())  // Path registry
+
+// Reference-counted registration
+const pathRegistry = yield* RcMap.make({
+  lookup: (path) => Effect.acquireRelease(
+    Ref.update(registeredPathsRef, HashSet.add(path)),  // Add on first use
+    () => Ref.update(registeredPathsRef, HashSet.remove(path))  // Remove on last release
+  )
+})
 ```
 
-## Cache Analysis: NO CACHE EXISTS
+### Path Hierarchy Semantics
 
-| Component | Has Cache? | Notes |
-|-----------|------------|-------|
-| `Reactivity` module | **NO** | Pure pub/sub |
-| React hooks (`useQuery`) | **NO** | Re-fetches every call |
-| `ClientService` | **NO** | Direct pass-through |
-| Transport layer | **NO** | HTTP/WebSocket direct |
-
-### Where Data "Lives"
-
-Data only exists in React component state:
 ```typescript
-// src/Client/react.ts:151
-const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
+// shouldInvalidate(registeredPath, invalidationPath)
+shouldInvalidate("users/list", "users")     // true (child)
+shouldInvalidate("users", "users")          // true (exact match)
+shouldInvalidate("posts/list", "users")     // false (different tree)
+shouldInvalidate("users", "users/list")     // false (parent != child)
 ```
 
-Each `useQuery` hook:
-1. Fetches on mount
-2. Stores result in local `useState`
-3. Re-fetches when invalidated (via Reactivity subscription)
+---
 
-**There is no shared cache between components.**
+## Effect Atom Integration
 
-## Comparison with @effect/experimental/Reactivity
-
-### Effect's Official Reactivity
+### In React Provider (react.ts:80-111)
 
 ```typescript
-interface Service {
-  // Wraps effect, invalidates keys after completion
-  mutation<A, E, R>(keys, effect): Effect<A, E, R>
-  
-  // Creates reactive stream that re-executes on invalidation
-  query<A, E, R>(keys, effect): Effect<Mailbox<A, E>, never, R | Scope>
-  
-  // Converts query to Stream
-  stream<A, E, R>(keys, effect): Stream<A, E, R>
-  
-  invalidate(keys): Effect<void>
-  unsafeInvalidate(keys): void
-  unsafeRegister(keys, handler): () => void
+export const createProvider = (router) => {
+  return function TrpcProvider({ layer, children }) {
+    const contextValue = useMemo(() => {
+      const fullLayer = ClientServiceLive.pipe(
+        Layer.provideMerge(Reactivity.layer),  // Add Reactivity
+        Layer.provide(layer)
+      )
+      const atomRuntime = Atom.runtime(fullLayer)  // Creates atom context
+      return { atomRuntime, rootTag: router.tag }
+    }, [layer])
+    
+    return (
+      <RegistryProvider>  // From @effect-atom/atom-react
+        <TrpcContext.Provider value={contextValue}>
+          {children}
+        </TrpcContext.Provider>
+      </RegistryProvider>
+    )
+  }
 }
 ```
 
-**Key Differences:**
-
-| Feature | Our Reactivity | @effect/experimental/Reactivity |
-|---------|----------------|--------------------------------|
-| Effect integration | Minimal (wrappers only) | Deep (Effect-native) |
-| Query pattern | None | `query()` returns Mailbox |
-| Mutation wrapping | Manual | `mutation()` auto-invalidates |
-| Stream support | None | `stream()` built-in |
-| Key types | Strings only | Any (hashed) + Records |
-| Scope awareness | No | Yes |
-
-### What We're Missing
-
-1. **`query()`**: Effect-based reactive query that automatically re-executes
-2. **`mutation()`**: Wraps effect and auto-invalidates after success
-3. **Hash-based keys**: Support for any hashable value, not just strings
-4. **Record keys**: `{ users: [1, 2, 3] }` syntax for fine-grained invalidation
-
-## Integration Analysis
-
-### With React Hooks
-
-**In `src/Client/react.ts`:**
+### In useQuery Hook (react.ts:149-226)
 
 ```typescript
-// Provider creates separate Reactivity instance
-const [contextValue] = useState<ClientContextValue>(() => ({
-  runtime: ManagedRuntime.make(fullLayer),
-  reactivity: Reactivity.make(),  // Separate instance!
-  rootTag: router.tag,
-}))
+const createUseQuery = (tag, procedure) => {
+  // Compute reactivity keys from tag
+  const tagParts = tag.split("/").slice(1)  // "@api/users/list" → ["users", "list"]
+  const reactivityKeys = tagParts.reduce((acc, part, i) => {
+    const key = i === 0 ? part : `${acc[i-1]}/${part}`
+    return [...acc, key]  // ["users", "users/list"]
+  }, [])
+  
+  return function useQuery(payload, options) {
+    const queryAtom = useMemo(() => {
+      let atom = ctx.atomRuntime.atom(queryEffect)
+      
+      // Register for reactivity
+      if (reactivityKeys.length > 0) {
+        atom = ctx.atomRuntime.factory.withReactivity(reactivityKeys)(atom)
+      }
+      return atom
+    }, [ctx.atomRuntime, tag])
+    
+    useAtomMount(queryAtom)  // Keep alive
+    const refetch = useAtomRefresh(queryAtom)
+    const result = useAtomValue(queryAtom)
+    // ...
+  }
+}
+```
 
-// useQuery subscribes to tag
-useEffect(() => {
-  const unsubscribe = ctx.reactivity.subscribe(tag, () => {
-    fetchData()  // Re-fetch on invalidation
-  })
-  return unsubscribe
-}, [tag, ctx.reactivity, fetchData])
+### In useMutation Hook (react.ts:255-366)
 
-// useMutation invalidates after success
+```typescript
+const createUseMutation = (tag, procedure) => {
+  const invalidatePaths = procedure.invalidates
+  
+  return function useMutation(options) {
+    const mutationFn = useMemo(() => {
+      return ctx.atomRuntime.fn<Payload>()(
+        (payload, _get) => Effect.gen(function* () {
+          const result = yield* service.send(tag, payload, ...)
+          
+          // Invalidate on success
+          if (invalidatePaths.length > 0) {
+            const keys = invalidatePaths.map(path => path.replace(/\./g, "/"))
+            yield* Reactivity.invalidate(keys)  // Uses @effect/experimental
+          }
+          return result
+        }),
+        { reactivityKeys: invalidatePaths.length > 0 ? invalidatePaths : undefined }
+      )
+    }, [ctx.atomRuntime, tag])
+    // ...
+  }
+}
+```
+
+---
+
+## Invalidation Flow
+
+```
+Mutation succeeds
+       │
+       ▼
+Reactivity.invalidate(["users"])    ← effect-trpc
+       │
+       ▼
+PathReactivity.invalidate()
+  - Get all registered paths
+  - Filter: shouldInvalidate(registered, "users")
+  - Expand: ["users", "users/list", "users/get"]
+       │
+       ▼
+inner.invalidate(expandedPaths)     ← @effect/experimental/Reactivity
+       │
+       ▼
+For each key in handlers Map:
+  - Call all registered handler functions
+       │
+       ▼
+Handler from withReactivity():      ← @effect-atom
+  get.addFinalizer(reactivity.unsafeRegister(keys, () => {
+    get.refresh(atom)               ← Triggers atom re-computation
+  }))
+       │
+       ▼
+Registry marks Node as stale
+  - Node.invalidate()
+  - Notifies children (dependent atoms)
+  - Triggers recomputation on next read
+```
+
+---
+
+## Issues Found
+
+### Critical Issues
+
+| # | Issue | Severity | Location | Description |
+|---|-------|----------|----------|-------------|
+| 1 | **No effect-trpc cache storage** | High | `/src/Reactivity/` | Effect-trpc has NO cache - completely dependent on @effect-atom |
+| 2 | **Tight coupling to effect-atom internals** | High | `react.ts:184-189` | Uses `ctx.atomRuntime.factory.withReactivity` which is internal API |
+| 3 | **Async mutation invalidation race** | Medium | `react.ts:284-289` | Invalidation happens inside mutation effect, not after settlement |
+
+### Design Issues
+
+| # | Issue | Severity | Location | Description |
+|---|-------|----------|----------|-------------|
+| 4 | **Dual invalidation systems** | Medium | `Client/index.ts:186-192` + `react.ts:284-289` | Both ClientService.invalidate and direct Reactivity.invalidate |
+| 5 | **Path normalization inconsistency** | Medium | Multiple | Dot-to-slash conversion in multiple places |
+| 6 | **No cache key deduplication** | Low | N/A | Same query with same payload creates new atom each time |
+
+### Missing Features
+
+| # | Issue | Severity | Description |
+|---|-------|----------|-------------|
+| 7 | **No stale-while-revalidate** | Medium | No way to show stale data while refetching |
+| 8 | **No cache persistence** | Low | Cache lost on page refresh |
+| 9 | **No optimistic update support** | Medium | OptimisticConfig defined but not implemented |
+| 10 | **No cache time/staleness control** | Low | No `staleTime`, `cacheTime` options |
+
+---
+
+## Detailed Issue Analysis
+
+### Issue 1: No effect-trpc Cache Storage
+
+**Current State:**
+- PathReactivity only tracks registered paths in a `HashSet<string>`
+- RcMap provides reference-counted path registration (for cleanup)
+- Actual values are stored in @effect-atom's Registry
+
+**Impact:**
+- Complete dependency on @effect-atom for caching
+- Cannot use effect-trpc without React/effect-atom
+- No vanilla JS cache option
+
+**Recommendation:**
+Consider whether this is intentional design or if effect-trpc should have its own cache layer for non-React use cases.
+
+### Issue 2: Tight Coupling to Effect-Atom Internals
+
+```typescript
+// react.ts:184-189
+if (reactivityKeys.length > 0) {
+  atom = ctx.atomRuntime.factory.withReactivity(reactivityKeys)(atom)
+}
+```
+
+**Risk:** `factory.withReactivity` is not documented as public API. Breaking changes in effect-atom could break effect-trpc.
+
+### Issue 3: Async Mutation Race Condition
+
+```typescript
+// react.ts:284-289 - Inside the mutation effect
 if (invalidatePaths.length > 0) {
-  const tags = Reactivity.pathsToTags(ctx.rootTag, invalidatePaths)
-  ctx.reactivity.invalidate(tags)
+  yield* Reactivity.invalidate(keys)  // Happens BEFORE mutation completes
 }
+return result
 ```
 
-### With Effect Atom
+The invalidation happens as part of the mutation effect, not after it settles. If the mutation fails after invalidation started, queries may refetch with old data.
 
-**Currently: NO INTEGRATION**
+### Issue 4: Dual Invalidation Systems
 
-Our code imports `@effect-atom/atom/Result` for the Result type only:
+**System 1:** `ClientService.invalidate` (Client/index.ts:186-192)
 ```typescript
-import * as Result from "@effect-atom/atom/Result"
+invalidate: (paths) =>
+  Effect.gen(function* () {
+    const pathReactivity = yield* Effect.serviceOption(Reactivity.PathReactivity)
+    if (pathReactivity._tag === "Some") {
+      yield* pathReactivity.value.invalidate(paths)
+    }
+  })
 ```
 
-Effect Atom uses `@effect/experimental/Reactivity`:
+**System 2:** Direct `Reactivity.invalidate` (react.ts:289)
 ```typescript
-// From effect-atom's Atom.ts
-import * as Reactivity from "@effect/experimental/Reactivity"
-
-factory.withReactivity = (keys: ReadonlyArray<unknown>) => 
-  <A extends Atom<any>>(atom: A): A => { ... }
+yield* Reactivity.invalidate(keys)  // Uses @effect/experimental directly
 ```
 
-**The two Reactivity systems are incompatible.**
+These are different! System 1 goes through PathReactivity (hierarchical), System 2 goes directly to inner Reactivity.
 
-## Issues
+---
 
-### CRITICAL
+## @effect/experimental/Reactivity Internals
 
-1. **Duplicate Reactivity Systems** - Severity: **CRITICAL**
-   - We define our own `Reactivity` service
-   - Effect Atom uses `@effect/experimental/Reactivity`
-   - Two incompatible invalidation systems
-   - Atoms won't respond to our invalidations
-
-2. **No Shared Cache** - Severity: **CRITICAL**
-   - Each `useQuery` is independent
-   - Duplicate requests for same data
-   - No request deduplication
-   - Memory waste, network waste
-
-### HIGH
-
-3. **No Stale-While-Revalidate** - Severity: **HIGH**
-   - Options exist (`staleTime` in QueryOptions)
-   - But no implementation — always re-fetches
-   - Causes unnecessary loading states
-
-4. **Provider Creates Separate Reactivity** - Severity: **HIGH**
-   - `react.ts:89`: `const reactivity = Reactivity.make()`
-   - `react.ts:84-86`: Also provides `Reactivity.ReactivityLive` to Layer
-   - Two separate instances! Layer's instance unused.
-
-### MEDIUM
-
-5. **String-Only Keys** - Severity: **MEDIUM**
-   - Can't invalidate by ID: `{ users: [userId] }`
-   - Must invalidate entire tag: `["@api/users"]`
-   - Less granular than Effect's Reactivity
-
-6. **No Optimistic Updates** - Severity: **MEDIUM**
-   - Mutations wait for server response
-   - No way to update UI optimistically
-   - Worse UX for slow networks
-
-7. **Console.error in Production** - Severity: **MEDIUM**
-   - Line 197: `console.error("[Reactivity] Callback error:", error)`
-   - Should use proper error channel
-
-### LOW
-
-8. **Unused Effect Imports** - Severity: **LOW**
-   - Lines 34-38: Import `Ref`, `HashMap`, `HashSet`, `Option`
-   - None are used in implementation
-
-9. **Debug-Only API Exposed** - Severity: **LOW**
-   - `getSubscribedTags()` is debug-only but in public API
-
-## Architecture Recommendation
-
-### Option A: Use @effect/experimental/Reactivity
-
-Replace our `Reactivity` with Effect's official one:
 ```typescript
-import * as Reactivity from "@effect/experimental/Reactivity"
+// inspection/external-repos/effect/packages/experimental/src/Reactivity.ts:29-55
 
-// Mutations auto-invalidate
-const createUser = Reactivity.mutation(
-  ["users"],
-  Effect.gen(function* () { ... })
-)
+export const make = Effect.sync(() => {
+  const handlers = new Map<number | string, Set<() => void>>()  // Key → handlers
 
-// Queries auto-refresh
-const users = Reactivity.stream(
-  ["users"],
-  Effect.gen(function* () { ... })
-)
+  const unsafeInvalidate = (keys) => {
+    if (Array.isArray(keys)) {
+      for (const key of keys) {
+        const set = handlers.get(stringOrHash(key))
+        if (set) for (const run of set) run()  // Call all handlers
+      }
+    }
+    // ... record handling
+  }
+
+  const unsafeRegister = (keys, handler) => {
+    // Add handler to each key's Set
+    // Return cleanup function
+  }
+
+  const query = (keys, effect) => {
+    // Creates Mailbox, runs effect, registers invalidation handler
+    // Handler re-runs effect on invalidation
+  }
+
+  return { mutation, query, stream, unsafeInvalidate, invalidate, unsafeRegister }
+})
 ```
 
-**Pros:**
-- Compatible with Effect Atom
-- Better primitives (`query`, `mutation`, `stream`)
-- Maintained by Effect team
+**Key Insight:** @effect/experimental/Reactivity is a simple pub/sub system:
+- `handlers` Map stores invalidation callbacks per key
+- `invalidate(keys)` calls all handlers for those keys
+- `register(keys, handler)` subscribes to invalidation events
+- **No caching** - just event signaling
 
-**Cons:**
-- API change for users
-- Need to rework React integration
+---
 
-### Option B: Add Real Cache Layer
+## Recommendations
 
-Keep our Reactivity but add cache:
-```typescript
-interface QueryCache {
-  get<A>(key: string): Option<CacheEntry<A>>
-  set<A>(key: string, value: A, ttl?: Duration): void
-  invalidate(tags: ReadonlyArray<string>): void
-}
-```
+### Short-term Fixes
 
-**Pros:**
-- Deduplication
-- Stale-while-revalidate
-- Better performance
+1. **Unify invalidation path:** Use PathReactivity consistently
+2. **Fix race condition:** Invalidate after mutation settles, not inside effect
+3. **Document dependency:** Clearly state effect-atom is required for caching
 
-**Cons:**
-- Still incompatible with Effect Atom
-- Maintenance burden
+### Medium-term Improvements
 
-### Recommendation
+1. **Add cache layer for vanilla use:**
+   ```typescript
+   // src/Cache/index.ts
+   export interface CacheService {
+     get: (key: string) => Effect.Effect<Option<unknown>>
+     set: (key: string, value: unknown, ttl?: number) => Effect.Effect<void>
+     invalidate: (keys: string[]) => Effect.Effect<void>
+   }
+   ```
 
-**Use Option A** — adopt `@effect/experimental/Reactivity`:
-1. Compatibility with Effect ecosystem
-2. Better primitives
-3. Less code to maintain
-4. Future-proof (Effect team maintains it)
+2. **Implement stale-while-revalidate:**
+   - Return cached data immediately
+   - Refetch in background
+   - Update when fresh data arrives
+
+3. **Implement optimistic updates:**
+   - Use the existing `OptimisticConfig` definition
+   - Apply optimistic value immediately
+   - Reconcile on mutation success/failure
+
+### Long-term Architecture
+
+Consider whether effect-trpc should:
+- Be a thin wrapper around effect-atom (current approach)
+- Have its own cache layer with effect-atom as optional React binding
+- Support multiple cache backends (memory, IndexedDB, etc.)
+
+---
+
+## Code Quality Notes
+
+**Strengths:**
+- Clean hierarchical path invalidation logic
+- Good use of RcMap for reference-counted resources
+- Proper scoped resource management
+
+**Weaknesses:**
+- Heavy reliance on undocumented effect-atom internals
+- Inconsistent path normalization
+- Mixed use of direct imports vs service access
+
+---
 
 ## Summary
 
-| Aspect | Status | Notes |
-|--------|--------|-------|
-| Cache | **MISSING** | No cache exists anywhere |
-| Invalidation | Working | Pub/sub pattern functional |
-| Effect Atom | **INCOMPATIBLE** | Different Reactivity systems |
-| React Integration | Partial | Works but no cache benefits |
-| Performance | Poor | Every query re-fetches |
+The Reactivity module is a **thin invalidation wrapper** that:
+1. Wraps @effect/experimental/Reactivity with path hierarchy
+2. Depends entirely on @effect-atom for actual caching
+3. Has some integration issues that need addressing
 
-The current Reactivity module is a minimal pub/sub system. For a production-ready library, we need:
-1. Real cache with TTL/stale-while-revalidate
-2. Compatibility with Effect Atom's Reactivity
-3. Request deduplication
-4. Optimistic updates
+**Cache Status:** No cache in effect-trpc - all caching via @effect-atom Registry.

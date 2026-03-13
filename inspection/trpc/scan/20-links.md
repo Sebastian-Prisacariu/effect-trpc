@@ -1,15 +1,24 @@
-# tRPC Link Architecture Analysis
+# H20: tRPC Links Architecture Analysis
 
 ## Overview
 
-tRPC's link system is a **middleware chain pattern** for client-side request processing. Links are composable, chainable units that can intercept, transform, batch, retry, or terminate requests.
+tRPC's "links" pattern is a **middleware chain for client-side operations**. Links intercept, transform, and handle RPC operations as they flow from client to server and back.
 
-## Core Type Definitions
-
-### Operation
+## Core Types
 
 ```typescript
-// packages/client/src/links/types.ts:26-33
+// The public link factory type
+type TRPCLink<TInferrable extends InferrableClientTypes> = (
+  opts: TRPCClientRuntime,
+) => OperationLink<TInferrable>;
+
+// The actual link implementation
+type OperationLink<TInferrable, TInput = unknown, TOutput = unknown> = (opts: {
+  op: Operation<TInput>;
+  next: (op: Operation<TInput>) => OperationResultObservable<TInferrable, TOutput>;
+}) => OperationResultObservable<TInferrable, TOutput>;
+
+// Operation metadata
 type Operation<TInput = unknown> = {
   id: number;
   type: 'mutation' | 'query' | 'subscription';
@@ -20,40 +29,12 @@ type Operation<TInput = unknown> = {
 };
 ```
 
-### OperationLink (The Chain Unit)
-
-```typescript
-// packages/client/src/links/types.ts:95-104
-type OperationLink<TInferrable, TInput = unknown, TOutput = unknown> = (opts: {
-  op: Operation<TInput>;
-  next: (op: Operation<TInput>) => OperationResultObservable<TInferrable, TOutput>;
-}) => OperationResultObservable<TInferrable, TOutput>;
-```
-
-Key insight: Each link receives:
-- `op`: The current operation
-- `next`: A function to call the next link in the chain
-
-### TRPCLink (Factory Function)
-
-```typescript
-// packages/client/src/links/types.ts:109-111
-type TRPCLink<TInferrable> = (
-  opts: TRPCClientRuntime,
-) => OperationLink<TInferrable>;
-```
-
-Links are factory functions that return `OperationLink`. This two-phase initialization allows:
-1. **Config phase**: Initialize with runtime configuration
-2. **Request phase**: Process individual operations
-
 ## Chain Execution
 
-### createChain Implementation
+The chain is built via `createChain()` in `links/internals/createChain.ts`:
 
 ```typescript
-// packages/client/src/links/internals/createChain.ts:10-40
-function createChain<TRouter, TInput, TOutput>(opts: {
+export function createChain<TRouter, TInput, TOutput>(opts: {
   links: OperationLink<TRouter, TInput, TOutput>[];
   op: Operation<TInput>;
 }): OperationResultObservable<TRouter, TOutput> {
@@ -77,57 +58,75 @@ function createChain<TRouter, TInput, TOutput>(opts: {
 }
 ```
 
-**Pattern**: Recursive execution with index tracking. Each link can:
-- Call `next(op)` to continue the chain
-- Modify `op` before passing to `next`
-- Handle responses from `next`
-- Short-circuit and not call `next` (terminating links)
+**Key characteristics:**
+1. **Recursive execution** - Each link calls `next()` to invoke the next link
+2. **Observable-based** - All links return `Observable<OperationResultEnvelope, TRPCClientError>`
+3. **Terminating link required** - The final link must not call `next()` (e.g., `httpLink`, `wsLink`)
+4. **Links can modify operations** - Can transform `op` before passing to next
 
 ## Link Categories
 
-### 1. Terminating Links (Must Be Last)
+### 1. Terminating Links (don't call `next()`)
 
-These links make actual requests and don't call `next`:
-
-| Link | Purpose | Protocol |
-|------|---------|----------|
-| `httpLink` | Single HTTP requests | HTTP |
+| Link | Purpose | Transport |
+|------|---------|-----------|
+| `httpLink` | Single HTTP request | HTTP |
 | `httpBatchLink` | Batched HTTP requests | HTTP |
-| `httpBatchStreamLink` | Streaming batched requests | HTTP/SSE |
+| `httpBatchStreamLink` | Streaming batched responses | HTTP |
 | `wsLink` | WebSocket transport | WebSocket |
-| `httpSubscriptionLink` | SSE subscriptions | HTTP/SSE |
-| `localLink` | In-process calls (no network) | Direct |
+| `httpSubscriptionLink` | SSE for subscriptions | HTTP/SSE |
+| `localLink` | In-process, no network | Direct call |
 
-### 2. Middleware Links (Can Be Anywhere)
-
-These links process and forward:
+### 2. Pass-Through Links (call `next()`)
 
 | Link | Purpose |
 |------|---------|
-| `loggerLink` | Request/response logging |
-| `retryLink` | Automatic retry on failure |
-| `splitLink` | Conditional routing |
-| `dedupeLink` | Deduplicate concurrent queries |
+| `loggerLink` | Logs operations up/down |
+| `retryLink` | Retries failed operations |
+| `splitLink` | Conditional routing to different link chains |
+| `dedupeLink` | Deduplicates identical in-flight queries |
 
-## Detailed Link Analysis
+## Link Implementation Patterns
 
-### httpLink (Terminating)
+### Pattern 1: Simple Pass-Through (loggerLink)
 
 ```typescript
-// packages/client/src/links/httpLink.ts:75-142
-export function httpLink<TRouter extends AnyRouter>(
-  opts: HTTPLinkOptions<TRouter['_def']['_config']['$types']>,
-): TRPCLink<TRouter> {
-  const resolvedOpts = resolveHTTPLinkOptions(opts);
-  return () => {
-    return (operationOpts) => {
-      const { op } = operationOpts;
+export function loggerLink<TRouter>(): TRPCLink<TRouter> {
+  return () => {                          // Runtime initialization
+    return ({ op, next }) => {            // Per-request
       return observable((observer) => {
-        // Does NOT call next() - terminates the chain
-        const request = universalRequester({ ... });
+        logger({ ...op, direction: 'up' });
+        const requestStartTime = Date.now();
+        
+        return next(op)
+          .pipe(tap({
+            next(result) { logger({ ...op, direction: 'down', elapsedMs: Date.now() - requestStartTime, result }); },
+            error(result) { logger({ ...op, direction: 'down', result }); },
+          }))
+          .subscribe(observer);
+      });
+    };
+  };
+}
+```
+
+### Pattern 2: Terminating (httpLink)
+
+```typescript
+export function httpLink<TRouter>(opts: HTTPLinkOptions<TRouter>): TRPCLink<TRouter> {
+  const resolvedOpts = resolveHTTPLinkOptions(opts);
+  
+  return () => {                           // Runtime init
+    return (operationOpts) => {            // Per-request
+      const { op } = operationOpts;
+      // NOTE: Does NOT call next() - terminates chain
+      return observable((observer) => {
+        const request = universalRequester({ ...resolvedOpts, type: op.type, path, input, signal: op.signal });
         request.then((res) => {
           observer.next({ context: res.meta, result: transformed.result });
           observer.complete();
+        }).catch((cause) => {
+          observer.error(TRPCClientError.from(cause, { meta }));
         });
         return () => { /* cleanup */ };
       });
@@ -136,39 +135,10 @@ export function httpLink<TRouter extends AnyRouter>(
 }
 ```
 
-### loggerLink (Middleware)
+### Pattern 3: Conditional Routing (splitLink)
 
 ```typescript
-// packages/client/src/links/loggerLink.ts:214-267
-export function loggerLink<TRouter extends AnyRouter>(
-  opts: LoggerLinkOptions<TRouter> = {},
-): TRPCLink<TRouter> {
-  return () => {
-    return ({ op, next }) => {
-      return observable((observer) => {
-        // Log request going up
-        logger({ ...op, direction: 'up' });
-        
-        // Continue chain and observe response
-        return next(op)
-          .pipe(
-            tap({
-              next(result) { logger({ ...op, direction: 'down', result }); },
-              error(result) { logger({ ...op, direction: 'down', result }); },
-            }),
-          )
-          .subscribe(observer);
-      });
-    };
-  };
-}
-```
-
-### splitLink (Conditional Router)
-
-```typescript
-// packages/client/src/links/splitLink.ts:9-30
-export function splitLink<TRouter extends AnyRouter>(opts: {
+export function splitLink<TRouter>(opts: {
   condition: (op: Operation) => boolean;
   true: TRPCLink<TRouter> | TRPCLink<TRouter>[];
   false: TRPCLink<TRouter> | TRPCLink<TRouter>[];
@@ -176,6 +146,7 @@ export function splitLink<TRouter extends AnyRouter>(opts: {
   return (runtime) => {
     const yes = asArray(opts.true).map((link) => link(runtime));
     const no = asArray(opts.false).map((link) => link(runtime));
+    
     return (props) => {
       return observable((observer) => {
         const links = opts.condition(props.op) ? yes : no;
@@ -186,31 +157,34 @@ export function splitLink<TRouter extends AnyRouter>(opts: {
 }
 ```
 
-### retryLink (Error Handling)
+### Pattern 4: Retry with State (retryLink)
 
 ```typescript
-// packages/client/src/links/retryLink.ts:39-117
-export function retryLink<TInferrable>(
-  opts: RetryLinkOptions<TInferrable>,
-): TRPCLink<TInferrable> {
+export function retryLink<TInferrable>(opts: RetryLinkOptions<TInferrable>): TRPCLink<TInferrable> {
   return () => {
     return (callOpts) => {
       return observable((observer) => {
+        let lastEventId: string | undefined;
+        
         function attempt(attempts: number) {
-          next$ = callOpts.next(op).subscribe({
+          const op = { ...callOpts.op, input: inputWithTrackedEventId(callOpts.op.input, lastEventId) };
+          
+          callOpts.next(op).subscribe({
             error(error) {
-              const shouldRetry = opts.retry({ op, attempts, error });
-              if (!shouldRetry) {
+              if (opts.retry({ op, attempts, error })) {
+                setTimeout(() => attempt(attempts + 1), opts.retryDelayMs?.(attempts) ?? 0);
+              } else {
                 observer.error(error);
-                return;
               }
-              // Retry with delay
-              callNextTimeout = setTimeout(() => attempt(attempts + 1), delayMs);
             },
-            next(envelope) { observer.next(envelope); },
+            next(envelope) {
+              if (envelope.result.id) lastEventId = envelope.result.id;
+              observer.next(envelope);
+            },
             complete() { observer.complete(); },
           });
         }
+        
         attempt(1);
         return () => { /* cleanup */ };
       });
@@ -219,183 +193,144 @@ export function retryLink<TInferrable>(
 }
 ```
 
-### dedupeLink (Request Deduplication)
-
-```typescript
-// packages/client/src/links/internals/dedupeLink.ts:11-56
-export function dedupeLink<TRouter>(): TRPCLink<TRouter> {
-  return () => {
-    const pending: Record<string, Observable<any, any>> = {};
-    return ({ op, next }) => {
-      if (op.type !== 'query') {
-        return next(op);  // Only dedupe queries
-      }
-      const key = JSON.stringify([op.path, op.input]);
-      const obs$ = pending[key];
-      if (obs$) {
-        return observable((observer) => obs$.subscribe(observer));
-      }
-      const shared$ = observable((observer) => {
-        const subscription = next(op).subscribe({ ... });
-        return () => { delete pending[key]; subscription.unsubscribe(); };
-      }).pipe(share());
-      pending[key] = shared$;
-      return shared$;
-    };
-  };
-}
-```
-
 ## Client Integration
 
-### TRPCUntypedClient
+The `TRPCUntypedClient` initializes links at construction:
 
 ```typescript
-// packages/client/src/internals/TRPCUntypedClient.ts:47-77
-export class TRPCUntypedClient<TInferrable> {
-  private readonly links: OperationLink<TInferrable>[];
-  
-  constructor(opts: CreateTRPCClientOptions<TInferrable>) {
-    // Initialize links (config phase)
-    this.links = opts.links.map((link) => link(this.runtime));
-  }
-  
-  private $request<TInput, TOutput>(opts: { ... }) {
-    // Execute chain for each request
-    const chain$ = createChain<AnyRouter, TInput, TOutput>({
-      links: this.links as OperationLink<any, any, any>[],
-      op: { ...opts, context: opts.context ?? {}, id: ++this.requestId },
-    });
-    return chain$.pipe(share());
-  }
+constructor(opts: CreateTRPCClientOptions<TInferrable>) {
+  this.requestId = 0;
+  this.runtime = {};
+  // Initialize all links with runtime context
+  this.links = opts.links.map((link) => link(this.runtime));
+}
+
+private $request<TInput, TOutput>(opts) {
+  const chain$ = createChain<AnyRouter, TInput, TOutput>({
+    links: this.links,
+    op: { ...opts, context: opts.context ?? {}, id: ++this.requestId },
+  });
+  return chain$.pipe(share());
 }
 ```
 
-## Observable-Based Design
-
-tRPC uses `@trpc/server/observable` for reactive streams:
-
-- **Queries/Mutations**: Single emission, then complete
-- **Subscriptions**: Multiple emissions over time
-- **Error handling**: Propagated through observable error channel
-- **Cancellation**: Cleanup via unsubscribe
-
-## Typical Link Chains
-
-### Standard HTTP
+## Composition Examples
 
 ```typescript
-createTRPCClient({
-  links: [
-    loggerLink(),      // Middleware: logging
-    httpLink({ url }), // Terminating: HTTP transport
-  ],
-});
-```
-
-### With Batching and Retry
-
-```typescript
-createTRPCClient({
+// Standard setup
+const client = createTRPCClient<AppRouter>({
   links: [
     loggerLink(),
-    retryLink({ retry: (opts) => opts.attempts < 3 }),
-    httpBatchLink({ url, maxURLLength: 2000 }),
+    httpBatchLink({ url: 'http://localhost:3000/trpc' }),
   ],
 });
-```
 
-### Split by Operation Type
-
-```typescript
-createTRPCClient({
+// Split by operation type
+const client = createTRPCClient<AppRouter>({
   links: [
+    loggerLink(),
     splitLink({
       condition: (op) => op.type === 'subscription',
       true: wsLink({ client: wsClient }),
-      false: httpBatchLink({ url }),
+      false: httpBatchLink({ url: '/trpc' }),
     }),
+  ],
+});
+
+// Retry + batching
+const client = createTRPCClient<AppRouter>({
+  links: [
+    retryLink({ retry: (opts) => opts.attempts < 3 }),
+    httpBatchLink({ url: '/trpc' }),
   ],
 });
 ```
 
-## Key Design Patterns
+## Effect-TRPC Implications
 
-### 1. Two-Phase Initialization
+### Should We Adopt Links?
 
-```
-TRPCLink (config) -> OperationLink (per-request)
-```
+**Arguments FOR:**
 
-Benefits:
-- Share state across requests (connection pools, caches)
-- Configure once, execute many
+1. **Familiar to tRPC users** - Existing mental model transfers
+2. **Compositional** - Mix and match concerns cleanly
+3. **Extensible** - Users can write custom links
+4. **Separation of concerns** - Logging, retry, auth are distinct
 
-### 2. Observable for All Operations
+**Arguments AGAINST:**
 
-Even request/response operations use observables:
-- Unified API for queries, mutations, subscriptions
-- Built-in cancellation support
-- Composable with RxJS-style operators
+1. **Effect already has middleware** - `@effect/rpc` has middleware via `Layer`
+2. **Observable vs Effect** - Links use RxJS-style Observable; Effect has `Stream`
+3. **Complexity** - Two-phase initialization (factory -> runtime -> per-request)
+4. **Context threading** - Effect's native `Context` system is more powerful
 
-### 3. Explicit Chain Termination
+### Recommendation
 
-Chain **must** end with a terminating link. Error thrown if `next()` called with no more links:
+**Don't directly adopt tRPC links.** Instead, map the patterns to Effect idioms:
+
+| tRPC Link | Effect Equivalent |
+|-----------|-------------------|
+| `loggerLink` | `Effect.tap` + `Tracer` |
+| `retryLink` | `Effect.retry` with `Schedule` |
+| `splitLink` | Pattern matching on operation type |
+| `httpLink` | `HttpClient` layer |
+| `wsLink` | WebSocket `Stream` |
+
+### Effect-Native Middleware
+
+Instead of Observable-based links, use Effect's composition:
 
 ```typescript
-if (!next) {
-  throw new Error('No more links to execute - did you forget to add an ending link?');
+// Effect middleware wraps the execution
+const withLogging = <R, E, A>(
+  effect: Effect.Effect<A, E, R>
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    yield* Effect.logInfo("Request started")
+    const result = yield* effect
+    yield* Effect.logInfo("Request completed")
+    return result
+  })
+
+// Retry via Schedule
+const withRetry = <R, E, A>(
+  effect: Effect.Effect<A, E, R>,
+  schedule: Schedule.Schedule<unknown, E>
+): Effect.Effect<A, E, R> =>
+  Effect.retry(effect, schedule)
+
+// Transport selection via service
+interface RpcTransport {
+  readonly execute: <I, O>(
+    op: RpcOperation<I, O>
+  ) => Effect.Effect<O, RpcError, RpcTransport>
 }
+
+const HttpTransport = Layer.succeed(RpcTransport, { /* ... */ })
+const WsTransport = Layer.succeed(RpcTransport, { /* ... */ })
 ```
 
-### 4. Context Propagation
+### Key Insight
 
-Operations carry a mutable `context` object through the chain:
-- Links can add metadata
-- Downstream links can access upstream additions
-- Response includes final context state
+tRPC links solve **cross-cutting concerns** for RPC operations. Effect solves these natively:
 
-## Comparison: Effect-tRPC Considerations
+| Concern | tRPC Link | Effect |
+|---------|-----------|--------|
+| Logging | `loggerLink` | `Tracer`, `Effect.annotateLogs` |
+| Retry | `retryLink` | `Effect.retry`, `Schedule` |
+| Timeout | Custom link | `Effect.timeout` |
+| Caching | `dedupeLink` | `Cache`, `Request` deduplication |
+| Auth | Custom link | `Context.Tag` for credentials |
+| Error handling | Link `catch` | `Effect.catchTag`, error channel |
 
-### Current Effect-tRPC: Single Transport
+## Summary
 
-Effect-tRPC currently has a single `Transport` abstraction without composable links.
+tRPC's links are a well-designed Observable middleware chain. For effect-trpc, we should **not port the Observable pattern** but instead provide Effect-native equivalents that leverage:
 
-### Potential Link-Like Patterns in Effect
+1. **Effect's error channel** for typed errors
+2. **Context/Layer** for dependency injection
+3. **Schedule** for retry policies
+4. **Stream** for subscriptions
+5. **Tracer** for observability
 
-| tRPC Pattern | Effect Equivalent |
-|--------------|-------------------|
-| Observable chain | Effect.gen with yield* |
-| Middleware link | Effect.tap / Effect.flatMap |
-| Error handling | Effect.catchTag / Effect.retry |
-| Conditional routing | Effect.if / Effect.match |
-| Context propagation | Effect Context (R) |
-
-### Key Questions for Effect-tRPC
-
-1. **Do we need observable semantics?**
-   - Effect streams handle subscriptions
-   - Request/response can be plain Effects
-
-2. **How do we handle batching?**
-   - Effect has `Effect.all` for parallel execution
-   - DataLoader pattern possible with refs
-
-3. **What's the unit of composition?**
-   - tRPC: `OperationLink` wrapping observables
-   - Effect: Could be `Effect<A, E, R>` transformer
-
-4. **Where does state live?**
-   - tRPC: Closure in link factory
-   - Effect: Service layer (Ref, ScopedRef)
-
-## Recommendation
-
-The link pattern provides valuable extensibility. For Effect-tRPC, consider:
-
-1. **Layer-based middleware**: Use Effect layers for logging, retry, etc.
-2. **Transport abstraction**: Keep single transport, but make it pluggable
-3. **Effect composition**: Chain transformations via Effect operators
-4. **Explicit subscription handling**: Separate API for streams vs request/response
-
-The Observable-based approach in tRPC is elegant but may add complexity when Effect already provides similar capabilities through its native constructs.
+The user-facing API can still support composable middleware, but implemented via Effect's functional composition rather than Observable chains.

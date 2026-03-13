@@ -1,240 +1,408 @@
 # React Integration Analysis
 
-## Overview
+**Date:** 2026-03-13
+**Files Analyzed:**
+- `src/Client/index.ts` (776 lines)
+- `src/Client/react.ts` (457 lines)  
+- `src/SSR/index.ts` (209 lines)
 
-The effect-trpc library has a **custom React integration** that does NOT use `@effect-atom/atom-react` hooks despite listing it as a required peer dependency. Instead, it builds React hooks from scratch using vanilla React primitives.
+## Summary
 
-## Implementation Status
+The React integration uses `@effect-atom/atom-react` as required, but has **significant implementation gaps** and **incorrect API usage** that will cause runtime errors.
 
-### Provider Component
-**Status: IMPLEMENTED**  
-**Location:** `src/Client/react.ts:78-111`
+---
+
+## 1. @effect-atom/atom-react Import Status
+
+### Imports in `src/Client/react.ts` (lines 20-30)
 
 ```typescript
-export const createProvider = <D extends Router.Definition>(
-  router: Router.Router<D>
-): React.FC<ProviderProps> => {
-  return function Provider({ layer, children }: ProviderProps) {
-    const [contextValue] = useState<ClientContextValue>(() => {
-      const fullLayer = ClientServiceLive.pipe(
-        Layer.provideMerge(Reactivity.ReactivityLive),
-        Layer.provide(layer)
-      )
-      const runtime = ManagedRuntime.make(fullLayer)
-      const reactivity = Reactivity.make()
-      return { runtime, reactivity, rootTag: router.tag }
-    })
-    
-    useEffect(() => {
-      return () => { contextValue.runtime.dispose() }
-    }, [contextValue])
-    
-    return React.createElement(ClientContext.Provider, { value: contextValue }, children)
-  }
+import {
+  Atom,
+  Registry,
+  Result,
+  useAtomValue,
+  useAtomSuspense,
+  useAtomRefresh,
+  useAtomMount,
+  RegistryContext,
+  RegistryProvider,
+} from "@effect-atom/atom-react"
+```
+
+**Status:** IMPORTED
+
+| Import | Exists in Library | Used Correctly |
+|--------|-------------------|----------------|
+| `Atom` | Yes | NO - see issues |
+| `Registry` | Yes | Partially |
+| `Result` | Yes | Yes |
+| `useAtomValue` | Yes | Yes |
+| `useAtomSuspense` | Yes | Partially |
+| `useAtomRefresh` | Yes | Yes |
+| `useAtomMount` | Yes | Yes |
+| `RegistryContext` | Yes | Partially |
+| `RegistryProvider` | Yes | Yes |
+
+### Missing Imports
+- `useAtomSet` - needed for mutations
+- `useAtom` - tuple hook [value, setter]
+
+---
+
+## 2. Critical Issues
+
+### Issue 2.1: Invalid `Atom.AtomRuntime` Type Construction
+
+**Severity:** CRITICAL
+**Location:** `src/Client/react.ts:53`
+
+```typescript
+interface TrpcContextValue {
+  readonly atomRuntime: Atom.AtomRuntime<ClientServiceTag | Reactivity.Reactivity>
+  readonly rootTag: string
 }
 ```
 
-**Assessment:** Works, but uses plain React Context instead of atom-based state management.
+**Problem:** `Atom.AtomRuntime` takes `<R, ER>` where `R` is the provided context type and `ER` is the error type. However:
+1. `ClientServiceTag` is a `Context.Tag`, not a service type
+2. The type should be `AtomRuntime<ClientService | Reactivity.Reactivity.Service>`
 
----
-
-### useQuery Hook
-**Status: IMPLEMENTED (custom, not using @effect-atom/atom-react)**  
-**Location:** `src/Client/react.ts:122-235`
-
-The hook:
-- Uses `useState` for state management (line 151)
-- Uses `useCallback` for fetch function (line 157)
-- Uses `useEffect` for subscriptions (lines 191-217)
-- Uses `useRef` for tracking mounted state (lines 153-154)
-
-**What it DOES use:**
+**Fix:**
 ```typescript
-import * as Result from "@effect-atom/atom/Result"  // Result type only!
-```
-
-**What it does NOT use:**
-- `useAtom` from `@effect-atom/atom-react`
-- `useAtomValue` from `@effect-atom/atom-react`
-- Any reactive atom primitives
-
-**Code Evidence (lines 151-188):**
-```typescript
-const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
-const [isLoading, setIsLoading] = useState(false)
-const mountedRef = useRef(true)
-const fetchIdRef = useRef(0)
-
-const fetchData = useCallback(async () => {
-  // ... manual state management
-  setIsLoading(true)
-  setResult(Result.initial(true))
-  // ... fetch logic
-  setResult(Result.success<Success, Error>(exit.value as Success))
-}, [enabled, payload, ctx.runtime])
-```
-
----
-
-### useMutation Hook
-**Status: IMPLEMENTED (custom, not using @effect-atom/atom-react)**  
-**Location:** `src/Client/react.ts:246-348`
-
-Same pattern as useQuery - uses vanilla React state management:
-```typescript
-const [isLoading, setIsLoading] = useState(false)
-const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
-const mountedRef = useRef(true)
-```
-
----
-
-### useStream Hook
-**Status: IMPLEMENTED (custom, not using @effect-atom/atom-react)**  
-**Location:** `src/Client/react.ts:359-461`
-
-Same pattern:
-```typescript
-const [items, setItems] = useState<Success[]>([])
-const [isStreaming, setIsStreaming] = useState(false)
-const [error, setError] = useState<Error | undefined>()
-```
-
-**Notable Issue (line 432-436):**
-```typescript
-// Cleanup - note: we can't easily abort a running stream
-// This would need Fiber interrupt support
-return () => {
-  abortRef.current?.()
-}
-```
-Stream cancellation is not actually implemented.
-
----
-
-## Peer Dependency Analysis
-
-### Package.json (lines 32-47)
-```json
-"peerDependencies": {
-  "effect": "^3.0.0",
-  "@effect/rpc": "^0.50.0",
-  "@effect/platform": "^0.70.0",
-  "@effect-atom/atom": "^0.5.0",
-  "@effect-atom/atom-react": "^0.5.0",   // LISTED BUT NOT USED
-  "react": "^18.0.0 || ^19.0.0"
-},
-"peerDependenciesMeta": {
-  "react": { "optional": true },
-  "@effect-atom/atom-react": { "optional": true }  // Marked optional, still misleading
-}
-```
-
-### What IS Actually Used
-
-| Dependency | Import Location | What's Used |
-|------------|-----------------|-------------|
-| `@effect-atom/atom` | `src/Client/react.ts:20` | `Result` type only |
-| `@effect-atom/atom-react` | **NOWHERE** | **NOTHING** |
-| `react` | `src/Client/react.ts:11-12` | Standard hooks |
-
-### Grep Results
-```bash
-grep -r "@effect-atom/atom-react" src/
-# No results in src/ directory
-```
-
----
-
-## Critical Findings
-
-### 1. **CRITICAL: @effect-atom/atom-react Not Used**
-The CLAUDE.md project requirements state:
-> `@effect-atom/atom-react` | React hooks (useAtom, useAtomValue) | **REQUIRED for React**
-
-But the actual implementation:
-- Never imports `@effect-atom/atom-react`
-- Uses vanilla `useState`, `useCallback`, `useEffect`
-- Only uses `@effect-atom/atom/Result` as a type
-
-### 2. **HIGH: Manual State Management Instead of Atoms**
-The implementation manually manages:
-- Loading states with `useState<boolean>`
-- Result states with `useState<Result<S, E>>`
-- Refs for mounted tracking
-- Refs for fetch ID tracking
-
-This defeats the purpose of using Effect's reactive primitives.
-
-### 3. **MEDIUM: Reactivity System is Custom**
-`src/Reactivity/index.ts` implements a custom pub/sub system:
-```typescript
-const subscriptions = new Map<string, Set<InvalidationCallback>>()
-```
-
-This could potentially integrate with `@effect-atom/atom`'s reactive system but doesn't.
-
-### 4. **MEDIUM: Stream Cancellation Not Working**
-`src/Client/react.ts:432-436` has a comment admitting the cleanup doesn't work:
-```typescript
-// Cleanup - note: we can't easily abort a running stream
-// This would need Fiber interrupt support
-```
-
-### 5. **LOW: Type-Only Usage of Result**
-The Result import is only for the type definition, not the reactive behavior:
-```typescript
-import * as Result from "@effect-atom/atom/Result"
-// Used as: useState<Result.Result<Success, Error>>(Result.initial())
-```
-
----
-
-## What Should Be Used
-
-Based on `@effect-atom/atom-react`, the hooks should use:
-
-```typescript
-import { useAtom, useAtomValue, Atom } from "@effect-atom/atom-react"
-
-// Instead of:
-const [result, setResult] = useState<Result.Result<S, E>>(Result.initial())
-
+readonly atomRuntime: Atom.AtomRuntime<ClientServiceTag | Reactivity.Reactivity>
 // Should be:
-const resultAtom = useMemo(() => Atom.of(Result.initial<S, E>()), [])
-const [result, setResult] = useAtom(resultAtom)
+readonly atomRuntime: Atom.AtomRuntime<ClientService | Reactivity.Reactivity.Service>
 ```
 
-Or potentially using `AtomRpc` from `@effect-atom/atom` for RPC-specific reactive patterns.
+---
+
+### Issue 2.2: Invalid `Atom.runtime()` Usage
+
+**Severity:** CRITICAL  
+**Location:** `src/Client/react.ts:92-93`
+
+```typescript
+// Create AtomRuntime from the layer
+const atomRuntime = Atom.runtime(fullLayer)
+```
+
+**Problem:** `Atom.runtime` is a `RuntimeFactory`, not a function that takes a layer directly. According to `@effect-atom/atom` source (Atom.ts:721-723):
+
+```typescript
+export const runtime: RuntimeFactory = globalValue(
+  "@effect-atom/atom/Atom/defaultContext",
+  () => context({ memoMap: defaultMemoMap })
+)
+```
+
+The `RuntimeFactory` interface (Atom.ts:630-646) shows it takes a `Layer` or a function returning a `Layer`:
+```typescript
+<R, E>(
+  create:
+    | Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>
+    | ((get: Context) => Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>)
+): AtomRuntime<R, E>
+```
+
+So `Atom.runtime(fullLayer)` SHOULD work, but requires `AtomRegistry | Reactivity.Reactivity` in the layer's requirements. Our `fullLayer` provides `ClientServiceTag` and `Reactivity`, but doesn't account for `AtomRegistry`.
 
 ---
 
-## Severity Assessment
+### Issue 2.3: Non-Existent `factory.withReactivity` Property Access
 
-| Issue | Severity | Impact |
-|-------|----------|--------|
-| @effect-atom/atom-react listed but not used | **CRITICAL** | Misleading dependency, project requirements violated |
-| Manual state management | **HIGH** | Loses reactive benefits, inconsistent with Effect ecosystem |
-| Stream cancellation broken | **MEDIUM** | Memory leaks, zombie streams possible |
-| Custom reactivity vs atom integration | **MEDIUM** | Missed optimization opportunities |
-| Result used as plain type | **LOW** | Works but not idiomatic |
+**Severity:** CRITICAL
+**Location:** `src/Client/react.ts:188-189`
+
+```typescript
+if (reactivityKeys.length > 0) {
+  atom = ctx.atomRuntime.factory.withReactivity(reactivityKeys)(atom)
+}
+```
+
+**Problem:** `AtomRuntime` has a `factory: RuntimeFactory` property, and `RuntimeFactory` has `withReactivity`. However, we're accessing it on the instance created from `Atom.runtime(fullLayer)`, which returns an `AtomRuntime`, not the factory itself.
+
+**Analysis of @effect-atom source (Atom.ts:661-665):**
+```typescript
+const self = Object.create(RuntimeProto)
+// ...
+self.factory = factory  // The factory reference IS preserved!
+```
+
+So `atomRuntime.factory` should work. But the type `AtomRuntime<R, ER>` interface (lines 535-624) shows `factory: RuntimeFactory` IS present. This should work if types align.
 
 ---
 
-## Recommendations
+### Issue 2.4: Incorrect useMutation Implementation
 
-1. **Either use @effect-atom/atom-react properly OR remove it from peer dependencies**
-2. **Refactor hooks to use Atom-based state management**
-3. **Implement proper stream cancellation using Effect.Fiber**
-4. **Consider using AtomRpc for query/mutation patterns**
+**Severity:** HIGH
+**Location:** `src/Client/react.ts:272-296, 301-335`
+
+**Problems:**
+
+1. **Using `atomRuntime.fn` without proper atom management:**
+```typescript
+const mutationFn = useMemo(() => {
+  return ctx.atomRuntime.fn<Payload>()(
+    (payload, _get) => Effect.gen(function* () { /* ... */ }),
+    { reactivityKeys: invalidatePaths.length > 0 ? invalidatePaths : undefined }
+  )
+}, [ctx.atomRuntime, tag])
+```
+
+The `fn` method returns an `AtomResultFn` (a writable atom), but then the code tries to use it incorrectly:
+
+```typescript
+// WRONG - registry.set expects the atom to exist in the registry
+registry.set(mutationFn, payload)
+
+// WRONG - immediately tries to get result (won't be ready)
+const resultAtom = mutationFn
+const mutationResult = registry.get(resultAtom)
+```
+
+2. **Missing async/effect handling:**
+The mutation doesn't wait for the effect to complete. `registry.set` is synchronous and doesn't return a promise.
+
+3. **Should use `useAtomSet` with `mode: "promise"`:**
+```typescript
+// Correct approach:
+const mutate = useAtomSet(mutationFn, { mode: "promise" })
+```
 
 ---
 
-## Files Reviewed
+### Issue 2.5: Incomplete useStream Implementation
 
-- `src/Client/index.ts` (777 lines)
-- `src/Client/react.ts` (462 lines)
-- `src/Reactivity/index.ts` (305 lines)
-- `src/Result/index.ts` (10 lines)
-- `package.json` (69 lines)
-- `test/client.test.ts` (207 lines)
+**Severity:** HIGH
+**Location:** `src/Client/react.ts:406-436`
+
+```typescript
+// Create stream atom using runtime.pull for streams
+const streamAtom = useMemo(() => {
+  const streamEffect = Effect.gen(function* () {
+    const service = yield* ClientServiceTag
+    return service.sendStream(/* ... */)
+  })
+  
+  return ctx.atomRuntime.atom(Stream.unwrap(streamEffect))
+}, [ctx.atomRuntime, tag, payload])
+
+// Subscribe to stream updates
+useEffect(() => {
+  if (!enabled) return
+  
+  setIsConnected(true)
+  setData([])
+  setError(undefined)
+  
+  // Use the atom to get stream values
+  // This is simplified - proper implementation would use useAtomValue
+  
+  return () => {
+    setIsConnected(false)
+    abortRef.current?.()
+  }
+}, [enabled, streamAtom])
+```
+
+**Problems:**
+1. Comment admits "This is simplified" - the implementation doesn't actually consume stream values
+2. `atomRuntime.atom(Stream.unwrap(...))` wraps a stream but doesn't subscribe to updates
+3. Should use `atomRuntime.pull` for streams that accumulate values
+4. Missing `useAtomValue(streamAtom)` to actually read values
+
+---
+
+### Issue 2.6: Reactivity Integration Issues
+
+**Severity:** MEDIUM
+**Location:** `src/Client/react.ts:32-34, 88`
+
+```typescript
+import * as Reactivity from "@effect/experimental/Reactivity"
+// ...
+const fullLayer = ClientServiceLive.pipe(
+  Layer.provideMerge(Reactivity.layer),
+  Layer.provide(layer)
+)
+```
+
+**Problem:** Uses `@effect/experimental/Reactivity` but `@effect-atom/atom` has its own Reactivity module that's already integrated into `AtomRuntime`. This creates a potential conflict/duplication.
+
+**Evidence from @effect-atom (Atom.ts:655):**
+```typescript
+let globalLayer: Layer.Layer<any, any, AtomRegistry> = Reactivity.layer
+```
+
+The atom library already includes Reactivity in its runtime factory.
+
+---
+
+### Issue 2.7: Provider Not Passing Layer to AtomRuntime Correctly
+
+**Severity:** HIGH
+**Location:** `src/Client/react.ts:83-99`
+
+```typescript
+return function TrpcProvider({ layer, children }: ProviderProps) {
+  const contextValue = useMemo<TrpcContextValue>(() => {
+    const fullLayer = ClientServiceLive.pipe(
+      Layer.provideMerge(Reactivity.layer),
+      Layer.provide(layer)
+    )
+    
+    const atomRuntime = Atom.runtime(fullLayer)
+    // ...
+  }, [layer])
+```
+
+**Problems:**
+1. Creates a new `atomRuntime` on each `layer` change without disposing the old one
+2. Layer composition is backwards - `ClientServiceLive.pipe(Layer.provide(layer))` means ClientServiceLive requires Transport, then layer provides it. This is correct.
+3. But the `atomRuntime` is NOT connected to the `RegistryProvider`!
+
+**The RegistryProvider is used:**
+```typescript
+return React.createElement(
+  RegistryProvider,
+  {},
+  React.createElement(
+    TrpcContext.Provider,
+    { value: contextValue },
+    children
+  )
+)
+```
+
+But atoms created via `atomRuntime.atom()` won't automatically use this registry - they create their own scoped execution!
+
+---
+
+## 3. Comparison with @effect-atom/atom Patterns
+
+### Expected Pattern (from effect-atom README):
+
+```typescript
+import { Atom, useAtomValue, useAtomSet } from "@effect-atom/atom-react"
+
+// Async atom
+const usersAtom = Atom.make(
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient
+    // fetch...
+  })
+)
+
+// In component:
+function UserList() {
+  const result = useAtomValue(usersAtom)
+  // result is Result<Users, Error>
+}
+```
+
+### Our Pattern (INCORRECT):
+
+```typescript
+// Inside hook, dynamically creating atom
+const queryAtom = useMemo(() => {
+  return ctx.atomRuntime.atom(queryEffect)
+}, [ctx.atomRuntime, tag])
+
+// Using custom context instead of RegistryContext
+const ctx = useTrpcContext()
+```
+
+---
+
+## 4. SSR Integration
+
+**Location:** `src/SSR/index.ts`
+
+### Status: MINIMAL/STUB
+
+```typescript
+import { Hydration, Registry } from "@effect-atom/atom-react"
+```
+
+**Issues:**
+1. `Hydration` is imported but barely used
+2. `Hydrate` component doesn't actually hydrate:
+```typescript
+export const Hydrate: React.FC<HydrateProps> = ({ state, children }) => {
+  React.useEffect(() => {
+    if (state) {
+      // Hydration happens automatically via context
+      // The Provider's registry will pick up the state
+    }
+  }, [state])
+  
+  return React.createElement(React.Fragment, null, children)
+}
+```
+3. No actual hydration logic - just passes children through
+
+---
+
+## 5. Type Safety Issues
+
+### Issue 5.1: React Type Declarations
+
+**Location:** `src/Client/index.ts:499-506`
+
+```typescript
+declare namespace React {
+  interface FC<P = {}> {
+    (props: P): React.ReactElement | null
+  }
+  type ReactNode = any
+  type ReactElement = any
+}
+```
+
+**Problem:** Using `any` for React types defeats type safety.
+
+---
+
+## 6. Recommendations
+
+### Priority 1 (Critical - Will Cause Runtime Errors)
+
+1. **Fix AtomRuntime usage** - Review how `Atom.runtime()` should be used with custom layers
+2. **Fix useMutation** - Use `useAtomSet` with `mode: "promise"` pattern
+3. **Connect Provider to Registry** - Ensure atoms use the RegistryContext
+
+### Priority 2 (High - Functional Gaps)
+
+4. **Implement useStream properly** - Use `atomRuntime.pull` for stream accumulation
+5. **Fix reactivity integration** - Don't duplicate Reactivity layer
+6. **Implement SSR hydration** - Use effect-atom's Hydration module properly
+
+### Priority 3 (Medium - Type Safety)
+
+7. **Fix React type declarations** - Import from `@types/react`
+8. **Fix AtomRuntime generic types** - Use service types, not Tag types
+
+---
+
+## 7. Evidence Summary
+
+| File | Line | Issue | Severity |
+|------|------|-------|----------|
+| react.ts | 53 | Wrong AtomRuntime type params | CRITICAL |
+| react.ts | 93 | Questionable Atom.runtime() usage | CRITICAL |
+| react.ts | 188-189 | factory.withReactivity access | CRITICAL |
+| react.ts | 272-335 | useMutation doesn't work | HIGH |
+| react.ts | 406-436 | useStream incomplete | HIGH |
+| react.ts | 88 | Duplicate Reactivity layer | MEDIUM |
+| react.ts | 101-109 | Provider/Registry disconnect | HIGH |
+| SSR/index.ts | 171-181 | Hydrate is a stub | MEDIUM |
+| index.ts | 499-506 | any types for React | LOW |
+
+---
+
+## 8. Conclusion
+
+The React integration has the right structure and imports `@effect-atom/atom-react` correctly, but the implementation has fundamental issues that will cause runtime failures. The hooks don't follow effect-atom's patterns, and there's a disconnect between the custom context (TrpcContext) and the atom registry (RegistryContext).
+
+**Estimated effort to fix:** 2-3 days of focused refactoring, assuming familiarity with effect-atom patterns.

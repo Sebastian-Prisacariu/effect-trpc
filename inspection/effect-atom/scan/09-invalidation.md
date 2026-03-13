@@ -1,420 +1,399 @@
-# H9: Invalidation Patterns in Effect Atom
+# H9: Invalidation Mechanism - withReactivity
 
-## Summary
+## Overview
 
-Effect Atom has **built-in invalidation** at two levels:
-1. **Node-level invalidation** - Internal graph mechanism for derived atoms
-2. **Reactivity service** - External key-based invalidation using `@effect/experimental/Reactivity`
+Effect Atom's `withReactivity` mechanism bridges the reactive atom system with Effect's `@effect/experimental/Reactivity` service. This enables atoms to automatically re-execute when external "reactivity keys" are invalidated (e.g., after a mutation modifies server data).
 
-This is significantly more sophisticated than manual invalidation patterns.
+## Architecture
 
----
-
-## 1. Node-Level Invalidation (Internal Graph)
-
-### Core Mechanism
-
-Located in `packages/atom/src/internal/registry.ts`:
-
-```typescript
-// Node states
-const enum NodeState {
-  uninitialized = NodeFlags.alive | NodeFlags.waitingForValue,
-  stale = NodeFlags.alive | NodeFlags.initialized | NodeFlags.waitingForValue,  // <-- STALE STATE
-  valid = NodeFlags.alive | NodeFlags.initialized,
-  removed = 0
-}
-
-// Invalidation propagates through the dependency graph
-invalidate(): void {
-  if (this.state === NodeState.valid) {
-    this.state = NodeState.stale   // Mark as stale
-    this.disposeLifetime()         // Clean up subscriptions
-  }
-
-  // Either queue for batch processing or immediately rebuild
-  if (batchState.phase === BatchPhase.collect) {
-    batchState.stale.push(this)
-  } else if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
-    this.invalidateChildren()      // Lazy: just propagate down
-    this.skipInvalidation = true
-  } else {
-    this.value()                   // Eager: recompute immediately
-  }
-}
-
-invalidateChildren(): void {
-  const children = this.children
-  this.children = []
-  for (let i = 0; i < children.length; i++) {
-    children[i].invalidate()       // Recursive invalidation
-  }
-}
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       @effect/experimental/Reactivity                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  handlers: Map<hash | string, Set<() => void>>                        │  │
+│  │                                                                        │  │
+│  │  unsafeRegister(keys, handler) → Adds handler to key sets             │  │
+│  │  unsafeInvalidate(keys)        → Calls all handlers for those keys    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │ unsafeRegister / invalidate
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          withReactivity(keys)(atom)                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  transform(atom, (get) => {                                            │  │
+│  │    reactivity = get(reactivityAtom)    // Get Reactivity service       │  │
+│  │    get.addFinalizer(                                                   │  │
+│  │      reactivity.unsafeRegister(keys, () => get.refresh(atom))          │  │
+│  │    )                                                                   │  │
+│  │    get.subscribe(atom, value => get.setSelf(value))                    │  │
+│  │    return get.once(atom)                                               │  │
+│  │  })                                                                    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │ refresh triggers invalidation
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Registry Invalidation Flow                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  Registry.refresh(atom)                                                │  │
+│  │    → atom.refresh ? atom.refresh(refresh) : invalidateAtom(atom)       │  │
+│  │    → node.invalidate()                                                 │  │
+│  │    → node.state = NodeState.stale                                      │  │
+│  │    → disposeLifetime() + invalidateChildren()                          │  │
+│  │    → Re-evaluate node.value() (triggers new Effect execution)          │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Insight: Parent-Child Tracking
+## Source Code Analysis
 
-Atoms track their dependencies (parents) and dependents (children):
+### 1. Reactivity Service (`@effect/experimental/Reactivity`)
+
+**Location:** `/packages/experimental/src/Reactivity.ts`
 
 ```typescript
-class Node<A> {
-  parents: Array<Node<any>> = []     // Atoms I depend on
-  children: Array<Node<any>> = []    // Atoms that depend on me
-  
-  // When I read another atom, establish parent-child relationship
-  addParent(parent: Node<any>): void {
-    this.parents.push(parent)
-    if (parent.children.indexOf(this) === -1) {
-      parent.children.push(this)
+export const make = Effect.sync(() => {
+  const handlers = new Map<number | string, Set<() => void>>()
+
+  // Invalidation: call all registered handlers for given keys
+  const unsafeInvalidate = (
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
+  ): void => {
+    if (Array.isArray(keys)) {
+      for (let i = 0; i < keys.length; i++) {
+        const set = handlers.get(stringOrHash(keys[i]))
+        if (set === undefined) continue
+        for (const run of set) run()  // Trigger all handlers
+      }
+    } else {
+      // Record format: { tableName: [id1, id2, ...] }
+      const record = keys as ReadonlyRecord<string, Array<unknown>>
+      for (const key in record) {
+        // Individual ID invalidation: "tableName:idHash"
+        const hashes = idHashes(key, record[key])
+        for (let i = 0; i < hashes.length; i++) {
+          const set = handlers.get(hashes[i])
+          if (set === undefined) continue
+          for (const run of set) run()
+        }
+        // Table-level invalidation: "tableName"
+        const set = handlers.get(key)
+        if (set !== undefined) {
+          for (const run of set) run()
+        }
+      }
     }
   }
-}
+
+  // Registration: add handler to be called on invalidation
+  const unsafeRegister = (
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    handler: () => void
+  ): () => void => {
+    const resolvedKeys = Array.isArray(keys) 
+      ? keys.map(stringOrHash) 
+      : recordHashes(keys)
+    
+    for (const key of resolvedKeys) {
+      let set = handlers.get(key)
+      if (set === undefined) {
+        set = new Set()
+        handlers.set(key, set)
+      }
+      set.add(handler)
+    }
+    
+    // Return cleanup function
+    return () => {
+      for (const key of resolvedKeys) {
+        const set = handlers.get(key)!
+        set.delete(handler)
+        if (set.size === 0) handlers.delete(key)
+      }
+    }
+  }
+
+  // Mutation: run effect then invalidate keys
+  const mutation = <A, E, R>(
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    effect: Effect.Effect<A, E, R>
+  ): Effect.Effect<A, E, R> => Effect.zipLeft(effect, invalidate(keys))
+
+  return Reactivity.of({ mutation, query, stream, unsafeInvalidate, invalidate, unsafeRegister })
+})
 ```
 
-### Lazy vs Eager Invalidation
+**Key insight:** Reactivity uses a simple pub-sub pattern with hashed keys. Keys can be:
+- Simple array: `["users", "posts"]`
+- Record with IDs: `{ users: [userId1, userId2], posts: [postId] }`
+
+### 2. withReactivity Implementation
+
+**Location:** `Atom.ts:689-705`
 
 ```typescript
-// Lazy atoms: defer recomputation until read
-if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
-  this.invalidateChildren()
-  this.skipInvalidation = true
-}
-// Eager atoms: recompute immediately on invalidation
-else {
-  this.value()  // Recompute now
-}
+const reactivityAtom = removeTtl(make(
+  Effect.scopeWith((scope) => 
+    Layer.buildWithMemoMap(Reactivity.layer, options.memoMap, scope)
+  ).pipe(
+    Effect.map(EffectContext.get(Reactivity.Reactivity))
+  )
+))
+
+factory.withReactivity =
+  (keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>) =>
+  <A extends Atom<any>>(atom: A): A =>
+    transform(atom, (get) => {
+      // 1. Get the Reactivity service
+      const reactivity = Result.getOrThrow(get(reactivityAtom))
+      
+      // 2. Register refresh handler with cleanup via finalizer
+      get.addFinalizer(reactivity.unsafeRegister(keys, () => {
+        get.refresh(atom)  // When keys invalidated, refresh the atom
+      }))
+      
+      // 3. Forward atom values to transformed atom
+      get.subscribe(atom, (value) => get.setSelf(value))
+      
+      // 4. Return initial value
+      return get.once(atom)
+    }) as any as A
 ```
 
----
+**Mechanism:**
+1. Creates wrapper atom via `transform()`
+2. On mount, registers with Reactivity service for given keys
+3. When any key is invalidated, calls `get.refresh(atom)` 
+4. Cleanup happens automatically via `addFinalizer`
 
-## 2. Registry-Level Refresh
+### 3. Registry Invalidation
 
-The registry provides explicit refresh APIs:
+**Location:** `internal/registry.ts:97-103, 392-406`
 
 ```typescript
-// Registry.ts interface
-readonly refresh: <A>(atom: Atom.Atom<A>) => void
-
-// Implementation
+// Registry.refresh entry point
 refresh = <A>(atom: Atom.Atom<A>): void => {
   if (atom.refresh !== undefined) {
-    atom.refresh(this.refresh)      // Custom refresh logic
+    atom.refresh(this.refresh)  // Custom refresh handler
   } else {
-    this.invalidateAtom(atom)       // Default: invalidate the node
+    this.invalidateAtom(atom)   // Default: invalidate node
   }
 }
 
 invalidateAtom = <A>(atom: Atom.Atom<A>): void => {
   this.ensureNode(atom).invalidate()
 }
-```
 
-### Usage: Effect.Effect API
-
-```typescript
-// Atom.ts - Effect API for refresh
-export const refresh = <A>(self: Atom<A>): Effect.Effect<void, never, AtomRegistry> =>
-  Effect.map(AtomRegistry, (_) => _.refresh(self))
-```
-
----
-
-## 3. Reactivity Keys System (External Invalidation)
-
-### The `@effect/experimental/Reactivity` Service
-
-Effect Atom integrates with a dedicated Reactivity service for **key-based invalidation**:
-
-```typescript
-// AtomRpc.ts - Mutation triggers invalidation
-Effect.fnUntraced(function*({ headers, payload, reactivityKeys }) {
-  const client = yield* self
-  const effect = client(tag, payload, { headers } as any)
-  return yield* reactivityKeys
-    ? Reactivity.mutation(effect, reactivityKeys)  // Invalidates keys after mutation
-    : effect
-})
-```
-
-### Query Subscription to Reactivity Keys
-
-```typescript
-// Queries can subscribe to reactivity keys
-queryFamily(
-  new QueryKey({
-    tag,
-    payload: Data.struct(payload),
-    reactivityKeys: options?.reactivityKeys
-      ? wrapReactivityKeys(options.reactivityKeys)
-      : undefined,
-  })
-)
-
-// Factory wraps atoms with reactivity subscription
-return reactivityKeys
-  ? self.runtime.factory.withReactivity(reactivityKeys)(atom)
-  : atom
-```
-
-### `withReactivity` Implementation
-
-```typescript
-// Atom.ts
-factory.withReactivity =
-  (keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>) =>
-  <A extends Atom<any>>(atom: A): A =>
-    transform(atom, (get) => {
-      const reactivity = Result.getOrThrow(get(reactivityAtom))
-      
-      // Register for invalidation when keys change
-      get.addFinalizer(reactivity.unsafeRegister(keys, () => {
-        get.refresh(atom)  // <-- This is the callback!
-      }))
-      
-      get.subscribe(atom, (value) => get.setSelf(value))
-      return get.once(atom)
-    }) as any as A
-```
-
-### How Reactivity Works
-
-1. **Mutation**: `Reactivity.mutation(effect, keys)` - runs effect, then invalidates keys
-2. **Invalidation**: `Reactivity.invalidate(keys)` - directly invalidates keys (for streams)
-3. **Subscription**: `withReactivity(keys)` - atom refreshes when those keys are invalidated
-
-### Key Wrapping for Structural Equality
-
-```typescript
-// internal/data.ts
-export const wrapReactivityKeys = (
-  keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
-) => {
-  if (Array.isArray(keys)) {
-    return Data.array(keys)  // Structural equality for array keys
+// Node invalidation
+invalidate(): void {
+  if (this.state === NodeState.valid) {
+    this.state = NodeState.stale
+    this.disposeLifetime()  // Cleanup existing effects/subscriptions
   }
-  const obj: Record<string, ReadonlyArray<unknown>> = Object.create(Data.Structural.prototype)
-  for (const key in keys) {
-    obj[key] = Data.array(val)
+
+  if (batchState.phase === BatchPhase.collect) {
+    batchState.stale.push(this)  // Defer in batch
+  } else if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
+    // Lazy: just mark stale, don't re-compute
+    this.invalidateChildren()
+    this.skipInvalidation = true
+  } else {
+    // Eager: immediately re-compute
+    this.value()
   }
-  return obj
+}
+
+invalidateChildren(): void {
+  if (this.children.length === 0) return
+  
+  const children = this.children
+  this.children = []
+  for (let i = 0; i < children.length; i++) {
+    children[i].invalidate()
+  }
 }
 ```
 
----
-
-## 4. Signal-Based Refresh
-
-Effect Atom provides signal-based refresh patterns:
-
+**Node States:**
 ```typescript
-// Custom signal-based refresh
-export const makeRefreshOnSignal = <_>(signal: Atom<_>) => 
-  <A extends Atom<any>>(self: A): WithoutSerializable<A> =>
-    transform(self, (get) => {
-      get.once(signal)
-      get.subscribe(signal, (_) => get.refresh(self))  // Refresh on signal change
-      get.subscribe(self, (value) => get.setSelf(value))
-      return get.once(self)
-    }) as any
-
-// Built-in: refresh on window focus
-export const refreshOnWindowFocus = makeRefreshOnSignal(windowFocusSignal)
+const enum NodeState {
+  uninitialized = NodeFlags.alive | NodeFlags.waitingForValue,
+  stale = NodeFlags.alive | NodeFlags.initialized | NodeFlags.waitingForValue,
+  valid = NodeFlags.alive | NodeFlags.initialized,
+  removed = 0
+}
 ```
 
----
+### 4. Usage in AtomRpc
 
-## 5. Batching System
-
-Invalidations are batched to prevent cascade recomputation:
+**Location:** `AtomRpc.ts:150-181`
 
 ```typescript
-// batchState tracks stale nodes during batch
-export const batchState = globalValue("@effect-atom/atom/Registry/batchState", () => ({
-  phase: BatchPhase.disabled,
-  depth: 0,
-  stale: [] as Array<Node<any>>,  // Nodes to rebuild
-  notify: new Set<Node<any>>()    // Nodes to notify listeners
-}))
+// Mutations: trigger invalidation after effect completes
+const mutationFamily = Atom.family(({ ... }) =>
+  self.runtime.fn(
+    Effect.fn("mutation", function*(headers, payload, reactivityKeys) {
+      const client = yield* self
+      const effect = client(tag, payload, { headers } as any)
+      return yield* reactivityKeys
+        ? Reactivity.mutation(effect, reactivityKeys)  // Invalidate after mutation
+        : effect
+    })
+  )
+)
 
+// Queries: wrap with withReactivity to auto-refresh
+const queryFamily = Atom.family(({ ... }) => {
+  let atom = RpcSchema.isStreamSchema(rpc.successSchema)
+    ? self.runtime.pull(...)
+    : self.runtime.atom(...)
+  
+  return reactivityKeys
+    ? self.runtime.factory.withReactivity(reactivityKeys)(atom)
+    : atom
+})
+```
+
+## Invalidation Flow Example
+
+```
+Time →
+───────────────────────────────────────────────────────────────────────────────
+
+1. Create query atom with reactivity keys
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ const usersAtom = withReactivity(["users"])(                            │
+   │   runtime.atom(Effect.flatMap(client, c => c.getUsers()))               │
+   │ )                                                                       │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+2. Atom mounted → registers with Reactivity
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ reactivity.unsafeRegister(["users"], () => get.refresh(usersAtom))     │
+   │                                                                         │
+   │ Reactivity.handlers = Map {                                             │
+   │   "users" → Set { refreshHandler }                                      │
+   │ }                                                                       │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+3. User calls mutation
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ const createUser = client.mutation("createUser", {                      │
+   │   payload: { name: "Alice" },                                           │
+   │   reactivityKeys: ["users"]                                             │
+   │ })                                                                      │
+   │                                                                         │
+   │ // Internally: Reactivity.mutation(effect, ["users"])                   │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+4. Mutation completes → Reactivity.invalidate(["users"])
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ unsafeInvalidate(["users"])                                             │
+   │   → handlers.get("users")   // Set { refreshHandler }                   │
+   │   → refreshHandler()        // Calls get.refresh(usersAtom)             │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+5. Atom refresh → Registry invalidation
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ registry.refresh(usersAtom)                                             │
+   │   → node.invalidate()                                                   │
+   │   → node.state = stale                                                  │
+   │   → disposeLifetime() // Cancel previous effect, cleanup finalizers     │
+   │   → node.value()      // Re-run atom read function                      │
+   │   → Effect re-executes (fresh data from server)                         │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+6. Subscribers notified
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ node.setValue(newResult)                                                │
+   │   → node.listeners.forEach(listener => listener())                      │
+   │   → React components re-render with fresh data                          │
+   └─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Key Design Decisions
+
+### 1. Centralized Reactivity Service
+
+All reactivity is managed through a single `Reactivity` service instance per runtime. This ensures:
+- Consistent invalidation across all atoms
+- Single source of truth for key→handler mappings
+- Proper cleanup via finalizers
+
+### 2. Transform-Based Wrapping
+
+`withReactivity` uses `transform()` rather than modifying the atom directly:
+- Original atom logic unchanged
+- Wrapper handles subscription/forwarding
+- Clean separation of concerns
+
+### 3. Lazy vs Eager Invalidation
+
+```typescript
+if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
+  this.invalidateChildren()
+  this.skipInvalidation = true  // Don't recompute until needed
+} else {
+  this.value()  // Recompute immediately
+}
+```
+
+- **Lazy atoms without listeners:** Just mark stale, defer computation
+- **Active atoms:** Immediately recompute for fresh data
+
+### 4. Batched Invalidation
+
+Multiple invalidations in a batch are collected, then processed together:
+```typescript
 export function batch(f: () => void): void {
   batchState.phase = BatchPhase.collect
-  batchState.depth++
   try {
     f()
-    if (batchState.depth === 1) {
-      // Rebuild all stale nodes
-      for (let i = 0; i < batchState.stale.length; i++) {
-        batchRebuildNode(batchState.stale[i])
-      }
-      // Then notify all listeners
-      batchState.phase = BatchPhase.commit
-      for (const node of batchState.notify) {
-        node.notify()
-      }
+    // Process all stale nodes
+    for (const node of batchState.stale) {
+      batchRebuildNode(node)
+    }
+    // Notify all listeners
+    batchState.phase = BatchPhase.commit
+    for (const node of batchState.notify) {
+      node.notify()
     }
   } finally {
-    batchState.depth--
-    if (batchState.depth === 0) {
-      batchState.phase = BatchPhase.disabled
-      batchState.stale = []
-    }
+    batchState.phase = BatchPhase.disabled
   }
 }
 ```
 
----
+## Relevance to effect-trpc
 
-## 6. Context Methods for Invalidation
+For effect-trpc's invalidation mechanism:
 
-Within atom read functions, the context provides:
+1. **Consider Effect's Reactivity Service**
+   - Already provides the pub-sub mechanism
+   - Handles key hashing and cleanup
+   - Used by Effect Atom in production
 
-```typescript
-interface Context {
-  // Refresh another atom (triggers its refresh logic)
-  refresh<A>(atom: Atom<A>): void
-  
-  // Refresh self (invalidate this atom)
-  refreshSelf(): void
-}
+2. **Key Format Options**
+   - Simple: `["users", "posts"]`
+   - Structured: `{ users: [id1, id2] }` for granular invalidation
 
-// Implementation
-refresh<A>(this: Lifetime<any>, atom: Atom<A>): void {
-  this.node.registry.refresh(atom)
-}
+3. **Integration Points**
+   - Mutations should call `Reactivity.invalidate(keys)` on success
+   - Queries should register via `unsafeRegister(keys, refreshFn)`
 
-refreshSelf(this: Lifetime<any>): void {
-  this.node.invalidate()
-}
-```
+4. **Cleanup is Critical**
+   - `unsafeRegister` returns cleanup function
+   - Must be called when query unmounts
+   - Effect Atom uses `addFinalizer` pattern
 
-### Custom Refresh Functions
-
-Atoms can define custom refresh behavior:
-
-```typescript
-export const readable = <A>(
-  read: (get: Context) => A,
-  refresh?: (f: <A>(atom: Atom<A>) => void) => void  // Custom refresh
-): Atom<A>
-
-// Example: derived atom refreshes its source
-export const writable = <R, W>(
-  read: (get: Context) => R,
-  write: (ctx: WriteContext<R>, value: W) => void,
-  refresh?: (f: <A>(atom: Atom<A>) => void) => void
-): Writable<R, W>
-
-// Usage
-const derived = Atom.writable(
-  (get) => get(base),
-  () => {},
-  (refresh) => refresh(base)  // When derived is refreshed, refresh base instead
-)
-```
-
----
-
-## 7. Test Evidence
-
-From `Atom.test.ts`:
-
-```typescript
-describe("Reactivity", () => {
-  it("rebuilds on mutation", async () => {
-    const r = Registry.make()
-    let rebuilds = 0
-    
-    // Atom subscribes to "counter" reactivity key
-    const atom = Atom.make(() => rebuilds++).pipe(
-      Atom.withReactivity(["counter"]),
-      Atom.keepAlive
-    )
-    
-    // Mutation invalidates "counter" key
-    const fn = counterRuntime.fn(
-      Effect.fn(function*() {}),
-      { reactivityKeys: ["counter"] }
-    )
-    
-    assert.strictEqual(r.get(atom), 0)
-    r.set(fn, void 0)               // Mutation runs
-    assert.strictEqual(r.get(atom), 1)  // Atom was rebuilt!
-    r.set(fn, void 0)
-    r.set(fn, void 0)
-    assert.strictEqual(r.get(atom), 3)  // Each mutation triggers rebuild
-  })
-})
-
-// Signal-based refresh
-test(`refreshOnSignal`, async () => {
-  const signal = Atom.make(0)
-  const refreshOnSignal = Atom.makeRefreshOnSignal(signal)
-  const atom = Atom.make(() => rebuilds++).pipe(refreshOnSignal)
-  
-  r.mount(atom)
-  assert.strictEqual(rebuilds, 1)
-  
-  r.set(signal, 1)              // Update signal
-  assert.strictEqual(rebuilds, 2)  // Atom was rebuilt!
-})
-```
-
----
-
-## Comparison: Effect Atom vs TanStack Query
-
-| Feature | Effect Atom | TanStack Query |
-|---------|-------------|----------------|
-| **Automatic dependency tracking** | Yes (graph-based) | No (manual keys) |
-| **Reactive keys** | Yes (`withReactivity`) | Yes (`queryKey`) |
-| **Mutation invalidation** | `Reactivity.mutation` | `invalidateQueries` |
-| **Stale state** | `NodeState.stale` | `isStale` flag |
-| **Batching** | Built-in `batch()` | None built-in |
-| **Lazy recomputation** | Yes (lazy atoms) | No |
-| **Signal-based refresh** | `makeRefreshOnSignal` | Manual |
-| **Custom refresh logic** | `refresh` param | None |
-
----
-
-## Implications for tRPC-Effect
-
-### 1. We Should Use `Reactivity` Service
-The `@effect/experimental/Reactivity` service is the idiomatic way to handle invalidation:
-- Mutations trigger `Reactivity.mutation(effect, keys)`
-- Queries subscribe via `withReactivity(keys)`
-
-### 2. Key Patterns
-Reactivity keys can be:
-- Simple arrays: `["users"]`
-- Structured: `{ users: [userId] }` for granular invalidation
-
-### 3. No Custom Invalidation Needed
-Effect Atom already has:
-- Graph-based automatic invalidation
-- Key-based external invalidation
-- Batching for performance
-- Lazy/eager modes
-
-### 4. Integration Pattern
-```typescript
-// Query atom with reactivity
-const usersAtom = trpc.users.list({
-  reactivityKeys: ["users"]  // Subscribes to "users" key
-})
-
-// Mutation triggers invalidation
-const createUser = trpc.users.create({
-  reactivityKeys: ["users"]  // Invalidates "users" after success
-})
-```
-
----
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `internal/registry.ts` | Node-level invalidation, batching |
-| `Atom.ts` | `withReactivity`, `refresh`, signals |
-| `AtomRpc.ts` | `Reactivity.mutation` integration |
-| `internal/data.ts` | Key wrapping for structural equality |
+5. **Batching for Performance**
+   - Multiple invalidations should be batched
+   - Prevents cascade of re-renders

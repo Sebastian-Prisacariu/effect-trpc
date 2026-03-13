@@ -1,89 +1,89 @@
 # Hypotheses for External Codebase Analysis
 
-Based on our internal analysis findings, we have specific questions about what we can learn from external codebases.
+Based on internal analysis findings, we need answers from external codebases.
 
 ---
 
-## Effect RPC (`/inspection/external-repos/effect/packages/rpc`)
+## Effect RPC
 
-### H1: Schema encoding patterns
-Our Server uses `orElseSucceed` fallbacks for encoding failures. How does Effect RPC handle encoding errors properly?
+### H1: Schema encoding error handling
+Our encoding failures silently return raw values. How does Effect RPC handle encoding errors?
 
-### H2: Streaming with middleware  
-Our streams bypass middleware (CRITICAL security issue). Does Effect RPC apply middleware to streams?
+### H2: Streaming middleware pattern
+We now run middleware for streams. Does Effect RPC do the same? What patterns can we learn?
 
 ### H3: Request batching
-Our batching config is ignored. Does Effect RPC implement batching? How?
+We removed batching config (planned). Does Effect RPC have batching?
 
-### H4: Error handling pipeline
-We have silent fallbacks. What's Effect RPC's error handling architecture?
+### H4: Error response format
+We use Success/Failure envelopes. What does Effect RPC use?
 
 ### H5: Transport protocols
-We only have HTTP. What transports does Effect RPC support (WebSocket, SSE)?
+We only have HTTP (SSE stubbed). What transports does Effect RPC support?
 
 ---
 
-## Effect Atom (`/inspection/external-repos/effect-atom/packages/atom`)
+## Effect Atom
 
-### H6: Cache storage
-Our Reactivity has invalidation without a cache. How does Effect Atom store reactive state?
+### H6: Cache architecture
+We delegate to effect-atom. How does it actually store cached values?
 
 ### H7: Subscription management
-We use manual useState. How does Effect Atom handle subscriptions?
+We use useAtomValue. How does effect-atom manage subscriptions internally?
 
-### H8: Effect services pattern
-We created our own Reactivity service. Does Effect Atom use Context.Tag properly?
+### H8: Service patterns
+Our React integration has type errors with AtomRuntime. What's the correct pattern?
 
-### H9: Invalidation patterns
-We have custom invalidation. Does Effect Atom have built-in invalidation?
+### H9: Invalidation mechanism
+We use withReactivity. How does the invalidation flow work internally?
 
 ### H10: Async state handling
-Our hooks manage loading/error manually. How does Effect Atom handle async?
+We have type issues with Result. How does effect-atom handle async state correctly?
 
 ---
 
-## Effect Atom React (`/inspection/external-repos/effect-atom/packages/atom-react`)
+## Effect Atom React
 
-### H11: useAtom/useAtomValue implementation
-We use vanilla React. How does atom-react implement real reactive hooks?
+### H11: Hook implementation
+Our hooks have type errors. How does atom-react implement hooks correctly?
 
 ### H12: Provider pattern
-We have a Provider but it's not using atoms. How does atom-react provide context?
+Our Provider doesn't connect properly. What's the correct Provider pattern?
 
 ### H13: Suspense integration
-We don't have Suspense. Does atom-react support React Suspense?
+We don't have working Suspense. How does atom-react implement it?
 
-### H14: Effect in React lifecycle
-We run Effects with runPromise. How does atom-react manage Effect execution?
+### H14: Effect execution in React
+We have try/catch violations. How does atom-react execute Effects?
 
 ### H15: SSR support
-We have no SSR. Does atom-react support server-side rendering?
+Our SSR is stubs. Does atom-react have real SSR patterns?
 
 ---
 
-## Vanilla tRPC (`/inspection/external-repos/trpc/packages/`)
+## tRPC
 
 ### H16: React Query integration
-We built custom hooks. How does tRPC integrate with React Query?
+How does tRPC integrate with React Query? We might use similar patterns.
 
 ### H17: Batching implementation
-Our batching doesn't work. How does tRPC actually implement batching?
+We want to implement batching. How does tRPC do it?
 
-### H18: Subscriptions
-Our streams don't work with middleware. How does tRPC handle subscriptions?
+### H18: Subscription handling
+Our useStream is broken. How does tRPC handle subscriptions?
 
 ### H19: Middleware context
-We're missing procedure type/path in middleware. What context does tRPC middleware have?
+We're missing some middleware context values. What does tRPC provide?
 
-### H20: Link architecture
-We have a single Transport. Should we adopt tRPC's composable links pattern?
+### H20: Links architecture
+We have single Transport. Should we adopt links pattern?
 
 ---
 
 ## Agent Assignments
 
-| Agent | Repo | Hypothesis | Focus Area |
-|-------|------|------------|------------|
+| Agents | Repo | Hypotheses | Focus |
+|--------|------|------------|-------|
 | 1-5 | effect/rpc | H1-H5 | RPC patterns |
 | 6-10 | effect-atom/atom | H6-H10 | State management |
 | 11-15 | effect-atom/atom-react | H11-H15 | React integration |
