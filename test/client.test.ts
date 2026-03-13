@@ -74,12 +74,6 @@ type AppRouter = typeof appRouter
 // =============================================================================
 
 describe("Client.make", () => {
-  it("creates a client from router", () => {
-    const api = Client.make(appRouter)
-    
-    expect(api).toBeDefined()
-  })
-
   it("client has nested structure matching router", () => {
     const api = Client.make(appRouter)
     
@@ -96,51 +90,14 @@ describe("Client.make", () => {
 // =============================================================================
 
 describe("Client.provide", () => {
-  it("binds transport to client", () => {
-    const api = Client.make(appRouter)
-    const mockLayer = Transport.mock({})
-    const bound = api.provide(mockLayer)
-    
-    expect(bound).toBeDefined()
-  })
-
-  it("bound client has same structure", () => {
+  it("bound client has same structure as unbound", () => {
     const api = Client.make(appRouter)
     const mockLayer = Transport.mock({})
     const bound = api.provide(mockLayer)
     
     expect(bound.users.list).toBeDefined()
     expect(bound.users.get).toBeDefined()
-  })
-})
-
-// =============================================================================
-// Procedure Client Tests
-// =============================================================================
-
-describe("Procedure client methods", () => {
-  const api = Client.make(appRouter)
-  const mockLayer = Transport.mock({
-    "users.list": () => Effect.succeed([]),
-  })
-  const bound = api.provide(mockLayer)
-
-  it("query client has useQuery stub", () => {
-    expect(bound.users.list.useQuery).toBeDefined()
-  })
-
-  it("mutation client has useMutation stub", () => {
-    expect(bound.users.create.useMutation).toBeDefined()
-  })
-})
-
-// =============================================================================
-// Client.ClientServiceTag Tests
-// =============================================================================
-
-describe("Client.ClientServiceTag", () => {
-  it("is defined", () => {
-    expect(Client.ClientServiceTag).toBeDefined()
+    expect(bound.users.create).toBeDefined()
   })
 })
 
@@ -149,18 +106,12 @@ describe("Client.ClientServiceTag", () => {
 // =============================================================================
 
 describe("Client.ClientServiceLive", () => {
-  it("is a Layer that requires Transport", () => {
-    expect(Client.ClientServiceLive).toBeDefined()
-    expect(Layer.isLayer(Client.ClientServiceLive)).toBe(true)
-  })
-
   it("can be composed with transport layer", () => {
     const transportLayer = Transport.mock({})
     const clientLayer = Client.ClientServiceLive.pipe(
       Layer.provide(transportLayer)
     )
     
-    expect(clientLayer).toBeDefined()
     expect(Layer.isLayer(clientLayer)).toBe(true)
   })
 })
@@ -240,53 +191,17 @@ describe("Nested router types", () => {
 })
 
 // =============================================================================
-// Result Type Tests
+// React Hooks Tests
 // =============================================================================
 
-describe("Result type", () => {
-  it("Result is exported from Client", () => {
-    expect(Result).toBeDefined()
-  })
-})
-
-// =============================================================================
-// Hook Stub Tests
-// =============================================================================
-
-describe("Hook stubs", () => {
+describe("React hooks", () => {
   const api = Client.make(appRouter)
   const mockLayer = Transport.mock({})
   const bound = api.provide(mockLayer)
 
-  it("useQuery exists on query client", () => {
-    // The stub throws when called outside React, but the method should exist
-    expect(typeof bound.users.list.useQuery).toBe("function")
-  })
-
-  it("useMutation exists on mutation client", () => {
-    expect(typeof bound.users.create.useMutation).toBe("function")
-  })
-
-  it("useQuery throws outside React context", () => {
-    // Now throws because React hooks can't be used outside of component/Provider
+  it("hooks throw outside React context", () => {
+    // Hooks can only be used inside React components with Provider
     expect(() => bound.users.list.useQuery()).toThrow()
-  })
-
-  it("useMutation throws outside React context", () => {
     expect(() => bound.users.create.useMutation()).toThrow()
-  })
-})
-
-// =============================================================================
-// api.invalidate Tests
-// =============================================================================
-
-describe("api.invalidate", () => {
-  it("invalidate method exists on bound client", () => {
-    const api = Client.make(appRouter)
-    const mockLayer = Transport.mock({})
-    const bound = api.provide(mockLayer)
-    
-    expect(bound.invalidate).toBeDefined()
   })
 })

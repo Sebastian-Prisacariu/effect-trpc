@@ -208,6 +208,61 @@ describe("Server.middleware", () => {
 })
 
 // =============================================================================
+// Middleware Execution Order Tests
+// =============================================================================
+
+describe("Middleware execution order", () => {
+  class Service1 extends Context.Tag("Service1")<Service1, string>() {}
+  class Service2 extends Context.Tag("Service2")<Service2, string>() {}
+  
+  const Middleware1 = Middleware.Tag<string, never>("Middleware1", Service1)
+  const Middleware2 = Middleware.Tag<string, never>("Middleware2", Service2)
+
+  it("server middleware is added to server.middlewares", () => {
+    const router = Router.make("@test", {
+      action: Procedure.query({ success: Schema.String }),
+    })
+    
+    const handlers = {
+      action: () => Effect.succeed("result"),
+    }
+    
+    const server = Server.make(router, handlers).pipe(
+      Server.middleware(Middleware1),
+      Server.middleware(Middleware2)
+    )
+    
+    // Server has both middlewares in order
+    expect(server.middlewares).toContain(Middleware1)
+    expect(server.middlewares).toContain(Middleware2)
+    expect(server.middlewares).toHaveLength(2)
+    // First added should be first in array
+    expect(server.middlewares[0]).toBe(Middleware1)
+    expect(server.middlewares[1]).toBe(Middleware2)
+  })
+
+  it("procedure middleware is added to procedure.middlewares", () => {
+    const proc = Procedure.query({ success: Schema.String })
+      .middleware(Middleware1)
+      .middleware(Middleware2)
+    
+    expect(proc.middlewares).toHaveLength(2)
+    expect(proc.middlewares[0]).toBe(Middleware1)
+    expect(proc.middlewares[1]).toBe(Middleware2)
+  })
+
+  it("group middleware is stored in DefinitionWithMiddleware", () => {
+    const wrapped = Router.withMiddleware([Middleware1, Middleware2], {
+      action: Procedure.query({ success: Schema.String }),
+    })
+    
+    expect(wrapped.middlewares).toHaveLength(2)
+    expect(wrapped.middlewares[0]).toBe(Middleware1)
+    expect(wrapped.middlewares[1]).toBe(Middleware2)
+  })
+})
+
+// =============================================================================
 // Guard Function Tests
 // =============================================================================
 

@@ -115,6 +115,16 @@ export const watchUsers = Procedure.stream({
   success: User,
 })
 
+export class StreamError extends Schema.TaggedError<StreamError>("StreamError")(
+  "StreamError",
+  { message: Schema.String }
+) {}
+
+export const failingStream = Procedure.stream({
+  success: Schema.Number,
+  error: StreamError,
+})
+
 export const health = Procedure.query({
   success: Schema.String,
 })
@@ -140,6 +150,7 @@ export const testRouter = Router.make("@test", {
     me: getMe,  // Protected by AuthMiddleware
   },
   health,
+  failingStream,
 })
 
 export type TestRouter = typeof testRouter
@@ -246,6 +257,13 @@ export const testHandlers: Server.Handlers<Router.DefinitionOf<TestRouter>, Test
   },
   
   health: () => Effect.succeed("OK"),
+  
+  failingStream: () => Stream.make(
+    // Emit 2 values then fail
+    Effect.succeed(1),
+    Effect.succeed(2),
+    Effect.fail(new StreamError({ message: "Stream failed mid-way" }))
+  ),
 }
 
 // =============================================================================

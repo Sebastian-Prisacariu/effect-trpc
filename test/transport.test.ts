@@ -105,17 +105,7 @@ describe("Transport.mock", () => {
 // =============================================================================
 
 describe("Transport service", () => {
-  it("Transport.Transport is a Context.Tag", () => {
-    expect(Transport.Transport).toBeDefined()
-  })
-
-  it("TransportService has send method", () => {
-    type Service = Transport.TransportService
-
-    expectTypeOf<Service>().toHaveProperty("send")
-  })
-
-  it("send returns Stream of responses", () => {
+  it("TransportService.send returns Stream of responses", () => {
     type SendFn = Transport.TransportService["send"]
     type Return = ReturnType<SendFn>
 

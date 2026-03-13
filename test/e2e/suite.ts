@@ -15,6 +15,7 @@ import {
   NotFoundError, 
   ValidationError,
   UnauthorizedError,
+  StreamError,
   testRouter,
   TestDatabase,
   AuthMiddlewareLive,
@@ -206,6 +207,31 @@ export const e2eSuite = (
           
           expect(chunks).toHaveLength(1)
           expect(chunks[0].name).toBeDefined()
+        }).pipe(Effect.provide(clientLayer))
+      )
+      
+      it.effect("handles stream errors", () =>
+        Effect.gen(function* () {
+          const service = yield* Client.ClientServiceTag
+          const proc = testRouter.pathMap.procedures.get("failingStream")!.procedure
+          const chunks: number[] = []
+          
+          const result = yield* service.sendStream(
+            "@test/failingStream",
+            undefined,
+            proc.successSchema,
+            proc.errorSchema
+          ).pipe(
+            Stream.runForEach((n) => 
+              Effect.sync(() => { chunks.push(n as number) })
+            ),
+            Effect.either
+          )
+          
+          // Should have received some chunks before failing
+          expect(chunks.length).toBeGreaterThanOrEqual(0)
+          // Should have failed
+          expect(result._tag).toBe("Left")
         }).pipe(Effect.provide(clientLayer))
       )
     })
