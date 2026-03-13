@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-02-24T09:58:14.979Z",
+  "config": {
+    "routeCounts": [
+      100,
+      400
+    ],
+    "iterations": 2,
+    "runTsc": true,
+    "runTsServer": true
+  },
+  "results": [
+    {
+      "routeCount": 100,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 1541,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 948
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 406,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 596,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    },
+    {
+      "routeCount": 400,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 2684,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 830
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 432,
+          "hover": 1,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 671,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    }
+  ]
+}

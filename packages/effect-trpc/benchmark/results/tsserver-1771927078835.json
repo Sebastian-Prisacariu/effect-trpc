@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-02-24T09:57:58.835Z",
+  "vanilla": {
+    "framework": "vanilla-trpc",
+    "projectLoadMs": 406,
+    "measurements": [
+      {
+        "operation": "hover",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "autocomplete",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "goToDefinition",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "diagnostics",
+        "timeMs": 0,
+        "success": true
+      }
+    ]
+  },
+  "effect": {
+    "framework": "effect-trpc",
+    "projectLoadMs": 596,
+    "measurements": [
+      {
+        "operation": "hover",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "autocomplete",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "goToDefinition",
+        "timeMs": 0,
+        "success": true
+      },
+      {
+        "operation": "diagnostics",
+        "timeMs": 0,
+        "success": true
+      }
+    ]
+  }
+}

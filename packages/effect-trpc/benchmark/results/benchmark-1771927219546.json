@@ -1,0 +1,128 @@
+{
+  "timestamp": "2026-02-24T10:00:19.546Z",
+  "config": {
+    "routeCounts": [
+      100,
+      400,
+      800,
+      1600
+    ],
+    "iterations": 3,
+    "runTsc": true,
+    "runTsServer": true
+  },
+  "results": [
+    {
+      "routeCount": 100,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 1270,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 735
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 502,
+          "hover": 0,
+          "autocomplete": 1,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 615,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    },
+    {
+      "routeCount": 400,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 2629,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 809
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 563,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 641,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    },
+    {
+      "routeCount": 800,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 4641,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 741
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 672,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 661,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    },
+    {
+      "routeCount": 1600,
+      "tsc": {
+        "vanilla": {
+          "timeMs": 8518,
+          "checkTimeMs": 0
+        },
+        "effect": {
+          "timeMs": 1024
+        }
+      },
+      "tsserver": {
+        "vanilla": {
+          "projectLoadMs": 466,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        },
+        "effect": {
+          "projectLoadMs": 661,
+          "hover": 0,
+          "autocomplete": 0,
+          "goToDefinition": 0,
+          "diagnostics": 0
+        }
+      }
+    }
+  ]
+}

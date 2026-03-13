@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-02-24T09:57:56.923Z",
+  "iterations": 2,
+  "vanilla": {
+    "basic": {
+      "framework": "vanilla-trpc",
+      "timeMs": 1541,
+      "peakMemoryMb": 0,
+      "success": false,
+      "errors": 2
+    },
+    "trace": {
+      "checkTimeMs": 0,
+      "bindTimeMs": 0,
+      "programTimeMs": 0,
+      "parseTimeMs": 0,
+      "ioReadTimeMs": 0,
+      "ioWriteTimeMs": 0,
+      "symbolCount": 47759,
+      "typeCount": 0,
+      "instantiationCount": 0,
+      "relationCacheSizes": {}
+    }
+  },
+  "effect": {
+    "basic": {
+      "framework": "effect-trpc",
+      "timeMs": 948,
+      "peakMemoryMb": 0,
+      "success": false,
+      "errors": 4
+    },
+    "trace": null
+  }
+}

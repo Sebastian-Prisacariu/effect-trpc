@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# env
+.env
+.env.*
+!.env.example
+
+# build artifacts
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# monorepo / tooling caches
+.turbo/
+.cache/
+.parcel-cache/
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun-debug.log*
+
+# os/editor noise
+.DS_Store
