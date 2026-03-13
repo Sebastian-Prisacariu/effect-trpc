@@ -137,35 +137,6 @@ export const e2eSuite = (
           expect((user as User).email).toBe("charlie@example.com")
         }).pipe(Effect.provide(clientLayer))
       )
-      
-      // Skip: Requires shared database state across requests
-      // In loopback each request gets fresh database
-      it.skip("mutation persists data", () =>
-        Effect.gen(function* () {
-          const service = yield* Client.ClientServiceTag
-          const createProc = testRouter.pathMap.procedures.get("users.create")!.procedure
-          const getProc = testRouter.pathMap.procedures.get("users.get")!.procedure
-          
-          // Create user
-          const created = yield* service.send(
-            "@test/users/create",
-            new CreateUserInput({ name: "David", email: "david@example.com" }),
-            createProc.successSchema,
-            createProc.errorSchema
-          ) as User
-          
-          // Fetch to verify persistence
-          const fetched = yield* service.send(
-            "@test/users/get",
-            { id: created.id },
-            getProc.successSchema,
-            getProc.errorSchema
-          )
-          
-          expect((fetched as User).name).toBe("David")
-        }).pipe(Effect.provide(clientLayer))
-      )
-      
       it.effect("mutation returns validation error", () =>
         Effect.gen(function* () {
           const service = yield* Client.ClientServiceTag
