@@ -282,6 +282,9 @@ export const make = <D extends Router.Definition, R = never>(
   }
   
   // Handle a streaming request
+  // NOTE: Middleware is applied BEFORE stream iteration starts.
+  // Following Effect RPC's pattern - middleware runs once on connection setup,
+  // and if it fails, no stream data flows.
   const handleStream = (
     request: Transport.TransportRequest
   ): Stream.Stream<Transport.StreamResponse, never, R> => {
@@ -294,7 +297,7 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    const { handler, procedure, isStream } = entry
+    const { handler, procedure, isStream, middlewares } = entry
     
     if (!isStream) {
       return Stream.succeed(new Transport.Failure({
@@ -303,24 +306,52 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
+    const middlewareRequest = toMiddlewareRequest(request)
+    
     const makeStream = (payload: unknown): Stream.Stream<Transport.StreamResponse, never, R> => {
       const stream = handler(payload) as Stream.Stream<unknown, unknown, R>
       
-      return stream.pipe(
-        Stream.map((value): Transport.StreamResponse => 
-          new Transport.StreamChunk({
-            id: request.id,
-            chunk: value,
-          })
-        ),
-        Stream.catchAll((error): Stream.Stream<Transport.StreamResponse, never, R> =>
-          Stream.succeed(new Transport.Failure({
-            id: request.id,
-            error,
-          }))
-        ),
-        Stream.concat(Stream.succeed(new Transport.StreamEnd({ id: request.id })))
-      )
+      // Wrap stream in Effect that runs middleware first
+      // Middleware executes ONCE before stream starts
+      const streamWithMiddleware: Effect.Effect<Stream.Stream<Transport.StreamResponse, never, R>, unknown, R> = 
+        middlewares.length > 0
+          ? Middleware.execute(
+              middlewares,
+              middlewareRequest,
+              // This Effect just returns the stream - middleware runs first
+              Effect.succeed(stream)
+            ).pipe(
+              Effect.map((s) => s.pipe(
+                Stream.map((value): Transport.StreamResponse => 
+                  new Transport.StreamChunk({ id: request.id, chunk: value })
+                ),
+                Stream.catchAll((error): Stream.Stream<Transport.StreamResponse, never, R> =>
+                  Stream.succeed(new Transport.Failure({ id: request.id, error }))
+                ),
+                Stream.concat(Stream.succeed(new Transport.StreamEnd({ id: request.id })))
+              ))
+            )
+          : Effect.succeed(stream.pipe(
+              Stream.map((value): Transport.StreamResponse => 
+                new Transport.StreamChunk({ id: request.id, chunk: value })
+              ),
+              Stream.catchAll((error): Stream.Stream<Transport.StreamResponse, never, R> =>
+                Stream.succeed(new Transport.Failure({ id: request.id, error }))
+              ),
+              Stream.concat(Stream.succeed(new Transport.StreamEnd({ id: request.id })))
+            ))
+      
+      // If middleware fails, return failure response
+      return Stream.unwrap(
+        streamWithMiddleware.pipe(
+          Effect.catchAll((error) => 
+            Effect.succeed(
+              Stream.succeed(new Transport.Failure({ id: request.id, error })) as 
+                Stream.Stream<Transport.StreamResponse, never, R>
+            )
+          )
+        )
+      ) as Stream.Stream<Transport.StreamResponse, never, R>
     }
     
     const failureStream = Stream.succeed(new Transport.Failure({

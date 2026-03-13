@@ -2,7 +2,7 @@
  * Transport - How requests travel between client and server
  * 
  * Transport defines how RPC requests are sent and responses received.
- * Different implementations: HTTP (with batching), WebSocket, Mock.
+ * Implementations: HTTP, Mock, Loopback (for testing).
  * 
  * @since 1.0.0
  * @module
@@ -12,16 +12,13 @@
  * import { Transport } from "effect-trpc"
  * import { Duration } from "effect"
  * 
- * // HTTP transport with batching
+ * // HTTP transport
  * const httpLayer = Transport.http("/api/trpc", {
- *   batching: {
- *     enabled: true,
- *     window: Duration.millis(10),
- *   },
+ *   timeout: Duration.seconds(30),
  * })
  * 
  * // Mock transport for testing
- * const mockLayer = Transport.mock<AppRouter>({
+ * const mockLayer = Transport.mock({
  *   "users.list": () => Effect.succeed([]),
  *   "users.get": ({ id }) => Effect.succeed({ id, name: "Test" }),
  * })
@@ -208,40 +205,13 @@ export interface HttpOptions {
   readonly timeout?: Duration.DurationInput
   
   /**
-   * Batching configuration
-   */
-  readonly batching?: {
-    /**
-     * Enable batching (default: true for queries)
-     */
-    readonly enabled?: boolean
-    
-    /**
-     * Time window to collect requests (default: 0 = microtask)
-     */
-    readonly window?: Duration.DurationInput
-    
-    /**
-     * Maximum requests per batch (default: 50)
-     */
-    readonly maxSize?: number
-    
-    /**
-     * Batch queries (default: true)
-     */
-    readonly queries?: boolean
-    
-    /**
-     * Batch mutations (default: false)
-     */
-    readonly mutations?: boolean
-  }
-  
-  /**
    * Custom fetch implementation
    */
   readonly fetch?: typeof globalThis.fetch
 }
+
+// Note: Batching is planned but not yet implemented.
+// See /plans/batching.md for the implementation roadmap.
 
 /**
  * Create an HTTP transport layer
@@ -255,9 +225,8 @@ export interface HttpOptions {
  * 
  * const layer = Transport.http("/api/trpc", {
  *   timeout: Duration.seconds(30),
- *   batching: {
- *     enabled: true,
- *     window: Duration.millis(10),
+ *   headers: {
+ *     "Authorization": "Bearer token",
  *   },
  * })
  * ```

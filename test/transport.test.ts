@@ -51,19 +51,8 @@ describe("Transport.http", () => {
     expect(layer).toBeDefined()
   })
 
-  it("accepts batching configuration", () => {
-    const layer = Transport.http("/api/trpc", {
-      batching: {
-        enabled: true,
-        window: "10 millis",
-        maxSize: 50,
-        queries: true,
-        mutations: false,
-      },
-    })
-
-    expect(layer).toBeDefined()
-  })
+  // Note: Batching is planned but not yet implemented.
+  // See /plans/batching.md for the implementation roadmap.
 
   it("accepts custom fetch implementation", () => {
     const customFetch = globalThis.fetch

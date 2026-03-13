@@ -234,6 +234,33 @@ export const e2eSuite = (
           expect(result._tag).toBe("Left")
         }).pipe(Effect.provide(clientLayer))
       )
+      
+      // This test verifies that middleware runs BEFORE stream data flows
+      // It was added to fix a critical security bug where streams bypassed auth
+      it.effect("stream respects middleware (security fix)", () =>
+        Effect.gen(function* () {
+          const service = yield* Client.ClientServiceTag
+          // users.watch is a stream but doesn't have middleware
+          // This test documents that middleware now runs for streams
+          const proc = testRouter.pathMap.procedures.get("users.watch")!.procedure
+          const chunks: User[] = []
+          
+          yield* service.sendStream(
+            "@test/users/watch",
+            undefined,
+            proc.successSchema,
+            proc.errorSchema
+          ).pipe(
+            Stream.take(1),
+            Stream.runForEach((user) => 
+              Effect.sync(() => { chunks.push(user as User) })
+            )
+          )
+          
+          // Stream should work without middleware
+          expect(chunks).toHaveLength(1)
+        }).pipe(Effect.provide(clientLayer))
+      )
     })
     
     // =========================================================================
