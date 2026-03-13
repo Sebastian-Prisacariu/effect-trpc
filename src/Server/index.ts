@@ -373,6 +373,19 @@ export interface HttpHandlerOptions {
  * 
  * @since 1.0.0
  * @category http
+ * @example
+ * ```ts
+ * const server = Server.make(appRouter, handlers)
+ * const httpHandler = Server.toHttpHandler(server)
+ * 
+ * // In Express
+ * app.post('/api/trpc', async (req, res) => {
+ *   const response = await Effect.runPromise(
+ *     httpHandler(req).pipe(Effect.provide(AppLive))
+ *   )
+ *   res.status(response.status).json(JSON.parse(response.body))
+ * })
+ * ```
  */
 export const toHttpHandler = <D extends Router.Definition, R>(
   server: Server<D, R>,
@@ -384,10 +397,31 @@ export const toHttpHandler = <D extends Router.Definition, R>(
       catch: () => ({ id: "", tag: "", payload: undefined }),
     }).pipe(
       Effect.flatMap((body) => {
+        // Extract headers from request if available
+        const headers: Record<string, string> = {}
+        if (request.headers) {
+          if (typeof request.headers.get === "function") {
+            // Headers object with get method (fetch API)
+            const commonHeaders = ["authorization", "content-type", "x-request-id"]
+            for (const name of commonHeaders) {
+              const value = (request.headers as any).get(name)
+              if (value) headers[name] = value
+            }
+          } else if (typeof request.headers === "object") {
+            // Plain object (Express, Next.js)
+            for (const [key, value] of Object.entries(request.headers)) {
+              if (typeof value === "string") {
+                headers[key.toLowerCase()] = value
+              }
+            }
+          }
+        }
+        
         const transportRequest = new Transport.TransportRequest({
           id: (body as any).id ?? Transport.generateRequestId(),
           tag: (body as any).tag ?? "",
           payload: (body as any).payload,
+          headers,
         })
         
         return server.handle(transportRequest)
@@ -405,15 +439,104 @@ export const toHttpHandler = <D extends Router.Definition, R>(
     ) as Effect.Effect<HttpResponse, never, R>
 }
 
+/**
+ * Create a fetch-compatible handler (for Next.js App Router, Cloudflare Workers, etc.)
+ * 
+ * @since 1.0.0
+ * @category http
+ * @example
+ * ```ts
+ * // app/api/trpc/route.ts (Next.js App Router)
+ * import { Server } from "effect-trpc"
+ * 
+ * const handler = Server.toFetchHandler(server, AppLive)
+ * export const POST = handler
+ * ```
+ */
+export const toFetchHandler = <D extends Router.Definition, R>(
+  server: Server<D, R>,
+  layer: Layer.Layer<R>
+): (request: Request) => Promise<Response> => {
+  const handler = toHttpHandler(server)
+  
+  return async (request: Request): Promise<Response> => {
+    const httpRequest: HttpRequest = {
+      json: () => request.json(),
+      headers: request.headers,
+    }
+    
+    const response = await Effect.runPromise(
+      handler(httpRequest).pipe(Effect.provide(layer))
+    )
+    
+    return new Response(response.body, {
+      status: response.status,
+      headers: response.headers,
+    })
+  }
+}
+
+/**
+ * Create handler for Next.js API routes (Pages Router)
+ * 
+ * @since 1.0.0
+ * @category http
+ * @example
+ * ```ts
+ * // pages/api/trpc.ts
+ * import { Server } from "effect-trpc"
+ * 
+ * export default Server.toNextApiHandler(server, AppLive)
+ * ```
+ */
+export const toNextApiHandler = <D extends Router.Definition, R>(
+  server: Server<D, R>,
+  layer: Layer.Layer<R>
+): (req: NextApiRequest, res: NextApiResponse) => Promise<void> => {
+  const handler = toHttpHandler(server)
+  
+  return async (req: NextApiRequest, res: NextApiResponse): Promise<void> => {
+    const httpRequest: HttpRequest = {
+      json: () => Promise.resolve(req.body),
+      headers: req.headers as Record<string, string>,
+    }
+    
+    const response = await Effect.runPromise(
+      handler(httpRequest).pipe(Effect.provide(layer))
+    )
+    
+    res.status(response.status)
+    for (const [key, value] of Object.entries(response.headers)) {
+      res.setHeader(key, value)
+    }
+    res.send(response.body)
+  }
+}
+
 // Minimal HTTP types (no @effect/platform dependency)
 interface HttpRequest {
   readonly json: () => Promise<unknown>
+  readonly headers?: 
+    | Record<string, string | string[] | undefined>
+    | { get: (name: string) => string | null }
 }
 
 interface HttpResponse {
   readonly status: number
   readonly headers: Record<string, string>
   readonly body: string
+}
+
+// Next.js types
+interface NextApiRequest {
+  readonly body: unknown
+  readonly headers: Record<string, string | string[] | undefined>
+}
+
+interface NextApiResponse {
+  status: (code: number) => NextApiResponse
+  setHeader: (name: string, value: string) => void
+  send: (body: string) => void
 }
 
 // =============================================================================
