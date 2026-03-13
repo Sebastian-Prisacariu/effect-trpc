@@ -24,6 +24,48 @@ interface CreateUserInput {
 }
 
 // =============================================================================
+// Procedure Integration Tests
+// =============================================================================
+
+describe("fromProcedureConfig", () => {
+  it("converts procedure config to runtime config", () => {
+    const procedureConfig: Optimistic.ProcedureOptimisticConfig<User[], CreateUserInput, User> = {
+      target: "users.list",
+      reducer: (list, input) => [...list, { id: "temp", ...input }],
+      reconcile: (list, _input, result) => 
+        list.map(u => u.id === "temp" ? result : u),
+    }
+    
+    const runtimeConfig = Optimistic.fromProcedureConfig(procedureConfig)
+    
+    // Test optimisticUpdate
+    const cache = { "users.list": [{ id: "1", name: "Alice", email: "a@test.com" }] }
+    const updated = runtimeConfig.optimisticUpdate(cache, { name: "Bob", email: "bob@test.com" })
+    
+    expect((updated["users.list"] as User[]).length).toBe(2)
+    expect((updated["users.list"] as User[])[1].id).toBe("temp")
+    
+    // Test onSuccess
+    const result: User = { id: "real-123", name: "Bob", email: "bob@test.com" }
+    const reconciled = runtimeConfig.onSuccess!(result, updated, { name: "Bob", email: "bob@test.com" })
+    
+    expect((reconciled["users.list"] as User[])[1].id).toBe("real-123")
+  })
+
+  it("handles missing reconcile (uses invalidation)", () => {
+    const procedureConfig: Optimistic.ProcedureOptimisticConfig<User[], CreateUserInput, User> = {
+      target: "users.list",
+      reducer: (list, input) => [...list, { id: "temp", ...input }],
+      // No reconcile - will use invalidation instead
+    }
+    
+    const runtimeConfig = Optimistic.fromProcedureConfig(procedureConfig)
+    
+    expect(runtimeConfig.onSuccess).toBeUndefined()
+  })
+})
+
+// =============================================================================
 // Helper Utilities Tests
 // =============================================================================
 

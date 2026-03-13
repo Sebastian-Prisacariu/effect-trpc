@@ -4,36 +4,46 @@
  * Optimistic updates show the expected result immediately while the
  * mutation runs in the background. On failure, automatically rolls back.
  * 
- * @since 1.0.0
- * @module
+ * ## Procedure-Level Config (Recommended)
+ * 
+ * Define optimistic behavior on the procedure itself:
  * 
  * @example
  * ```ts
- * import { Optimistic, Client } from "effect-trpc"
- * 
- * // Define optimistic update
- * const createUser = api.users.create.useOptimisticMutation({
- *   // Optimistically update the list
- *   optimisticUpdate: (cache, input) => ({
- *     "users.list": [...cache["users.list"], { 
- *       id: "temp-id", 
- *       ...input 
- *     }],
- *   }),
- *   
- *   // On success, replace temp with real data
- *   onSuccess: (result, cache) => ({
- *     "users.list": cache["users.list"].map(u => 
- *       u.id === "temp-id" ? result : u
- *     ),
- *   }),
- *   
- *   // On error, rollback happens automatically
+ * const createUser = Procedure.mutation({
+ *   payload: CreateUserInput,
+ *   success: User,
+ *   invalidates: ["users"],
+ *   optimistic: {
+ *     target: "users.list",
+ *     reducer: (list, input) => [...list, { id: "temp", ...input }],
+ *     reconcile: (list, input, result) => 
+ *       list.map(u => u.id === "temp" ? result : u),
+ *   },
  * })
  * 
- * // Usage
- * createUser.mutate({ name: "Alice", email: "alice@example.com" })
+ * // Usage - optimistic update happens automatically!
+ * api.users.create.mutate({ name: "Alice", email: "alice@example.com" })
  * ```
+ * 
+ * ## Runtime API (Advanced)
+ * 
+ * For custom optimistic logic not tied to a procedure:
+ * 
+ * @example
+ * ```ts
+ * const optimistic = Optimistic.createOptimisticMutation(
+ *   mutation,
+ *   {
+ *     optimisticUpdate: (cache, input) => ({ ... }),
+ *     onSuccess: (result, cache) => ({ ... }),
+ *   },
+ *   cacheRef
+ * )
+ * ```
+ * 
+ * @since 1.0.0
+ * @module
  */
 
 import * as Effect from "effect/Effect"
@@ -217,6 +227,63 @@ export interface UseOptimisticMutationResult<Input, Success, Error> {
   readonly error: Error | undefined
   readonly reset: () => void
 }
+
+// =============================================================================
+// Procedure Integration
+// =============================================================================
+
+/**
+ * Procedure-level optimistic config (from Procedure.mutation({ optimistic: ... }))
+ * 
+ * @since 1.0.0
+ * @category models
+ */
+export interface ProcedureOptimisticConfig<Target, Payload, Success> {
+  /**
+   * The path to the query that should be optimistically updated
+   */
+  readonly target: string
+  
+  /**
+   * Update the target data immediately with the mutation payload
+   */
+  readonly reducer: (current: Target, payload: Payload) => Target
+  
+  /**
+   * Optionally reconcile after server response (if not provided, target is invalidated)
+   */
+  readonly reconcile?: (current: Target, payload: Payload, result: Success) => Target
+}
+
+/**
+ * Convert procedure-level optimistic config to runtime config.
+ * Used internally by the Client when running mutations with optimistic updates.
+ * 
+ * @since 1.0.0
+ * @category constructors
+ */
+export const fromProcedureConfig = <Target, Payload, Success>(
+  procedureConfig: ProcedureOptimisticConfig<Target, Payload, Success>
+): OptimisticConfig<Payload, Success> => ({
+  optimisticUpdate: (cache, input) => ({
+    ...cache,
+    [procedureConfig.target]: procedureConfig.reducer(
+      cache[procedureConfig.target] as Target,
+      input
+    ),
+  }),
+  
+  onSuccess: procedureConfig.reconcile
+    ? (result, cache, input) => ({
+        ...cache,
+        [procedureConfig.target]: procedureConfig.reconcile!(
+          cache[procedureConfig.target] as Target,
+          input,
+          result
+        ),
+      })
+    : undefined,
+})
 
 // =============================================================================
 // Utilities
