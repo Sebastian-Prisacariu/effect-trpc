@@ -1,323 +1,280 @@
-# H6: Cache Storage Patterns in Effect Atom
+# H6: Cache Storage - Effect Atom State Storage Architecture
 
-## Executive Summary
+## Overview
 
-Effect Atom uses a **Registry-based state storage model** where each Atom's computed value is stored in a **Node** within a central **Registry**. The state storage is lazy, dependency-tracked, and supports automatic cleanup with TTL-based idle disposal.
+Effect Atom uses a **Registry-based storage model** where all atom values are stored in a centralized `Registry` that manages node lifecycle, dependency tracking, and value caching. Unlike simple cache systems, atoms store reactive state with built-in change detection and propagation.
 
----
+## Storage Architecture
 
-## 1. Core State Storage Architecture
+### 1. Registry - The Central Store
 
-### 1.1 The Registry as State Container
+```
+Registry (RegistryImpl)
+    |
+    +-- nodes: Map<Atom | string, Node>  -- Main value storage
+    |
+    +-- preloadedSerializable: Map<string, unknown>  -- SSR hydration
+    |
+    +-- timeoutBuckets: Map<number, [Set<Node>, handle]>  -- TTL management
+    |
+    +-- nodeTimeoutBucket: Map<Node, number>  -- Node -> bucket mapping
+```
+
+**Location:** `internal/registry.ts:40-67`
 
 ```typescript
-// Registry holds all Atom state in a Map<Atom | string, Node>
 class RegistryImpl implements Registry.Registry {
   readonly nodes = new Map<Atom.Atom<any> | string, Node<any>>()
   readonly preloadedSerializable = new Map<string, unknown>()
   readonly timeoutBuckets = new Map<number, readonly [nodes: Set<Node<any>>, handle: number]>()
+  readonly nodeTimeoutBucket = new Map<Node<any>, number>()
 }
 ```
 
-**Key Insight:** The Registry is the **single source of truth** for all Atom values. Unlike Redux where state is a plain object, Effect Atom's state is stored in Node instances within a Map.
+### 2. Node - The Value Container
 
-### 1.2 Node as Value Container
+Each atom's value is stored in a `Node` that tracks:
 
-Each Atom gets a corresponding Node that holds:
+**Location:** `internal/registry.ts:275-320`
 
 ```typescript
 class Node<A> {
-  // The actual cached value
-  _value: A = undefined as any
-  
-  // State tracking (uninitialized, stale, valid, removed)
   state: NodeState = NodeState.uninitialized
+  lifetime: Lifetime<A> | undefined    // Manages subscriptions/finalizers
+  writeContext: WriteContextImpl<A>
   
-  // Lifetime for finalizers and dependency tracking
-  lifetime: Lifetime<A> | undefined
-  
-  // Dependency graph
-  parents: Array<Node<any>> = []
-  children: Array<Node<any>> = []
-  
-  // Subscriptions for reactivity
+  parents: Array<Node<any>> = []       // Dependencies (other atoms)
+  previousParents: Array<Node<any>> | undefined
+  children: Array<Node<any>> = []      // Dependents (atoms that read this)
   listeners: Set<() => void> = new Set()
+  
+  _value: A = undefined as any         // THE ACTUAL CACHED VALUE
 }
 ```
 
-### 1.3 State Lifecycle (NodeState Enum)
+### 3. Node State Machine
+
+```
+NodeState.uninitialized (alive | waitingForValue)
+         |
+         v  [first read]
+NodeState.valid (alive | initialized)
+         |
+         v  [invalidate()]
+NodeState.stale (alive | initialized | waitingForValue)
+         |
+         v  [value()]
+NodeState.valid
+         |
+         v  [remove()]
+NodeState.removed (0)
+```
+
+**Location:** `internal/registry.ts:262-273`
 
 ```typescript
 const enum NodeFlags {
-  alive = 1 << 0,        // Node exists
-  initialized = 1 << 1,  // Value has been computed at least once
-  waitingForValue = 1 << 2  // Currently computing
+  alive = 1 << 0,
+  initialized = 1 << 1,
+  waitingForValue = 1 << 2
 }
 
 const enum NodeState {
-  uninitialized = alive | waitingForValue,           // 5 - never computed
-  stale = alive | initialized | waitingForValue,     // 7 - needs recomputation
-  valid = alive | initialized,                        // 3 - cached value is current
-  removed = 0                                          // disposed
+  uninitialized = NodeFlags.alive | NodeFlags.waitingForValue,
+  stale = NodeFlags.alive | NodeFlags.initialized | NodeFlags.waitingForValue,
+  valid = NodeFlags.alive | NodeFlags.initialized,
+  removed = 0
 }
 ```
 
----
+## Value Access Pattern
 
-## 2. State Lifecycle Phases
+### Lazy Evaluation with Caching
 
-### 2.1 Creation: Lazy Initialization
-
-```typescript
-// Nodes are created on-demand when first accessed
-ensureNode<A>(atom: Atom.Atom<A>): Node<A> {
-  const key = atomKey(atom)
-  let node = this.nodes.get(key)
-  if (node === undefined) {
-    node = this.createNode(atom)
-    this.nodes.set(key, node)
-  }
-  return node
-}
-```
-
-**Key Pattern:** Atoms are **NOT** stored until first accessed. This is pull-based/lazy initialization.
-
-### 2.2 Value Computation with Caching
+**Location:** `internal/registry.ts:298-320`
 
 ```typescript
 value(): A {
-  // Only recompute if stale or uninitialized
   if ((this.state & NodeFlags.waitingForValue) !== 0) {
-    // Create lifetime context for dependency tracking
+    // Only compute if needed
     this.lifetime = makeLifetime(this)
-    
-    // Call the atom's read function
     const value = this.atom.read(this.lifetime)
     
-    // Cache the result
     if ((this.state & NodeFlags.waitingForValue) !== 0) {
-      this.setValue(value)
+      this.setValue(value)  // Cache the result
+    }
+    
+    // Clean up stale parent dependencies
+    if (this.previousParents) {
+      // ... remove old dependencies
     }
   }
-  return this._value
+  
+  return this._value  // Return cached value
 }
 ```
 
-### 2.3 Value Updates with Equality Check
+### Change Detection with Equality
+
+**Location:** `internal/registry.ts:329-362`
 
 ```typescript
 setValue(value: A): void {
-  // First time - just set it
+  // First initialization
   if ((this.state & NodeFlags.initialized) === 0) {
     this.state = NodeState.valid
     this._value = value
-    this.notify()
+    this.notify()  // or batch
     return
   }
 
   this.state = NodeState.valid
   
-  // Skip if value is equal (memoization!)
+  // EQUALITY CHECK - skip if unchanged
   if (Equal.equals(this._value, value)) {
     return
   }
 
   this._value = value
-  this.invalidateChildren()  // Cascade invalidation
-  this.notify()
-}
-```
-
-**Memoization:** Uses Effect's `Equal.equals` for structural equality checking - derived atoms only recompute if their dependencies actually changed.
-
-### 2.4 Cleanup: TTL-Based Disposal
-
-```typescript
-// Atoms can have an idle TTL
-interface Atom<A> {
-  readonly keepAlive: boolean     // If true, never auto-dispose
-  readonly idleTTL?: number       // Milliseconds before disposal when idle
-}
-
-// Registry tracks timeout buckets for efficient cleanup
-setNodeTimeout(node: Node<any>): void {
-  const ttl = node.atom.idleTTL ?? this.defaultIdleTTL!
-  const bucket = calculateBucket(ttl)
+  this.invalidateChildren()  // Propagate to dependents
   
-  // Add to timeout bucket for batch cleanup
-  this.timeoutBuckets.get(bucket)[0].add(node)
+  if (this.listeners.size > 0) {
+    this.notify()  // or batch
+  }
 }
 ```
 
-**Cleanup Strategy:**
-1. When all subscribers/children are gone, node becomes removable
-2. If `keepAlive: false` and `idleTTL` is set, schedule for removal
-3. Timeout buckets batch removals by time window
-4. On removal, call all finalizers (for Effects/Streams)
+## Memoization Patterns
 
----
+### 1. Atom Family - WeakRef Memoization
 
-## 3. Memoization Patterns
-
-### 3.1 Atom Family Pattern
+**Location:** `Atom.ts:1324-1359`
 
 ```typescript
-// WeakRef-based memoization of parameterized atoms
 export const family = <Arg, T extends object>(
   f: (arg: Arg) => T
 ): (arg: Arg) => T => {
   const atoms = MutableHashMap.empty<Arg, WeakRef<T>>()
   const registry = new FinalizationRegistry<Arg>((arg) => {
-    MutableHashMap.remove(atoms, arg)  // Auto-cleanup when GC'd
+    MutableHashMap.remove(atoms, arg)
   })
   
   return function(arg) {
-    // Check cache first
     const atomEntry = MutableHashMap.get(atoms, arg).pipe(
       Option.flatMapNullable((ref) => ref.deref())
     )
-    
+
     if (atomEntry._tag === "Some") {
-      return atomEntry.value  // Cache hit!
+      return atomEntry.value  // Return cached atom
     }
     
-    // Create new atom and cache it
     const newAtom = f(arg)
     MutableHashMap.set(atoms, arg, new WeakRef(newAtom))
-    registry.register(newAtom, arg)
+    registry.register(newAtom, arg)  // Auto-cleanup when GC'd
     return newAtom
   }
 }
 ```
 
-**Pattern:** Uses `WeakRef` + `FinalizationRegistry` for automatic GC-based cache cleanup.
+### 2. Layer MemoMap - Runtime Caching
 
-### 3.2 Layer MemoMap
+**Location:** `Atom.ts:712-715`
 
 ```typescript
-// Layers are memoized globally
 export const defaultMemoMap: Layer.MemoMap = globalValue(
   "@effect-atom/atom/Atom/defaultMemoMap",
   () => Effect.runSync(Layer.makeMemoMap)
 )
-
-// RuntimeFactory uses shared memoMap
-export const context: (options: {
-  readonly memoMap: Layer.MemoMap
-}) => RuntimeFactory
 ```
 
-**Pattern:** Effect Layers are expensive to build - MemoMap ensures each unique Layer is built once.
+Used to cache Effect runtime builds across atoms.
 
-### 3.3 Debounce Transform
+### 3. IdleTTL - Automatic Disposal
+
+**Location:** `internal/registry.ts:188-230`
 
 ```typescript
-export const debounce = (duration: Duration.DurationInput) => 
-  <A>(self: Atom<A>): Atom<A> => {
-    const millis = Duration.toMillis(duration)
-    return transform(self, function(get) {
-      let timeout: number | undefined
-      let value = get.once(self)
-      
-      get.subscribe(self, function(val) {
-        value = val
-        if (timeout) clearTimeout(timeout)
-        timeout = setTimeout(update, millis)
-      })
-      return value
-    })
+setNodeTimeout(node: Node<any>): void {
+  let idleTTL = node.atom.idleTTL ?? this.defaultIdleTTL!
+  const ttl = Math.ceil(idleTTL / this.timeoutResolution) * this.timeoutResolution
+  const timestamp = Date.now() + ttl
+  const bucket = timestamp - (timestamp % this.timeoutResolution) + this.timeoutResolution
+
+  let entry = this.timeoutBuckets.get(bucket)
+  if (entry === undefined) {
+    entry = [
+      new Set<Node<any>>(),
+      setTimeout(() => this.sweepBucket(bucket), bucket - Date.now())
+    ]
+    this.timeoutBuckets.set(bucket, entry)
   }
+  entry[0].add(node)
+}
 ```
 
----
+## Result Type - Async Value States
 
-## 4. Result Type for Async State
-
-The `Result<A, E>` type wraps async values with loading state:
+**Location:** `Result.ts:25-26, 112-175`
 
 ```typescript
-type Result<A, E = never> = Initial<A, E> | Success<A, E> | Failure<A, E>
+export type Result<A, E = never> = Initial<A, E> | Success<A, E> | Failure<A, E>
 
+// Initial - no value yet, optionally waiting
 interface Initial<A, E> {
   readonly _tag: "Initial"
-  readonly waiting: boolean  // true = loading in progress
+  readonly waiting: boolean
 }
 
+// Success - has value, optionally still refreshing
 interface Success<A, E> {
   readonly _tag: "Success"
   readonly value: A
-  readonly timestamp: number  // For staleness comparison
-  readonly waiting: boolean   // true = refetching
+  readonly waiting: boolean
+  readonly timestamp: number
 }
 
+// Failure - error occurred, can preserve previous success
 interface Failure<A, E> {
   readonly _tag: "Failure"
-  readonly cause: Cause<E>
-  readonly previousSuccess: Option<Success<A, E>>  // Stale-while-revalidate!
+  readonly cause: Cause.Cause<E>
+  readonly previousSuccess: Option.Option<Success<A, E>>
   readonly waiting: boolean
 }
 ```
 
-**Key Features:**
-- `timestamp` enables "stale-while-revalidate" comparison
-- `previousSuccess` in Failure enables showing stale data on error
-- `waiting` flag distinguishes initial load from background refresh
+## AtomRef - Direct Mutable State
 
----
-
-## 5. Dependency Tracking (Automatic Cache Invalidation)
-
-### 5.1 Parent-Child Graph
+**Location:** `AtomRef.ts:63-122`
 
 ```typescript
-// When atom B reads atom A, B becomes A's child
-get<A>(this: Lifetime<any>, atom: Atom.Atom<A>): A {
-  const parent = this.node.registry.ensureNode(atom)
-  this.node.addParent(parent)  // Track dependency
-  return parent.value()
-}
+class AtomRefImpl<A> implements AtomRef<A> {
+  constructor(public value: A) {}  // Direct mutable storage
+  
+  listeners: Array<(a: A) => void> = []
+  listenerCount = 0
 
-// When A changes, all children are invalidated
-invalidateChildren(): void {
-  const children = this.children
-  this.children = []
-  for (let i = 0; i < children.length; i++) {
-    children[i].invalidate()
+  set(value: A) {
+    if (Equal.equals(value, this.value)) {
+      return this  // Skip if unchanged
+    }
+    this.value = value
+    this.notify(value)  // Synchronous notification
+    return this
   }
 }
 ```
 
-### 5.2 Lazy Re-evaluation
+## Batching - Deferred Notifications
+
+**Location:** `internal/registry.ts:760-802`
 
 ```typescript
-invalidate(): void {
-  if (this.state === NodeState.valid) {
-    this.state = NodeState.stale  // Mark as needing recomputation
-    this.disposeLifetime()         // Clean up Effects/Streams
-  }
-
-  // Only recompute immediately if someone is actively listening
-  if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
-    this.invalidateChildren()
-    this.skipInvalidation = true  // Defer computation
-  } else {
-    this.value()  // Recompute now
-  }
-}
-```
-
----
-
-## 6. Batching for Performance
-
-```typescript
-export const batchState = {
+export const batchState = globalValue("@effect-atom/atom/Registry/batchState", () => ({
   phase: BatchPhase.disabled,
   depth: 0,
   stale: [] as Array<Node<any>>,
   notify: new Set<Node<any>>()
-}
+}))
 
 export function batch(f: () => void): void {
   batchState.phase = BatchPhase.collect
@@ -325,16 +282,16 @@ export function batch(f: () => void): void {
   try {
     f()
     if (batchState.depth === 1) {
-      // Rebuild all stale nodes
+      // Rebuild stale nodes
       for (let i = 0; i < batchState.stale.length; i++) {
         batchRebuildNode(batchState.stale[i])
       }
-      
-      // Notify all listeners (deduped)
+      // Commit phase - notify listeners
       batchState.phase = BatchPhase.commit
       for (const node of batchState.notify) {
         node.notify()
       }
+      batchState.notify.clear()
     }
   } finally {
     batchState.depth--
@@ -346,121 +303,95 @@ export function batch(f: () => void): void {
 }
 ```
 
----
+## Storage Lifecycle
 
-## 7. Recommendations for effect-trpc Cache Design
+```
+1. CREATION
+   Atom defined (no storage yet - atoms are lazy by default)
 
-### 7.1 Adopt Registry Pattern for Query Cache
-
-```typescript
-// effect-trpc should have a QueryRegistry similar to AtomRegistry
-interface QueryRegistry {
-  readonly nodes: Map<QueryKey, QueryNode<any, any>>
-  
-  readonly get: <A, E>(key: QueryKey) => Result<A, E>
-  readonly set: <A, E>(key: QueryKey, result: Result<A, E>) => void
-  readonly invalidate: (key: QueryKey) => void
-  readonly subscribe: <A, E>(key: QueryKey, f: (r: Result<A, E>) => void) => () => void
-}
-
-// Each query gets a Node
-interface QueryNode<A, E> {
-  readonly key: QueryKey
-  readonly result: Result<A, E>
-  readonly subscribers: Set<() => void>
-  readonly lastFetched: number
-}
+2. FIRST ACCESS
+   registry.get(atom) -> registry.ensureNode(atom)
+     -> new Node(registry, atom)
+     -> nodes.set(atom, node)
+     
+3. VALUE COMPUTATION
+   node.value()
+     -> atom.read(lifetime)
+     -> node.setValue(result)
+     -> node._value = result  // STORED
+     
+4. DEPENDENCY TRACKING
+   During read, lifetime.get(otherAtom)
+     -> node.addParent(parentNode)
+     -> parentNode.children.push(node)
+     
+5. INVALIDATION
+   parentNode.setValue(newValue)
+     -> parentNode.invalidateChildren()
+     -> childNode.invalidate()
+     -> childNode.state = NodeState.stale
+     
+6. RE-COMPUTATION (lazy)
+   childNode.value()
+     -> (if stale) atom.read(lifetime)
+     -> node.setValue(newResult)
+     
+7. DISPOSAL
+   - Manual: registry.dispose()
+   - Auto: keepAlive=false + no listeners + no children
+   - TTL: idleTTL timeout + sweepBucket()
 ```
 
-### 7.2 Use Result Type for Query State
+## Key Insights for tRPC-Effect
+
+### What Effect Atom Provides
+
+1. **Centralized Storage**: All values in one Registry
+2. **Lazy Evaluation**: Values computed on first access
+3. **Change Detection**: `Equal.equals` prevents unnecessary updates
+4. **Dependency Graph**: Automatic parent/child tracking
+5. **Lifecycle Management**: TTL-based disposal, finalizers
+6. **Batching**: Deferred notifications for multiple updates
+7. **Result Type**: First-class async state with history
+
+### What We Need for tRPC
+
+Our `Reactivity` service has invalidation without storage. Options:
+
+1. **Use Effect Atom directly**: Atoms store RPC results
+2. **Add storage to Reactivity**: Simple cache Map with TTL
+3. **Hybrid**: Reactivity for invalidation, atoms for storage
+
+### Storage vs Invalidation Separation
+
+Effect Atom tightly couples:
+- Storage (Node._value)
+- Invalidation (Node.invalidate -> Node.state = stale)
+- Re-computation (Node.value with waitingForValue)
+
+Our Reactivity only does invalidation. We could:
+- Add a simple cache layer to `@effect/experimental/Reactivity`
+- Use atoms as the "storage + computation" layer
+- Keep Reactivity just for "what changed" signals
+
+### Recommended Approach
 
 ```typescript
-// Already similar to TanStack Query's QueryObserverResult
-type QueryResult<A, E> = 
-  | { _tag: "Loading" }
-  | { _tag: "Success"; data: A; fetchedAt: number; isRefetching: boolean }
-  | { _tag: "Error"; error: E; staleData?: A }
+// Use atoms for storage/caching of RPC results
+const userAtom = runtime.atom(
+  rpc.getUser({ id: 1 })  // Effect RPC call
+)
+
+// Use Reactivity for cross-cutting invalidation
+const createUser = rpc.createUser.pipe(
+  Effect.tap(() => Reactivity.invalidate([UserKey]))
+)
+
+// Atom automatically re-fetches when invalidated
+const wrappedAtom = Atom.withReactivity([UserKey])(userAtom)
 ```
 
-### 7.3 Implement Query Family for Parameterized Queries
-
-```typescript
-// Like Atom.family for parameterized queries
-const queryFamily = <Input, Output, Error>(
-  procedure: TrpcProcedure<Input, Output, Error>
-): ((input: Input) => QueryAtom<Output, Error>) => {
-  // Use MutableHashMap with WeakRef for automatic cleanup
-  const cache = MutableHashMap.empty<Input, WeakRef<QueryAtom<Output, Error>>>()
-  // ...
-}
-```
-
-### 7.4 Add TTL-Based Cache Eviction
-
-```typescript
-interface QueryOptions {
-  readonly staleTime?: Duration.DurationInput   // When to mark as stale
-  readonly gcTime?: Duration.DurationInput      // When to evict from cache
-  readonly keepAlive?: boolean                   // Never evict
-}
-```
-
-### 7.5 Integrate with Effect Atom Directly
-
-Rather than building a parallel cache system, consider:
-
-```typescript
-// Option A: Build on top of Atom
-const query = <Input, Output, Error>(
-  procedure: TrpcProcedure<Input, Output, Error>,
-  input: Input
-): Atom<Result<Output, Error>> => {
-  return Atom.runtime.atom(
-    procedure.query(input),
-    { initialValue: undefined }
-  ).pipe(
-    Atom.withReactivity([procedure.key, input])
-  )
-}
-
-// Option B: Use Atom's Registry for cache storage
-const QueryCache = Atom.readable((get) => {
-  // Access via get() creates reactive dependencies
-  return {
-    get: (key: QueryKey) => get(queryAtomFamily(key)),
-    invalidate: (key: QueryKey) => get.refresh(queryAtomFamily(key))
-  }
-})
-```
-
-### 7.6 Key Architecture Decisions
-
-| Concern | Effect Atom Approach | Recommendation for effect-trpc |
-|---------|---------------------|-------------------------------|
-| Storage | Registry + Node Map | QueryRegistry with similar structure |
-| Keys | Atom identity or serializable key | Input-based QueryKey (hashable) |
-| Equality | `Equal.equals` | Use Effect's `Equal` for cache hits |
-| Lifecycle | keepAlive + idleTTL | staleTime + gcTime (TanStack Query semantics) |
-| Invalidation | Dependency graph | Manual + Reactivity service integration |
-| Batching | Global batch function | Adopt same batching pattern |
-
----
-
-## 8. Summary
-
-**Effect Atom's Cache Strategy:**
-1. **Registry-centric**: Single Map holds all state
-2. **Node-based**: Each Atom gets a Node with value, state, dependencies
-3. **Lazy computation**: Only compute when accessed
-4. **Equality memoization**: Skip updates if value unchanged
-5. **Dependency tracking**: Automatic invalidation graph
-6. **TTL cleanup**: Idle atoms are garbage collected
-7. **Family memoization**: WeakRef-based parameterized atom caching
-8. **Batching**: Defer notifications until batch completes
-
-**For effect-trpc:**
-- Build a similar Registry for query cache
-- Use Result type for async state (already exists)
-- Implement family pattern for parameterized queries
-- Add TTL-based cache eviction
-- Consider building directly on Effect Atom for simpler integration
+This gives us:
+- Effect Atom's storage and lifecycle
+- Reactivity's invalidation signals
+- Clean separation of concerns

@@ -1,569 +1,275 @@
-# Reactivity System - Cache Invalidation Analysis
+# Reactivity System Analysis
 
-**Date:** 2026-03-13
-**Module:** `src/Reactivity/index.ts`
-**Related:** `src/Client/index.ts`, `src/Router/index.ts`
+## Overview
 
-## Executive Summary
+The `Reactivity` module (`src/Reactivity/index.ts`) is a **pub/sub invalidation coordinator** — it provides **NO actual cache**. It only notifies subscribers when tags are invalidated, triggering refetches.
 
-The Reactivity module provides a **pub/sub system for cache invalidation** with hierarchical tag matching. While the core invalidation logic is well-designed and tested, **there is NO actual caching**. The system can notify subscribers when data should be invalidated, but there's nothing being cached to invalidate.
+## What the Module Actually Provides
 
-**Critical Finding:** This is a cache invalidation system without a cache.
-
----
-
-## 1. Service Implementation Analysis
-
-### 1.1 Core Structure
+### Core API
 
 ```typescript
-// src/Reactivity/index.ts:130-211
-
-export const make = (): ReactivityService => {
-  // Map of tag -> Set of callbacks
-  const subscriptions = new Map<string, Set<InvalidationCallback>>()
-  
-  // Generate unique subscription IDs (for debugging)
-  let nextId = 0
-  const callbackIds = new WeakMap<InvalidationCallback, number>()
-  
-  // ... methods
+interface ReactivityService {
+  subscribe(tag: string, callback: () => void): () => void  // Returns unsubscribe
+  invalidate(tags: ReadonlyArray<string>): void             // Triggers callbacks
+  getSubscribedTags(): ReadonlyArray<string>                // Debug helper
 }
 ```
 
-**Assessment:**
-- Uses standard JavaScript `Map` and `Set` for storage
-- No Effect-based state management (no `Ref`, `HashMap`)
-- The `callbackIds` WeakMap is declared but only used for debugging (assigning IDs)
-- Simple, synchronous implementation
+### Implementation Details
 
-### 1.2 Subscribe Method
+1. **Subscription Storage**: Uses `Map<string, Set<InvalidationCallback>>`
+2. **Hierarchical Invalidation**: Supports parent/child tag relationships
+   - Invalidating `@api/users` triggers `@api/users/list` (child)
+   - Invalidating `@api/users/list` triggers `@api/users` (parent)
+3. **Callback Deduplication**: Uses `Set<InvalidationCallback>` to avoid duplicate invocations
+
+### Utilities
 
 ```typescript
-// src/Reactivity/index.ts:138-160
+// Convert procedure paths to tags
+pathsToTags("@api", ["users", "users.list"])
+// → ["@api/users", "@api/users/list"]
 
-const subscribe = (tag: string, callback: InvalidationCallback): (() => void) => {
-  let callbacks = subscriptions.get(tag)
-  if (!callbacks) {
-    callbacks = new Set()
-    subscriptions.set(tag, callbacks)
-  }
+// Check if tag should be invalidated
+shouldInvalidate("@api/users/list", "@api/users")  // true
+```
+
+## Cache Analysis: NO CACHE EXISTS
+
+| Component | Has Cache? | Notes |
+|-----------|------------|-------|
+| `Reactivity` module | **NO** | Pure pub/sub |
+| React hooks (`useQuery`) | **NO** | Re-fetches every call |
+| `ClientService` | **NO** | Direct pass-through |
+| Transport layer | **NO** | HTTP/WebSocket direct |
+
+### Where Data "Lives"
+
+Data only exists in React component state:
+```typescript
+// src/Client/react.ts:151
+const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
+```
+
+Each `useQuery` hook:
+1. Fetches on mount
+2. Stores result in local `useState`
+3. Re-fetches when invalidated (via Reactivity subscription)
+
+**There is no shared cache between components.**
+
+## Comparison with @effect/experimental/Reactivity
+
+### Effect's Official Reactivity
+
+```typescript
+interface Service {
+  // Wraps effect, invalidates keys after completion
+  mutation<A, E, R>(keys, effect): Effect<A, E, R>
   
-  callbackIds.set(callback, nextId++)
-  callbacks.add(callback)
+  // Creates reactive stream that re-executes on invalidation
+  query<A, E, R>(keys, effect): Effect<Mailbox<A, E>, never, R | Scope>
   
-  // Return unsubscribe function
-  return () => {
-    const set = subscriptions.get(tag)
-    if (set) {
-      set.delete(callback)
-      if (set.size === 0) {
-        subscriptions.delete(tag)  // Cleanup empty sets
-      }
-    }
-  }
+  // Converts query to Stream
+  stream<A, E, R>(keys, effect): Stream<A, E, R>
+  
+  invalidate(keys): Effect<void>
+  unsafeInvalidate(keys): void
+  unsafeRegister(keys, handler): () => void
 }
 ```
 
-**Assessment:**
-- **Correct:** Properly returns unsubscribe function
-- **Correct:** Cleans up empty Sets when last callback unsubscribes
-- **Correct:** Uses Set to prevent duplicate callbacks
-- **Issue:** No protection against calling unsubscribe twice (harmless but wasteful)
+**Key Differences:**
 
-### 1.3 Invalidate Method
+| Feature | Our Reactivity | @effect/experimental/Reactivity |
+|---------|----------------|--------------------------------|
+| Effect integration | Minimal (wrappers only) | Deep (Effect-native) |
+| Query pattern | None | `query()` returns Mailbox |
+| Mutation wrapping | Manual | `mutation()` auto-invalidates |
+| Stream support | None | `stream()` built-in |
+| Key types | Strings only | Any (hashed) + Records |
+| Scope awareness | No | Yes |
 
-```typescript
-// src/Reactivity/index.ts:162-200
+### What We're Missing
 
-const invalidate = (tags: ReadonlyArray<string>): void => {
-  const callbacksToInvoke = new Set<InvalidationCallback>()
-  
-  for (const tag of tags) {
-    for (const [subscribedTag, callbacks] of subscriptions) {
-      // Exact match
-      if (subscribedTag === tag) {
-        for (const cb of callbacks) callbacksToInvoke.add(cb)
-      }
-      // Hierarchical: parent invalidates children
-      else if (subscribedTag.startsWith(tag + "/")) {
-        for (const cb of callbacks) callbacksToInvoke.add(cb)
-      }
-      // Reverse hierarchical: child invalidates parent listeners
-      else if (tag.startsWith(subscribedTag + "/")) {
-        for (const cb of callbacks) callbacksToInvoke.add(cb)
-      }
-    }
-  }
-  
-  // Invoke all unique callbacks
-  for (const callback of callbacksToInvoke) {
-    try {
-      callback()
-    } catch (error) {
-      console.error("[Reactivity] Callback error:", error)
-    }
-  }
-}
-```
+1. **`query()`**: Effect-based reactive query that automatically re-executes
+2. **`mutation()`**: Wraps effect and auto-invalidates after success
+3. **Hash-based keys**: Support for any hashable value, not just strings
+4. **Record keys**: `{ users: [1, 2, 3] }` syntax for fine-grained invalidation
 
-**Assessment:**
-- **Correct:** Uses Set to deduplicate callbacks (each callback called once max)
-- **Correct:** Error handling prevents one callback from breaking others
-- **Good:** O(n*m) complexity where n=invalidation tags, m=subscribed tags
-- **Issue:** Callbacks are invoked synchronously in the main thread
+## Integration Analysis
 
----
+### With React Hooks
 
-## 2. Hierarchical Invalidation Correctness
-
-### 2.1 Tag Format
-
-Tags follow a path-based format: `@rootTag/segment1/segment2/...`
-
-Examples:
-- `@api/users` - namespace
-- `@api/users/list` - specific procedure
-- `@api/users/get` - another procedure
-
-### 2.2 Invalidation Rules
-
-| Invalidate | Subscribed To | Result | Reason |
-|------------|---------------|--------|--------|
-| `@api/users/list` | `@api/users/list` | **INVALIDATED** | Exact match |
-| `@api/users` | `@api/users/list` | **INVALIDATED** | Parent invalidates children |
-| `@api/users/list` | `@api/users` | **INVALIDATED** | Child notifies parent |
-| `@api/users/list` | `@api/posts/list` | No effect | Different branches |
-| `@api/users/list` | `@api/user` | No effect | Not same hierarchy |
-
-### 2.3 Test Coverage
-
-The hierarchical logic is well-tested:
+**In `src/Client/react.ts`:**
 
 ```typescript
-// test/reactivity.test.ts:112-139
-
-it("supports hierarchical invalidation (parent invalidates children)", () => {
-  service.subscribe("@api/users/list", listCallback)
-  service.subscribe("@api/users/get", getCallback)
-  service.invalidate(["@api/users"])
-  expect(listCallback).toHaveBeenCalledTimes(1)
-  expect(getCallback).toHaveBeenCalledTimes(1)
-})
-
-it("supports reverse hierarchical (child invalidates parent listener)", () => {
-  service.subscribe("@api/users", usersCallback)
-  service.invalidate(["@api/users/list"])
-  expect(usersCallback).toHaveBeenCalledTimes(1)
-})
-```
-
-**Verdict:** Hierarchical invalidation is **CORRECT**.
-
----
-
-## 3. Memory Management Assessment
-
-### 3.1 Subscription Cleanup
-
-**Good:**
-- Unsubscribe function removes callback from Set
-- Empty Sets are deleted from Map (line 155-156)
-- No lingering references after unsubscribe
-
-**Potential Issues:**
-
-1. **No lifecycle management with Effect Scope:**
-   ```typescript
-   // Current: manual unsubscribe
-   const unsub = reactivity.subscribe(tag, callback)
-   // Must remember to call unsub()
-   
-   // Better: Effect.acquireRelease pattern
-   Effect.acquireRelease(
-     Effect.sync(() => reactivity.subscribe(tag, callback)),
-     (unsub) => Effect.sync(unsub)
-   )
-   ```
-
-2. **Closure retention:**
-   - If callbacks capture large objects, they persist until unsubscribe
-   - No timeout/TTL mechanism
-
-3. **WeakMap for callbackIds is good:**
-   - Doesn't prevent garbage collection of callbacks
-   - But `nextId` counter grows unbounded (minor)
-
-### 3.2 Memory Leak Scenarios
-
-| Scenario | Leak? | Reason |
-|----------|-------|--------|
-| Subscribe without unsubscribe | YES | Callback retained forever |
-| Component unmounts without cleanup | YES | React hooks not implemented |
-| Multiple subscriptions, one unsubscribe | NO | Other subscriptions unaffected |
-| Runtime shutdown | DEPENDS | No cleanup hook exists |
-
----
-
-## 4. Utility Functions
-
-### 4.1 pathsToTags
-
-```typescript
-// src/Reactivity/index.ts:279-283
-
-export const pathsToTags = (
-  rootTag: string,
-  paths: ReadonlyArray<string>
-): ReadonlyArray<string> =>
-  paths.map((path) => `${rootTag}/${path.replace(/\./g, "/")}`)
-```
-
-**Assessment:**
-- Converts dot-notation (`users.list`) to slash-notation (`@api/users/list`)
-- Simple string manipulation
-- **Correct** implementation
-
-### 4.2 shouldInvalidate
-
-```typescript
-// src/Reactivity/index.ts:291-305
-
-export const shouldInvalidate = (
-  subscribedTag: string,
-  invalidatedTag: string
-): boolean => {
-  if (subscribedTag === invalidatedTag) return true
-  if (subscribedTag.startsWith(invalidatedTag + "/")) return true
-  if (invalidatedTag.startsWith(subscribedTag + "/")) return true
-  return false
-}
-```
-
-**Assessment:**
-- Exported utility for external use
-- Same logic as internal `invalidate` method
-- **Note:** This function exists separately but the `invalidate` method doesn't use it (code duplication)
-
----
-
-## 5. Integration with Client
-
-### 5.1 ClientService Integration
-
-```typescript
-// src/Client/index.ts:186-192
-
-invalidate: (tags) =>
-  Effect.gen(function* () {
-    const reactivity = yield* Effect.serviceOption(Reactivity.Reactivity)
-    if (reactivity._tag === "Some") {
-      reactivity.value.invalidate(tags)
-    }
-  }),
-```
-
-**Critical Issue:** Reactivity is an **optional** service. If not provided, invalidation silently does nothing.
-
-### 5.2 Mutation Auto-Invalidation
-
-```typescript
-// src/Client/index.ts:644-665
-
-if (Procedure.isMutation(procedure)) {
-  const mutation = procedure as Procedure.Mutation<any, any, any, any>
-  const invalidatePaths = mutation.invalidates
-  
-  const rootTag = tag.split("/")[0]
-  
-  const createMutationEffect = (payload: unknown) =>
-    Effect.gen(function* () {
-      const service = yield* ClientServiceTag
-      const result = yield* service.send(tag, payload, successSchema, errorSchema)
-      
-      if (invalidatePaths.length > 0) {
-        const tags = Reactivity.pathsToTags(rootTag, invalidatePaths)
-        yield* service.invalidate(tags)
-      }
-      
-      return result
-    })
-}
-```
-
-**Assessment:**
-- Mutations automatically invalidate after success
-- Uses `pathsToTags` to convert procedure paths to tags
-- **Issue:** Invalidation happens even if nothing is subscribed
-
-### 5.3 BoundClient Invalidation
-
-```typescript
-// src/Client/index.ts:583-590
-
-invalidate: (paths: readonly string[]) => {
-  const tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
-  runtime.runPromise(
-    Effect.gen(function* () {
-      const service = yield* ClientServiceTag
-      yield* service.invalidate(tags)
-    })
-  )
-},
-```
-
-**Issue:** Uses `runPromise` but doesn't await it - invalidation is fire-and-forget.
-
-### 5.4 Unbound Client Warning
-
-```typescript
-// src/Client/index.ts:566-572
-
-invalidate: (paths: readonly string[]) => {
-  const tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
-  console.warn("invalidate() on unbound client requires ReactivityService in scope...")
-},
-```
-
-**Issue:** This method does nothing except warn - the tags are computed but not used.
-
----
-
-## 6. Race Conditions Analysis
-
-### 6.1 Potential Race Conditions
-
-1. **Concurrent invalidation + unsubscribe:**
-   ```
-   Thread 1: invalidate(["@api/users"])
-     - Collects callbacks into Set
-     - About to invoke callback
-   Thread 2: unsubscribe() called
-     - Removes callback from subscriptions Map
-   Thread 1: Invokes callback anyway (captured in Set)
-   ```
-   **Impact:** LOW - callback invoked once after unsubscribe (harmless)
-
-2. **Concurrent subscriptions:**
-   ```
-   Thread 1: subscribe("@api/users", cb1)
-     - Creates new Set for tag
-   Thread 2: subscribe("@api/users", cb2)
-     - Gets existing Set
-   Both modify same Set concurrently
-   ```
-   **Impact:** LOW in JavaScript (single-threaded), but could be issue with web workers
-
-3. **Mutation racing with subscription:**
-   - Query subscribes
-   - Mutation starts
-   - Query unsubscribes
-   - Mutation completes, invalidates
-   - Nothing to invalidate
-   **Impact:** Data may be stale (no cache to invalidate anyway)
-
-### 6.2 Thread Safety
-
-JavaScript is single-threaded, so most race conditions don't apply. However:
-- Effect fibers could interleave
-- The synchronous `invalidate` call blocks the fiber
-
----
-
-## 7. What's Actually Missing: THE CACHE
-
-### 7.1 Current State
-
-The system has:
-- Subscription management
-- Hierarchical tag matching
-- Invalidation callbacks
-
-The system **does NOT have**:
-- Any actual cache
-- Stored query results
-- Stale data detection
-- Background refetching
-
-### 7.2 How It Should Work
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    DESIRED ARCHITECTURE                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  useQuery("@api/users/list")                                │
-│       │                                                      │
-│       ▼                                                      │
-│  ┌─────────────┐    ┌─────────────┐    ┌──────────────┐    │
-│  │   Atom      │───>│   Cache     │───>│  Reactivity  │    │
-│  │  (React)    │    │  (Storage)  │    │  (Pub/Sub)   │    │
-│  └─────────────┘    └─────────────┘    └──────────────┘    │
-│       │                   │                   │             │
-│       │                   │                   │             │
-│       ▼                   ▼                   ▼             │
-│  Re-renders when     Stores query      Triggers refetch    │
-│  atom changes        results           on invalidation     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 7.3 Current Reality
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    CURRENT ARCHITECTURE                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  useQuery("@api/users/list")  -->  throws Error!            │
-│                                                              │
-│  Reactivity exists but nothing subscribes to it             │
-│  No cache exists                                             │
-│  No atoms exist                                              │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 8. Integration with @effect-atom/atom
-
-### 8.1 Dependency Status
-
-```json
-// package.json
-{
-  "peerDependencies": {
-    "@effect-atom/atom": "^0.5.0",
-    "@effect-atom/atom-react": "^0.5.0"
-  }
-}
-```
-
-**Status:** Declared but **NOT USED**.
-
-### 8.2 Current Usage
-
-```typescript
-// src/Result/index.ts - ONLY place @effect-atom is imported
-export * from "@effect-atom/atom/Result"
-```
-
-This only re-exports the `Result` type for the `QueryResult` interface. No actual atom functionality is used.
-
-### 8.3 What Should Exist
-
-```typescript
-// Hypothetical implementation
-import { Atom } from "@effect-atom/atom"
-
-const createQueryAtom = <S, E>(
-  tag: string,
-  fetcher: () => Effect.Effect<S, E>,
-  reactivity: ReactivityService
-): Atom<Result<S, E>> => {
-  const atom = Atom.of(Result.initial<S, E>())
-  
-  // Subscribe to invalidation
-  reactivity.subscribe(tag, () => {
-    // Refetch and update atom
-    runFork(
-      fetcher().pipe(
-        Effect.map(Result.success),
-        Effect.catchAll((e) => Effect.succeed(Result.failure(e))),
-        Effect.flatMap((result) => atom.set(result))
-      )
-    )
+// Provider creates separate Reactivity instance
+const [contextValue] = useState<ClientContextValue>(() => ({
+  runtime: ManagedRuntime.make(fullLayer),
+  reactivity: Reactivity.make(),  // Separate instance!
+  rootTag: router.tag,
+}))
+
+// useQuery subscribes to tag
+useEffect(() => {
+  const unsubscribe = ctx.reactivity.subscribe(tag, () => {
+    fetchData()  // Re-fetch on invalidation
   })
-  
-  return atom
+  return unsubscribe
+}, [tag, ctx.reactivity, fetchData])
+
+// useMutation invalidates after success
+if (invalidatePaths.length > 0) {
+  const tags = Reactivity.pathsToTags(ctx.rootTag, invalidatePaths)
+  ctx.reactivity.invalidate(tags)
 }
 ```
 
-**This does not exist.**
+### With Effect Atom
 
----
+**Currently: NO INTEGRATION**
 
-## 9. Summary of Issues
+Our code imports `@effect-atom/atom/Result` for the Result type only:
+```typescript
+import * as Result from "@effect-atom/atom/Result"
+```
 
-### Critical Issues
+Effect Atom uses `@effect/experimental/Reactivity`:
+```typescript
+// From effect-atom's Atom.ts
+import * as Reactivity from "@effect/experimental/Reactivity"
 
-| Issue | Severity | Impact |
-|-------|----------|--------|
-| No actual cache | **CRITICAL** | Invalidation has nothing to invalidate |
-| No @effect-atom integration | **CRITICAL** | No reactive state for React |
-| React hooks throw errors | **CRITICAL** | React integration non-functional |
-| Optional Reactivity service | HIGH | Invalidation silently fails if not provided |
+factory.withReactivity = (keys: ReadonlyArray<unknown>) => 
+  <A extends Atom<any>>(atom: A): A => { ... }
+```
 
-### Design Issues
+**The two Reactivity systems are incompatible.**
 
-| Issue | Severity | Impact |
-|-------|----------|--------|
-| No Effect.acquireRelease for subscriptions | MEDIUM | Manual cleanup required |
-| Synchronous callbacks | MEDIUM | Blocks fiber during invalidation |
-| Fire-and-forget invalidation in BoundClient | MEDIUM | Errors swallowed |
-| Duplicated shouldInvalidate logic | LOW | Code maintainability |
+## Issues
 
-### Testing Gaps
+### CRITICAL
 
-| Gap | Priority |
-|-----|----------|
-| No integration tests with actual caching | HIGH |
-| No tests for concurrent subscribe/invalidate | MEDIUM |
-| No tests for memory cleanup | MEDIUM |
+1. **Duplicate Reactivity Systems** - Severity: **CRITICAL**
+   - We define our own `Reactivity` service
+   - Effect Atom uses `@effect/experimental/Reactivity`
+   - Two incompatible invalidation systems
+   - Atoms won't respond to our invalidations
 
----
+2. **No Shared Cache** - Severity: **CRITICAL**
+   - Each `useQuery` is independent
+   - Duplicate requests for same data
+   - No request deduplication
+   - Memory waste, network waste
 
-## 10. Files Analyzed
+### HIGH
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/Reactivity/index.ts` | 305 | Core reactivity service |
-| `test/reactivity.test.ts` | 288 | Unit tests |
-| `src/Client/index.ts` | 760 | Client integration |
-| `src/Router/index.ts` | 420 | tagsToInvalidate utility |
-| `src/Result/index.ts` | 10 | Only @effect-atom usage |
+3. **No Stale-While-Revalidate** - Severity: **HIGH**
+   - Options exist (`staleTime` in QueryOptions)
+   - But no implementation — always re-fetches
+   - Causes unnecessary loading states
 
----
+4. **Provider Creates Separate Reactivity** - Severity: **HIGH**
+   - `react.ts:89`: `const reactivity = Reactivity.make()`
+   - `react.ts:84-86`: Also provides `Reactivity.ReactivityLive` to Layer
+   - Two separate instances! Layer's instance unused.
 
-## 11. Recommendations
+### MEDIUM
 
-### Immediate (P0)
+5. **String-Only Keys** - Severity: **MEDIUM**
+   - Can't invalidate by ID: `{ users: [userId] }`
+   - Must invalidate entire tag: `["@api/users"]`
+   - Less granular than Effect's Reactivity
 
-1. **Implement actual caching with @effect-atom:**
-   - Create query atoms that store results
-   - Subscribe atoms to Reactivity for invalidation
-   - Integrate with React hooks
+6. **No Optimistic Updates** - Severity: **MEDIUM**
+   - Mutations wait for server response
+   - No way to update UI optimistically
+   - Worse UX for slow networks
 
-2. **Make Reactivity a required service:**
-   - Remove `Effect.serviceOption` pattern
-   - Provide ReactivityLive in ClientServiceLive layer
+7. **Console.error in Production** - Severity: **MEDIUM**
+   - Line 197: `console.error("[Reactivity] Callback error:", error)`
+   - Should use proper error channel
 
-### Short-term (P1)
+### LOW
 
-3. **Add Effect.acquireRelease for subscriptions:**
-   ```typescript
-   export const subscribeScoped = (tag: string, callback: InvalidationCallback) =>
-     Effect.acquireRelease(
-       subscribe(tag, callback),
-       (unsub) => Effect.sync(unsub)
-     )
-   ```
+8. **Unused Effect Imports** - Severity: **LOW**
+   - Lines 34-38: Import `Ref`, `HashMap`, `HashSet`, `Option`
+   - None are used in implementation
 
-4. **Make invalidation async-safe:**
-   - Consider Effect.forkDaemon for callbacks
-   - Or use Effect.forEach with concurrency control
+9. **Debug-Only API Exposed** - Severity: **LOW**
+   - `getSubscribedTags()` is debug-only but in public API
 
-### Long-term (P2)
+## Architecture Recommendation
 
-5. **Add stale-while-revalidate support**
-6. **Add cache TTL/expiration**
-7. **Add optimistic update rollback on failure**
+### Option A: Use @effect/experimental/Reactivity
 
----
+Replace our `Reactivity` with Effect's official one:
+```typescript
+import * as Reactivity from "@effect/experimental/Reactivity"
 
-## Conclusion
+// Mutations auto-invalidate
+const createUser = Reactivity.mutation(
+  ["users"],
+  Effect.gen(function* () { ... })
+)
 
-The Reactivity module is a **well-designed pub/sub system** with correct hierarchical invalidation logic. However, it exists in isolation - there's no cache to invalidate and no integration with @effect-atom for reactive state management.
+// Queries auto-refresh
+const users = Reactivity.stream(
+  ["users"],
+  Effect.gen(function* () { ... })
+)
+```
 
-**The module is architecturally sound but operationally useless without a caching layer.**
+**Pros:**
+- Compatible with Effect Atom
+- Better primitives (`query`, `mutation`, `stream`)
+- Maintained by Effect team
+
+**Cons:**
+- API change for users
+- Need to rework React integration
+
+### Option B: Add Real Cache Layer
+
+Keep our Reactivity but add cache:
+```typescript
+interface QueryCache {
+  get<A>(key: string): Option<CacheEntry<A>>
+  set<A>(key: string, value: A, ttl?: Duration): void
+  invalidate(tags: ReadonlyArray<string>): void
+}
+```
+
+**Pros:**
+- Deduplication
+- Stale-while-revalidate
+- Better performance
+
+**Cons:**
+- Still incompatible with Effect Atom
+- Maintenance burden
+
+### Recommendation
+
+**Use Option A** — adopt `@effect/experimental/Reactivity`:
+1. Compatibility with Effect ecosystem
+2. Better primitives
+3. Less code to maintain
+4. Future-proof (Effect team maintains it)
+
+## Summary
+
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| Cache | **MISSING** | No cache exists anywhere |
+| Invalidation | Working | Pub/sub pattern functional |
+| Effect Atom | **INCOMPATIBLE** | Different Reactivity systems |
+| React Integration | Partial | Works but no cache benefits |
+| Performance | Poor | Every query re-fetches |
+
+The current Reactivity module is a minimal pub/sub system. For a production-ready library, we need:
+1. Real cache with TTL/stale-while-revalidate
+2. Compatibility with Effect Atom's Reactivity
+3. Request deduplication
+4. Optimistic updates

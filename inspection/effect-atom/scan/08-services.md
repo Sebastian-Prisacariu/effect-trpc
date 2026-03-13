@@ -1,55 +1,91 @@
 # H8: Effect Services Pattern Analysis
 
-## Summary
+## Overview
 
-Effect Atom uses **one core Context.Tag service** (`AtomRegistry`) and a sophisticated **Layer composition pattern** via `AtomRuntime`. This is a clean, modern Effect service pattern that we should follow.
+Effect Atom uses `Context.Tag` properly and follows idiomatic Effect patterns for service architecture. The library demonstrates sophisticated usage of Effect's dependency injection system while maintaining clean abstractions.
 
-## Service Definitions
+## Context.Tag Usage
 
-### Primary Service: AtomRegistry
+### Core Service Tags
 
+#### 1. AtomRegistry (Registry.ts:74-77)
 ```typescript
-// Registry.ts:74-77
 export class AtomRegistry extends Context.Tag("@effect/atom/Registry/CurrentRegistry")<
   AtomRegistry,
   Registry
 >() {}
 ```
 
-Key characteristics:
-- Uses Effect's `Context.Tag` class pattern (not `Context.Tag()` function)
-- Service identifier: `"@effect/atom/Registry/CurrentRegistry"`
-- The interface (`Registry`) is separate from the tag
+**Assessment:** ✅ **Proper Usage**
+- Uses class-based Tag pattern (recommended for TypeScript)
+- Clear identifier string following namespace convention
+- Clean separation: `AtomRegistry` (tag) vs `Registry` (interface)
 
-### Registry Interface
-
+#### 2. Reactivity Service (from @effect/experimental)
 ```typescript
-interface Registry {
-  readonly [TypeId]: TypeId
-  readonly getNodes: () => ReadonlyMap<Atom.Atom<any> | string, Node<any>>
-  readonly get: <A>(atom: Atom.Atom<A>) => A
-  readonly mount: <A>(atom: Atom.Atom<A>) => () => void
-  readonly refresh: <A>(atom: Atom.Atom<A>) => void
-  readonly set: <R, W>(atom: Atom.Writable<R, W>, value: W) => void
-  readonly setSerializable: (key: string, encoded: unknown) => void
-  readonly modify: <R, W, A>(atom: Atom.Writable<R, W>, f: (_: R) => [A, W]) => A
-  readonly update: <R, W>(atom: Atom.Writable<R, W>, f: (_: R) => W) => void
-  readonly subscribe: <A>(atom: Atom.Atom<A>, f: (_: A) => void, options?: {...}) => () => void
-  readonly reset: () => void
-  readonly dispose: () => void
+// Used via import from @effect/experimental
+import * as Reactivity from "@effect/experimental/Reactivity"
+
+// The Reactivity.Reactivity tag is defined in effect/experimental:
+export class Reactivity extends Context.Tag("@effect/experimental/Reactivity")<
+  Reactivity,
+  Reactivity.Service
+>() {}
+```
+
+**Assessment:** ✅ **Uses Existing Effect Service**
+- Effect Atom doesn't reinvent reactivity; it imports from `@effect/experimental`
+- This is the correct approach: reuse existing Effect ecosystem services
+
+#### 3. AtomRpcClient (AtomRpc.ts:32-38)
+```typescript
+export interface AtomRpcClient<Self, Id extends string, Rpcs extends Rpc.Any, E>
+  extends Context.Tag<Self, RpcClient.RpcClient.Flat<Rpcs, RpcClientError>>
+{
+  new(_: never): Context.TagClassShape<Id, RpcClient.RpcClient.Flat<Rpcs, RpcClientError>>
+  readonly layer: Layer.Layer<Self, E>
+  readonly runtime: Atom.AtomRuntime<Self, E>
+  // ...
+}
+
+// Factory function at line 105-209:
+export const Tag = <Self>() =>
+<Id extends string, Rpcs extends Rpc.Any, ER, RM>(
+  id: Id,
+  options: { ... }
+): AtomRpcClient<Self, Id, Rpcs, ER> => {
+  const self: Mutable<AtomRpcClient<Self, Id, Rpcs, ER>> = Context.Tag(id)<
+    Self,
+    RpcClient.RpcClient.Flat<Rpcs, RpcClientError>
+  >() as any
+  // ...
 }
 ```
 
-## Layer Composition
+**Assessment:** ✅ **Advanced Factory Pattern**
+- Creates typed service tags dynamically
+- Augments tags with `layer` and `runtime` properties
+- Enables type-safe RPC client construction
 
-### Basic Layer
+#### 4. AtomHttpApiClient (AtomHttpApi.ts:32-37)
+```typescript
+export interface AtomHttpApiClient<Self, Id extends string, Groups, ApiE, E>
+  extends Context.Tag<Self, Simplify<HttpApiClient.Client<Groups, ApiE, never>>>
+
+// Similar factory pattern to AtomRpcClient
+```
+
+## Layer Patterns
+
+### Registry Layer (Registry.ts:83-107)
 
 ```typescript
-// Registry.ts:107
-export const layer: Layer.Layer<AtomRegistry> = layerOptions()
-
-// Registry.ts:83-101
-export const layerOptions = (options?: {...}): Layer.Layer<AtomRegistry> =>
+export const layerOptions = (options?: {
+  readonly initialValues?: Iterable<readonly [Atom.Atom<any>, any]>
+  readonly scheduleTask?: ((f: () => void) => void)
+  readonly timeoutResolution?: number
+  readonly defaultIdleTTL?: number
+}): Layer.Layer<AtomRegistry> =>
   Layer.scoped(
     AtomRegistry,
     Effect.gen(function*() {
@@ -63,240 +99,219 @@ export const layerOptions = (options?: {...}): Layer.Layer<AtomRegistry> =>
       return registry
     })
   )
+
+export const layer: Layer.Layer<Registry.AtomRegistry> = layerOptions()
 ```
 
-### AtomRuntime - Layer Factory Pattern
+**Key Patterns:**
+1. **`Layer.scoped`** - Proper resource management
+2. **Scope finalization** - Registry disposal on scope close
+3. **FiberRef integration** - Uses Effect's scheduler system
+4. **Options pattern** - Configurable layer factory
 
-This is the most interesting pattern. `AtomRuntime` creates atoms that build Effect services:
+### AtomRpc Layer (AtomRpc.ts:129-136)
 
 ```typescript
-// Atom.ts:652-706
+self.layer = Layer.scoped(
+  self,
+  options.makeEffect ??
+    RpcClient.make(options.group, {
+      ...options,
+      flatten: true
+    }) as Effect.Effect<RpcClient.RpcClient.Flat<Rpcs, RpcClientError>, never, RM>
+).pipe(Layer.provide(options.protocol))
+```
+
+**Key Patterns:**
+1. **Layer composition** via `Layer.provide`
+2. **Protocol injection** - Protocol layer provides required dependencies
+3. **Self-contained** - Each client tag has its own layer
+
+### Runtime Factory (Atom.ts:652-705)
+
+```typescript
 export const context: (options: {
   readonly memoMap: Layer.MemoMap
 }) => RuntimeFactory = (options) => {
   let globalLayer: Layer.Layer<any, any, AtomRegistry> = Reactivity.layer
   
   function factory<E, R>(
-    create: Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity> | 
-            ((get: Context) => Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>)
+    create:
+      | Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>
+      | ((get: Context) => Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>)
   ): AtomRuntime<R, E> {
-    const self = Object.create(RuntimeProto)
     // ...
-    
-    const layerAtom = keepAlive(
-      typeof create === "function"
-        ? readable((get) => Layer.provideMerge(create(get), globalLayer))
-        : readable(() => Layer.provideMerge(create, globalLayer))
-    )
-    self.layer = layerAtom
-
     self.read = function read(get: Context) {
       const layer = get(layerAtom)
       const build = Effect.flatMap(
         Effect.flatMap(Effect.scope, (scope) => 
-          Layer.buildWithMemoMap(layer, options.memoMap, scope)
-        ),
+          Layer.buildWithMemoMap(layer, options.memoMap, scope)),
         (context) => Effect.provide(Effect.runtime<R>(), context)
       )
       return effect(get, build, { uninterruptible: true })
     }
-
     return self
   }
-  // ...
+  
+  factory.memoMap = options.memoMap
+  factory.addGlobalLayer = (layer) => {
+    globalLayer = Layer.provideMerge(globalLayer, Layer.provide(layer, Reactivity.layer))
+  }
+  
+  // Reactivity integration
+  const reactivityAtom = make(
+    Effect.scopeWith((scope) => 
+      Layer.buildWithMemoMap(Reactivity.layer, options.memoMap, scope)).pipe(
+      Effect.map(EffectContext.get(Reactivity.Reactivity))
+    )
+  )
+  
+  factory.withReactivity = (keys) => (atom) =>
+    transform(atom, (get) => {
+      const reactivity = Result.getOrThrow(get(reactivityAtom))
+      get.addFinalizer(reactivity.unsafeRegister(keys, () => {
+        get.refresh(atom)
+      }))
+      // ...
+    })
+  
+  return factory
 }
 ```
 
-### Default Runtime (Global Singleton)
+**Advanced Patterns:**
+1. **MemoMap usage** - Shared layer memoization across atoms
+2. **Global layer merging** - Dynamic layer composition
+3. **Reactivity integration** - Atom refresh on invalidation
+4. **Runtime building** - Creates Effect runtimes within atoms
+
+## Service Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      User Application                        │
+├─────────────────────────────────────────────────────────────┤
+│  AtomRpcClient.Tag()    AtomHttpApiClient.Tag()             │
+│       │                         │                            │
+│       ▼                         ▼                            │
+│  ┌─────────┐              ┌─────────┐                       │
+│  │ .layer  │              │ .layer  │  (Self-contained)     │
+│  └────┬────┘              └────┬────┘                       │
+│       │                        │                             │
+├───────┴────────────────────────┴─────────────────────────────┤
+│                    AtomRuntime                               │
+│   ┌──────────────────────────────────────────────────┐      │
+│   │  .atom()  .fn()  .pull()  .subscriptionRef()     │      │
+│   │  .withReactivity()                               │      │
+│   └──────────────────────────────────────────────────┘      │
+│                          │                                   │
+│                          ▼                                   │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────────┐    ┌──────────────────────────┐       │
+│  │   AtomRegistry   │◄───│  Reactivity.Reactivity   │       │
+│  │  (Context.Tag)   │    │  (from @effect/exp)      │       │
+│  └────────┬─────────┘    └──────────────────────────┘       │
+│           │                                                  │
+│           ▼                                                  │
+│  ┌──────────────────┐                                       │
+│  │    Registry      │  (Implementation)                     │
+│  │  - nodes Map     │                                       │
+│  │  - subscribe()   │                                       │
+│  │  - get/set/etc   │                                       │
+│  └──────────────────┘                                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Comparison: Effect Atom vs Our Approach
+
+### What Effect Atom Does Well
+
+| Pattern | Effect Atom | Our Potential Approach |
+|---------|------------|------------------------|
+| **Reactivity** | Uses `@effect/experimental/Reactivity` | Should also use this |
+| **Layer Composition** | `Layer.provide`, `Layer.provideMerge` | Same |
+| **Resource Management** | `Layer.scoped` + finalizers | Same |
+| **Service Identity** | Class-based `Context.Tag` | Same |
+| **MemoMap Sharing** | Global `defaultMemoMap` | Should adopt |
+
+### Key Insight: Effect Atom Doesn't Create Its Own Reactivity
+
+Effect Atom imports `Reactivity` from `@effect/experimental`:
 
 ```typescript
-// Atom.ts:712-724
+import * as Reactivity from "@effect/experimental/Reactivity"
+```
+
+The `Reactivity` service is an **existing Effect service** that provides:
+- `mutation(keys, effect)` - Invalidate keys after effect completes
+- `query(keys, effect)` - Re-run effect when keys invalidate
+- `stream(keys, effect)` - Stream of values, re-emitting on invalidation
+- `unsafeRegister(keys, handler)` - Register invalidation handlers
+
+**Lesson for effect-trpc:** We should NOT create our own Reactivity service. Instead, we should:
+1. Use `@effect/experimental/Reactivity` for cache invalidation
+2. Integrate it similarly to how Effect Atom does
+
+## Layer Pattern Summary
+
+### 1. Scoped Layers with Finalizers
+```typescript
+Layer.scoped(Tag, Effect.gen(function*() {
+  const scope = yield* Effect.scope
+  const resource = createResource()
+  yield* Scope.addFinalizer(scope, Effect.sync(() => resource.dispose()))
+  return resource
+}))
+```
+
+### 2. Layer Factories with Options
+```typescript
+export const layerOptions = (opts?: Options): Layer.Layer<Service> =>
+  Layer.scoped(ServiceTag, make(opts))
+
+export const layer: Layer.Layer<Service> = layerOptions()
+```
+
+### 3. Dynamic Tag Creation (for RPC/HTTP Clients)
+```typescript
+export const Tag = <Self>() => <Id extends string>(...) => {
+  const self = Context.Tag(id)<Self, ServiceType>() as Mutable<EnhancedTag>
+  self.layer = Layer.scoped(self, buildClient())
+  return self
+}
+```
+
+### 4. MemoMap for Layer Deduplication
+```typescript
 export const defaultMemoMap: Layer.MemoMap = globalValue(
   "@effect-atom/atom/Atom/defaultMemoMap",
   () => Effect.runSync(Layer.makeMemoMap)
 )
 
-export const runtime: RuntimeFactory = globalValue(
-  "@effect-atom/atom/Atom/defaultContext",
-  () => context({ memoMap: defaultMemoMap })
-)
+// Use with Layer.buildWithMemoMap for shared layer instances
 ```
 
-## Effect Integration Patterns
+## Recommendations for effect-trpc
 
-### 1. Atoms Can Require Services
+1. **DO NOT create a custom Reactivity service** - Use `@effect/experimental/Reactivity`
 
-Atoms can declare Effect service dependencies:
+2. **Follow the Registry pattern** - Create a similar scoped registry for procedure caching
 
-```typescript
-// Effect/Stream atoms can require AtomRegistry
-Atom.make(Effect.Effect<A, E, Scope.Scope | AtomRegistry>)
+3. **Use RuntimeFactory pattern** - For creating typed client runtimes with proper layer integration
 
-// Runtime atoms can require additional services
-const MyRuntime = Atom.runtime(MyLayer)  // Layer<MyService>
-MyRuntime.atom(Effect.Effect<A, E, Scope.Scope | MyService | AtomRegistry>)
-```
+4. **Adopt MemoMap sharing** - Ensure layers are memoized across the application
 
-### 2. Service Context Threading
+5. **Layer composition via provide** - Protocol/transport as provided layers
 
-The registry is provided to atom computations:
+## Conclusion
 
-```typescript
-// Atom.ts:495-502
-const contextMap = new Map(runtime.context.unsafeMap)
-contextMap.set(Scope.Scope.key, scope)
-contextMap.set(AtomRegistry.key, ctx.registry)
-const scopedRuntime = Runtime.make({
-  context: EffectContext.unsafeMake(contextMap),
-  fiberRefs: runtime.fiberRefs,
-  runtimeFlags: runtime.runtimeFlags
-})
-```
+Effect Atom demonstrates **exemplary** usage of Effect's service patterns:
+- Clean `Context.Tag` usage with class syntax
+- Proper `Layer.scoped` resource management
+- Smart reuse of `@effect/experimental/Reactivity` instead of reinventing
+- Sophisticated runtime factory patterns for typed client creation
 
-### 3. AtomRpc Integration
-
-`AtomRpc` creates service tags that are also atoms:
-
-```typescript
-// AtomRpc.ts:104-138
-export const Tag = <Self>() => <...>(id: Id, options: {...}) => {
-  const self: AtomRpcClient<...> = Context.Tag(id)() as any
-
-  self.layer = Layer.scoped(
-    self,
-    options.makeEffect ?? RpcClient.make(options.group, {...})
-  ).pipe(Layer.provide(options.protocol))
-  
-  const runtimeFactory = options.runtime ?? Atom.runtime
-  self.runtime = runtimeFactory(self.layer)
-  // ...
-}
-```
-
-## React Integration
-
-### Context Provider Pattern
-
-React uses its own context, not Effect Context:
-
-```typescript
-// RegistryContext.ts:22-25
-export const RegistryContext = React.createContext<Registry.Registry>(
-  Registry.make({
-    scheduleTask,
-    defaultIdleTTL: 400
-  })
-)
-```
-
-### Hooks Access Registry
-
-```typescript
-// Hooks.ts:91
-export const useAtomValue = <A>(atom: Atom.Atom<A>): A => {
-  const registry = React.useContext(RegistryContext)
-  return useStore(registry, atom)
-}
-```
-
-## Patterns We Should Follow
-
-### 1. Context.Tag Class Pattern
-
-```typescript
-// Recommended: Class-based tag
-export class TrpcClient extends Context.Tag("@effect-trpc/Client")<
-  TrpcClient,
-  TrpcClientImpl
->() {}
-
-// Not: Function-based tag  
-const TrpcClient = Context.Tag<TrpcClientImpl>("@effect-trpc/Client")
-```
-
-### 2. Separate Interface from Tag
-
-```typescript
-interface TrpcClientImpl {
-  readonly query: <T>(...) => Effect.Effect<T, TrpcError>
-  readonly mutation: <T>(...) => Effect.Effect<T, TrpcError>
-}
-
-export class TrpcClient extends Context.Tag("@effect-trpc/Client")<
-  TrpcClient,
-  TrpcClientImpl
->() {}
-```
-
-### 3. Layer.scoped for Resources
-
-```typescript
-export const layer = (config: TrpcConfig): Layer.Layer<TrpcClient> =>
-  Layer.scoped(
-    TrpcClient,
-    Effect.gen(function*() {
-      const scope = yield* Effect.scope
-      const client = createClient(config)
-      yield* Scope.addFinalizer(scope, Effect.sync(() => client.close()))
-      return client
-    })
-  )
-```
-
-### 4. Runtime Factory for Service Atoms
-
-```typescript
-// Create runtime from layer
-const clientRuntime = Atom.runtime(TrpcClient.layer(config))
-
-// Create atoms that use the service
-const userAtom = clientRuntime.atom(
-  Effect.flatMap(TrpcClient, (client) => client.query("user.get"))
-)
-```
-
-### 5. React Provider Structure
-
-```typescript
-// TrpcProvider.tsx
-export const TrpcRegistryContext = React.createContext<Registry.Registry>(
-  Registry.make({ scheduleTask, defaultIdleTTL: 400 })
-)
-
-export const TrpcProvider = ({ config, children }) => {
-  const registry = React.useMemo(() => Registry.make({...}), [])
-  return (
-    <TrpcRegistryContext.Provider value={registry}>
-      {children}
-    </TrpcRegistryContext.Provider>
-  )
-}
-```
-
-## Key Insights
-
-1. **Single core service** - AtomRegistry is the only Effect service needed for the core library
-2. **Layer composition** - Additional services are composed via AtomRuntime and Layer.provideMerge
-3. **MemoMap sharing** - Layers are memoized across atoms using a shared MemoMap
-4. **React-Effect bridge** - React.Context holds the Registry, not Effect.Context
-5. **Scoped resources** - Layers use Layer.scoped with finalizers for cleanup
-6. **Global singletons** - Default runtime/memoMap use Effect's globalValue
-
-## Recommended Service Structure for effect-trpc
-
-```
-@effect-trpc/core
-  - TrpcClient (Context.Tag) - the Effect service
-  - layer(config) - Layer.Layer<TrpcClient>
-
-@effect-trpc/atom  
-  - TrpcRuntime = Atom.runtime(TrpcClient.layer) - builds runtime from layer
-  - query/mutation atoms via TrpcRuntime.atom/TrpcRuntime.fn
-
-@effect-trpc/react
-  - TrpcRegistryContext (React.Context)
-  - TrpcProvider (uses Registry.make)
-  - Hooks (useQuery, useMutation) access registry via useContext
-```
-
-This follows the exact same pattern as @effect-atom/atom + @effect-atom/atom-react.
+This validates that our effect-trpc implementation should:
+1. Use existing Effect services where available
+2. Follow the same Layer patterns for resource lifecycle
+3. Create service tags with factory functions when dynamic typing is needed

@@ -1,160 +1,188 @@
-# Documentation vs Implementation Gaps
+# Documentation vs Implementation Analysis
 
 ## Executive Summary
 
-This analysis compares the documented API against the actual implementation. The codebase has **extensive aspirational documentation** describing a complete tRPC-like library, but the implementation is **significantly incomplete**. Most React features, query options, SSR patterns, and advanced features documented are **not implemented**.
+**Documentation Accuracy Estimate: ~55-60%**
+
+The documentation is aspirational - it describes the desired API rather than the current implementation. Many documented features either don't exist, work differently than described, or have incomplete implementations.
 
 ---
 
-## 1. Documented but UNIMPLEMENTED Features
+## Features Documented That WORK
 
-### 1.1 React Hooks (HIGH PRIORITY)
+### 1. Core Module Structure
+- `Procedure.query()`, `Procedure.mutation()`, `Procedure.stream()` - All implemented
+- `Router.make()` with nested definitions - Works as documented
+- `Client.make()` returns typed proxy with correct structure
+- `Transport.http()` and `Transport.mock()` - Both implemented
+- `Server.make()` with handlers - Works as documented
 
-**Documented in:** `docs/query-options.md`, `docs/pagination.md`, `docs/cancellation.md`, `examples/advanced/suspense.md`
+### 2. Basic Type System
+- Procedure payload/success/error schema extraction - Works
+- Router path inference (`Router.Paths<D>`) - Works
+- `Router.tagsToInvalidate()` for hierarchical invalidation - Works
+- Auto-derived tags from router path (e.g., `@api/users/list`) - Works
 
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `useQuery()` | Returns `{ result, isLoading, isError, data, error, refetch }` | **STUB** - throws "requires React" |
-| `useMutation()` | Returns `{ mutate, mutateAsync, isLoading, data, error, reset }` | **STUB** - throws "requires React" |
-| `useStream()` | Returns `{ data, latestValue, isConnected, error, stop, restart }` | **STUB** - throws "requires React" |
-| `useSuspenseQuery()` | Returns data directly, suspends while loading | **NOT IMPLEMENTED** |
-| `useInfiniteQuery()` | Pagination support with `fetchNextPage`, `hasNextPage` | **NOT IMPLEMENTED** |
-| `useRefresh()` | Manual refresh hook | **NOT IMPLEMENTED** |
+### 3. Transport Layer (TRANSPORT-SPEC.md)
+- `Transport.Transport` tag - Correctly implemented
+- `Transport.http(url)` - Works but batching is NOT implemented
+- `Transport.mock<R>(handlers)` - Works with type-safe handlers
+- `Transport.loopback(server)` - Implemented for E2E testing
+- Request/Response envelope schemas (Success, Failure, StreamChunk, StreamEnd) - All correct
 
-**Evidence from `src/Client/index.ts:720-748`:**
+### 4. Server Module
+- `Server.make(router, handlers)` - Works
+- `Server.toHttpHandler()` - Works
+- `Server.toFetchHandler()` - Works
+- `Server.toNextApiHandler()` - Works
+- Middleware support at server/procedure level - Implemented
+
+### 5. Reactivity System
+- `Reactivity.subscribe(tag, callback)` - Works
+- `Reactivity.invalidate(tags)` - Works with hierarchical matching
+- `pathsToTags()` utility - Works
+
+### 6. Basic React Integration
+- `api.Provider` component - Implemented
+- `useQuery()` hook - Works (basic version)
+- `useMutation()` hook - Works (basic version)
+- `useStream()` hook - Implemented but incomplete
+- Automatic refetch on invalidation - Works
+
+---
+
+## Features Documented That DON'T WORK
+
+### 1. authentication.md - MOSTLY NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `Middleware.Tag<Auth>()("Auth", {...})` class syntax | **NOT IMPLEMENTED** - Middleware.Tag() takes 2 args not 3 |
+| `Middleware.layerClient()` | **NOT IMPLEMENTED** - doesn't exist |
+| `requiredForClient: true` option | **NOT IMPLEMENTED** |
+| Provider `headers` prop | **NOT IMPLEMENTED** |
+| Per-call headers `runPromise({ headers: {...} })` | **NOT IMPLEMENTED** |
+| `Auth.of()` method | **NOT IMPLEMENTED** |
+
+**What Works:** Basic `Middleware.Tag()` and `Middleware.implement()` for server-side middleware only.
+
+### 2. cancellation.md - MOSTLY NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `query.cancel()` | **NOT IMPLEMENTED** - QueryResult doesn't have cancel method |
+| `mutation.cancel()` | **NOT IMPLEMENTED** - MutationResult doesn't have cancel method |
+| `runPromise({ signal: controller.signal })` | **NOT IMPLEMENTED** |
+| Mutation `mode: "replace" | "queue" | "reject"` | **NOT IMPLEMENTED** |
+| Mutation concurrency control | **NOT IMPLEMENTED** |
+| Auto-cancel on component unmount | **PARTIAL** - uses mountedRef but not proper fiber cancel |
+
+**What Works:** Basic cleanup on unmount (state updates prevented), but no actual cancellation.
+
+### 3. CLIENT-LIFECYCLE.md - PARTIALLY IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `Client.make<AppRouter>()` returning scoped Effect | **NOT IMPLEMENTED** - Returns sync client |
+| `Client.unsafeMake<AppRouter>()` | **NOT IMPLEMENTED** - Only `Client.make()` exists |
+| `Effect.acquireRelease` semantics | **NOT IMPLEMENTED** |
+| `client.registry.clear()` / `client.abortPending()` | **NOT IMPLEMENTED** |
+
+**What Works:** `api.provide(layer)` creates a ManagedRuntime with shutdown method.
+
+### 4. hydration.md - NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `serverApi.user.list.prefetch()` | **PARTIAL** - prefetch exists but no hydration transfer |
+| Automatic hydration from server to client | **NOT IMPLEMENTED** |
+| `serverApi.user.list.prefetchResult()` | **NOT IMPLEMENTED** - only `prefetchPromise()` |
+| Provider hydration props | **NOT IMPLEMENTED** |
+| `hydrate: false` option | **NOT IMPLEMENTED** |
+
+**Reality:** There's no automatic state transfer. `effect-trpc/server` only re-exports modules without React hooks.
+
+### 5. pagination.md - NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `useInfiniteQuery()` hook | **NOT IMPLEMENTED** |
+| `getNextPageParam` / `getPreviousPageParam` | **NOT IMPLEMENTED** |
+| `query.fetchNextPage()` | **NOT IMPLEMENTED** |
+| `query.hasNextPage` | **NOT IMPLEMENTED** |
+| Bidirectional pagination | **NOT IMPLEMENTED** |
+
+**Reality:** No infinite query implementation exists.
+
+### 6. query-options.md - PARTIALLY IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `createClient()` with defaults | **NOT IMPLEMENTED** - no createClient function |
+| `idleTTL`, `staleTime`, `keepAlive` | **NOT IMPLEMENTED** |
+| `refetchOnWindowFocus`, `refetchOnReconnect` | **NOT IMPLEMENTED** |
+| `retry.schedule`, `retry.when` | **NOT IMPLEMENTED** |
+| `isTransientError` | **IMPLEMENTED** in Transport |
+| `refetchInterval` | **IMPLEMENTED** (basic number-based) |
+| `enabled` option | **IMPLEMENTED** |
+
+### 7. server-components.md - PARTIALLY IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `effect-trpc/server` entry point | **IMPLEMENTED** |
+| `createServerClient()` | **NOT IMPLEMENTED** |
+| `serverApi.user.list.run` | **NOT IMPLEMENTED** - Client.make returns React-oriented client |
+| `serverApi.user.list.runPromise()` | **PARTIAL** - bound client has this |
+| `serverApi.user.list.prefetchPromise()` | **NOT IMPLEMENTED** as separate server API |
+
+**Reality:** The `/server` entry point exports modules but doesn't provide a hook-free client factory.
+
+### 8. desired-api.ts - MIXED ACCURACY
+
+| Feature | Status |
+|---------|--------|
+| `Transport.http()` batching config | **NOT IMPLEMENTED** - batching not functional |
+| `Result.match()` | **WORKS** - re-exported from effect-atom |
+| `api.provide(Transport.http())` | **WORKS** |
+| `api.invalidate(["users"])` | **PARTIAL** - on unbound client warns |
+| `Transport.mock<AppRouter>()` | **WORKS** |
+| `Router.tagsToInvalidate()` | **WORKS** |
+
+### 9. advanced/imperative-api.md - PARTIALLY IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `.run` Effect | **WORKS** on bound client |
+| `.runPromise()` | **WORKS** on bound client |
+| `.runPromiseExit()` | **NOT IMPLEMENTED** |
+| `.prefetch()` | **PARTIAL** - Effect exists but doesn't cache |
+| `.prefetchPromise()` | **NOT IMPLEMENTED** |
+
+### 10. advanced/optimistic-atoms.md - NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `api.user.list.atom` | **NOT IMPLEMENTED** |
+| `Atom.optimistic()` usage | **NOT IMPLEMENTED** |
+| `Atom.optimisticFn()` integration | **NOT IMPLEMENTED** |
+
+**Reality:** Optimistic updates are documented in Procedure but not connected to Atom integration.
+
+### 11. advanced/suspense.md - NOT IMPLEMENTED
+
+| Feature | Status |
+|---------|--------|
+| `useSuspenseQuery()` | **NOT IMPLEMENTED** |
+| Throwing promise for Suspense | **NOT IMPLEMENTED** |
+
+---
+
+## Examples with Errors
+
+### 1. desired-api.ts - Line 174-181
 ```typescript
-const createUseQuery = ...
-  // TODO: Implement with actual React hooks
-  return (() => {
-    throw new Error("useQuery requires React...")
-  }) as any
-```
-
-### 1.2 Query Options (HIGH PRIORITY)
-
-**Documented in:** `docs/query-options.md`
-
-| Option | Documentation Claims | Implementation Status |
-|--------|---------------------|----------------------|
-| `idleTTL` | How long to keep cached data | **NOT IMPLEMENTED** |
-| `staleTime` | How long until data is stale | **NOT IMPLEMENTED** |
-| `keepAlive` | Never garbage collect | **NOT IMPLEMENTED** |
-| `refetchOnWindowFocus` | Refetch when tab regains focus | **NOT IMPLEMENTED** |
-| `refetchOnReconnect` | Refetch when network returns | **NOT IMPLEMENTED** |
-| `refetchInterval` | Polling at interval | **NOT IMPLEMENTED** |
-| `enabled` | Enable/disable query | **NOT IMPLEMENTED** |
-| `retry.schedule` | Effect Schedule for retries | **NOT IMPLEMENTED** |
-| `retry.when` | Retry predicate | **NOT IMPLEMENTED** |
-
-The `QueryOptions` interface in `src/Client/index.ts:398-403` only defines:
-```typescript
-export interface QueryOptions {
-  readonly enabled?: boolean
-  readonly refetchInterval?: number
-  readonly staleTime?: number
-}
-```
-But these are **never used** since hooks are stubs.
-
-### 1.3 SSR/Hydration (HIGH PRIORITY)
-
-**Documented in:** `docs/hydration.md`, `docs/server-components.md`
-
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `prefetch()` | Prefetch and cache for SSR | **STUB** - just runs query with `Effect.asVoid` |
-| `prefetchPromise()` | Promise-based prefetch | **NOT IMPLEMENTED** |
-| `prefetchResult()` | Returns Result for error handling | **NOT IMPLEMENTED** |
-| `createServerClient()` | Separate server client | **NOT IMPLEMENTED** |
-| `Client.unsafeMake()` | Direct client without Effect | **NOT IMPLEMENTED** |
-| Provider hydration | Automatic state transfer | **NOT IMPLEMENTED** |
-| `hydrate: false` option | Disable hydration | **NOT IMPLEMENTED** |
-
-### 1.4 Provider Component (HIGH PRIORITY)
-
-**Documented in:** `docs/hydration.md`, `examples/desired-api.ts`
-
-The Provider is documented as:
-```tsx
-<api.Provider layer={Transport.http("/api/trpc")}>
-  <App />
-</api.Provider>
-```
-
-**Actual implementation (`src/Client/index.ts:708-718`):**
-```typescript
-const createProvider = <D extends Router.Definition>(
-  router: Router.Router<D>
-): React.FC<ProviderProps> => {
-  return ({ layer, children }) => {
-    // TODO: Create ManagedRuntime from layer
-    // TODO: Provide via React context
-    return children as any
-  }
-}
-```
-This is a **complete stub** that does nothing.
-
-### 1.5 Cancellation Features (MEDIUM PRIORITY)
-
-**Documented in:** `docs/cancellation.md`
-
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `query.cancel()` | Cancel in-flight query | **NOT IMPLEMENTED** |
-| `mutation.cancel()` | Cancel in-flight mutation | **NOT IMPLEMENTED** |
-| Automatic unmount cancellation | Cancel on component unmount | **NOT IMPLEMENTED** |
-| Parameter change cancellation | Cancel when params change | **NOT IMPLEMENTED** |
-| AbortController support | `runPromise({ signal })` | **NOT IMPLEMENTED** |
-| `mode: "replace"` | Cancel previous mutation | **NOT IMPLEMENTED** |
-| `mode: "queue"` | Queue mutations | **NOT IMPLEMENTED** |
-| `mode: "reject"` | Reject concurrent mutations | **NOT IMPLEMENTED** |
-
-### 1.6 Pagination (MEDIUM PRIORITY)
-
-**Documented in:** `docs/pagination.md`
-
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `useInfiniteQuery()` | Full infinite scroll support | **NOT IMPLEMENTED** |
-| `fetchNextPage()` | Load next page | **NOT IMPLEMENTED** |
-| `fetchPreviousPage()` | Bidirectional pagination | **NOT IMPLEMENTED** |
-| `hasNextPage` | Check for more pages | **NOT IMPLEMENTED** |
-| `getNextPageParam` | Extract cursor | **NOT IMPLEMENTED** |
-| Integration with `Atom.pull` | Under the hood implementation | **NOT IMPLEMENTED** |
-
-### 1.7 Optimistic Updates (MEDIUM PRIORITY)
-
-**Documented in:** `examples/advanced/optimistic-atoms.md`, `docs/cancellation.md`
-
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `optimistic.target` | Query to update | **TYPE EXISTS** but not used at runtime |
-| `optimistic.reducer` | Transform function | **TYPE EXISTS** but not used at runtime |
-| `optimistic.reconcile` | Merge server response | **TYPE EXISTS** but not used at runtime |
-| `api.user.list.atom` | Expose raw query atom | **NOT IMPLEMENTED** |
-| Rollback on failure | Automatic rollback | **NOT IMPLEMENTED** |
-
-The `OptimisticConfig` interface exists in `src/Procedure/index.ts:124-139` and mutations store the config, but it's **never used** in the client implementation.
-
-### 1.8 Authentication/Middleware on Client (MEDIUM PRIORITY)
-
-**Documented in:** `docs/authentication.md`
-
-| Feature | Documentation Claims | Implementation Status |
-|---------|---------------------|----------------------|
-| `Middleware.layerClient()` | Client-side middleware | **NOT IMPLEMENTED** |
-| Provider `headers` prop | Static/dynamic headers | **NOT IMPLEMENTED** |
-| Per-call headers | `runPromise({ headers })` | **NOT IMPLEMENTED** |
-| `requiredForClient: true` | Mark middleware as required | **NOT IMPLEMENTED** |
-
-Server-side middleware is implemented, but there's no client middleware system.
-
-### 1.9 Transport Batching (LOW PRIORITY)
-
-**Documented in:** `examples/desired-api.ts`, `docs/TRANSPORT-SPEC.md`
-
-```typescript
+// DOCUMENTED:
 Transport.http("/api/trpc", {
   batching: {
     enabled: true,
@@ -164,226 +192,116 @@ Transport.http("/api/trpc", {
   },
 })
 ```
+**REALITY:** Batching options are accepted but never used. `sendHttp` ignores them entirely.
 
-The `HttpOptions` interface in `src/Transport/index.ts:199-244` includes batching config, but:
-- The actual `sendHttp` function **ignores batching options**
-- No request batching logic exists
-- Each request is sent individually
-
-### 1.10 Stream Transport (LOW PRIORITY)
-
-**Documented in:** `docs/E2E-TEST-PLAN.md`
-
-The `sendHttpStream` function in `src/Transport/index.ts:355-371` has:
+### 2. authentication.md - Full Example
 ```typescript
-// TODO: Implement proper SSE/streaming - for now just convert single response
-Stream.fromEffect(sendHttp(...))
+// DOCUMENTED:
+class Auth extends Middleware.Tag<Auth>()("Auth", {
+  provides: CurrentUser,
+  failure: UnauthorizedError,
+  requiredForClient: true,
+}) {}
 ```
-This is **not real streaming** - it wraps a single HTTP request.
+**REALITY:** `Middleware.Tag()` signature is `(id: string, provides: Tag) => MiddlewareTag`, not a class factory with config object.
 
----
-
-## 2. Undocumented IMPLEMENTED Features
-
-### 2.1 Loopback Transport
-
-**Implemented in:** `src/Transport/index.ts:552-601`
-
-`Transport.loopback(server)` creates a transport that calls Server.handle() directly without HTTP. This is documented in `docs/E2E-TEST-PLAN.md` but not in the main transport docs.
-
-### 2.2 Middleware Chain Execution
-
-**Implemented in:** `src/Middleware/index.ts:329-365`
-
-The `Middleware.execute()` function and full middleware chain system is implemented but lacks user-facing documentation.
-
-### 2.3 Wrap Middleware
-
-**Implemented in:** `src/Middleware/index.ts:152-157`
-
-`Middleware.implementWrap()` allows middleware that wraps handler execution (like logging). Not documented.
-
-### 2.4 Combined Middleware
-
-**Implemented in:** `src/Middleware/index.ts:267-281`
-
-`Middleware.all()` combines multiple middlewares with concurrency options. Not documented.
-
-### 2.5 Router.withMiddleware
-
-**Implemented in:** `src/Router/index.ts:414-420`
-
-Wraps a definition with middleware. Only briefly mentioned in examples.
-
-### 2.6 Reactivity Service
-
-**Implemented in:** `src/Reactivity/index.ts`
-
-Full subscription-based invalidation system with hierarchical matching. Only documented in JSDoc, not in user-facing docs.
-
-### 2.7 Server.middleware
-
-**Implemented in:** `src/Server/index.ts:454-496`
-
-Add server-level middleware. Not in user docs.
-
----
-
-## 3. Misleading Documentation Examples
-
-### 3.1 `examples/desired-api.ts` - The Main Example
-
-This file is referenced in the README but **almost none of it works**:
-
-| Line | Code | Status |
-|------|------|--------|
-| 166 | `const api = Client.make(appRouter)` | Works |
-| 174-184 | `<api.Provider layer={...}>` | Provider is a stub |
-| 192 | `api.users.list.useQuery()` | Throws error |
-| 194-204 | `Result.match(query.result, ...)` | Never reached |
-| 217-221 | `api.users.create.useMutation(...)` | Throws error |
-| 240 | `api.provide(Transport.http(...))` | Works |
-| 243 | `vanillaApi.users.list.run` | Works |
-| 247 | `vanillaApi.users.list.runPromise()` | Works |
-| 251-252 | `api.invalidate(["users"])` | Console warns, doesn't work |
-| 260 | `vanillaApi.users.list.prefetch()` | Stub |
-| 270-289 | `Transport.mock<AppRouter>({...})` | Works |
-| 306 | `Router.tagsToInvalidate(appRouter, "users")` | Works |
-
-### 3.2 JSDoc @example in `src/index.ts`
-
+### 3. cancellation.md - Mutation Modes
 ```typescript
-// In components
-const query = api.users.list.useQuery()
-```
-This throws an error. The example is misleading.
-
-### 3.3 `docs/query-options.md` - All Examples
-
-Every example with `useQuery()` options doesn't work:
-```typescript
-const query = api.user.list.useQuery({
-  staleTime: Duration.minutes(5),
-  idleTTL: Duration.minutes(10),
-})
-```
-Options are defined in interfaces but **completely ignored**.
-
-### 3.4 `docs/hydration.md` - Full Pattern
-
-The entire SSR pattern documented is fictional:
-```typescript
-// Server Component
-await serverApi.user.list.prefetch()
-
-// Client Component - data already available!
-const query = api.user.list.useQuery()
-```
-Neither `serverApi` nor the hydration system exists.
-
-### 3.5 `docs/cancellation.md` - Mutation Modes
-
-```typescript
+// DOCUMENTED:
 const mutation = api.user.create.useMutation({
   mode: "replace",
 })
 ```
-No `mode` option exists in `MutationOptions`.
+**REALITY:** `MutationOptions` interface only has `onSuccess`, `onError`, `onSettled`. No `mode` option.
 
----
-
-## 4. Configuration Options That Have No Effect
-
-| Option | Where Documented | Effect |
-|--------|------------------|--------|
-| `QueryOptions.enabled` | `docs/query-options.md` | Defined but ignored |
-| `QueryOptions.refetchInterval` | `docs/query-options.md` | Defined but ignored |
-| `QueryOptions.staleTime` | `docs/query-options.md` | Defined but ignored |
-| `MutationOptions.onSuccess` | Interface in Client | Defined but never called |
-| `MutationOptions.onError` | Interface in Client | Defined but never called |
-| `MutationOptions.onSettled` | Interface in Client | Defined but never called |
-| `HttpOptions.batching.*` | `src/Transport/index.ts` | Completely ignored |
-| `Procedure.optimistic.*` | `src/Procedure/index.ts` | Stored but never used |
-
----
-
-## 5. Outdated Documentation
-
-### 5.1 `docs/TRANSPORT-SPEC.md`
-
-Documents `Transport.fromLayer()` for integration testing:
+### 4. hydration.md - Server API
 ```typescript
-const integrationTransport = Transport.fromLayer(
-  UserProceduresLive.pipe(Layer.provide(MockDatabaseLayer))
-)
+// DOCUMENTED:
+const serverApi = Client.make<AppRouter>()
+await serverApi.user.list.prefetch()
 ```
-**This function does not exist.** There's `Transport.loopback()` which is similar but different.
+**REALITY:** `Client.make()` returns a client with React hooks. There's no separate server client.
 
-### 5.2 `docs/CLIENT-LIFECYCLE.md`
-
-Documents `Client.make()` returning `Effect<ApiClient, never, Scope | Transport>`:
+### 5. query-options.md - Schedule-based Polling
 ```typescript
-export const make = <R extends Router>() => Effect.acquireRelease(...)
+// DOCUMENTED:
+refetchInterval: Schedule.spaced(Duration.seconds(10))
 ```
-**Actual implementation** returns a plain client object, not an Effect.
-
-### 5.3 `docs/authentication.md`
-
-Documents `Middleware.layerClient()` for client-side auth:
-```typescript
-const AuthClientLive = Middleware.layerClient(Auth, ...)
-```
-**This function does not exist.** Only server-side middleware is implemented.
+**REALITY:** `refetchInterval` only accepts `number` (milliseconds), not `Schedule`.
 
 ---
 
-## 6. Priority Fixes for Documentation
+## Documentation Accuracy by File
 
-### CRITICAL (Must Fix)
-
-1. **README.md** - Add prominent disclaimer that React hooks are not implemented
-2. **examples/desired-api.ts** - Mark sections that work vs don't work
-3. **docs/query-options.md** - Remove or mark as "planned"
-4. **docs/hydration.md** - Remove or mark as "planned"
-5. **docs/server-components.md** - Remove or mark as "planned"
-
-### HIGH (Should Fix)
-
-6. Document what DOES work:
-   - `Client.make(router)` for creating proxy
-   - `api.provide(layer)` for vanilla/imperative usage
-   - `.run` Effect and `.runPromise()` methods
-   - `Transport.mock()` for testing
-   - `Transport.loopback()` for E2E testing
-   - Server implementation with middleware
-
-7. **docs/TRANSPORT-SPEC.md** - Update to reflect actual API
-
-8. **docs/CLIENT-LIFECYCLE.md** - Rewrite to match implementation
-
-### MEDIUM (Nice to Have)
-
-9. Add documentation for implemented but undocumented features:
-   - `Middleware.all()` for combining middlewares
-   - `Middleware.implementWrap()` for wrap middleware
-   - `Router.withMiddleware()` for group middleware
-   - `Reactivity` service
-
-10. Add "Implementation Status" badges to each doc
+| Document | Accuracy |
+|----------|----------|
+| README.md | 90% - Accurate but minimal |
+| TRANSPORT-SPEC.md | 85% - Mostly accurate, batching doesn't work |
+| E2E-TEST-PLAN.md | 75% - Good plan, partially implemented |
+| authentication.md | 25% - Major API mismatches |
+| cancellation.md | 15% - Almost entirely unimplemented |
+| CLIENT-LIFECYCLE.md | 40% - Different API than documented |
+| hydration.md | 10% - Not implemented |
+| pagination.md | 0% - Not implemented |
+| query-options.md | 30% - Some options work |
+| server-components.md | 40% - Entry point exists but no server client |
+| LSP-IDEAS.md | N/A - Future ideas only |
+| desired-api.ts | 60% - Core works, advanced features don't |
+| advanced/imperative-api.md | 50% - Basic methods work |
+| advanced/optimistic-atoms.md | 0% - Not implemented |
+| advanced/suspense.md | 0% - Not implemented |
 
 ---
 
-## 7. Summary Statistics
+## Priority Documentation Fixes
 
-| Category | Count |
-|----------|-------|
-| Documented features that work | ~15 |
-| Documented features that are stubs | ~8 |
-| Documented features not implemented | ~35 |
-| Implemented features not documented | ~7 |
-| Misleading examples | ~20 |
-| Outdated docs | ~3 |
+### Critical (Immediately misleading)
 
-**Implementation completeness estimate: 25-30%**
+1. **authentication.md** - Complete rewrite needed. Document actual `Middleware.Tag(id, provides)` API.
 
-The core RPC mechanism (Procedure, Router, Server, Transport, Middleware) is solid. The React integration, caching, SSR, and DX features are almost entirely unimplemented.
+2. **cancellation.md** - Remove all mutation modes and cancel methods. Document what actually exists (basic unmount cleanup).
+
+3. **hydration.md** - Either remove or mark as "PLANNED" with clear warning.
+
+4. **pagination.md** - Mark as "PLANNED" or remove entirely.
+
+### High Priority
+
+5. **CLIENT-LIFECYCLE.md** - Update to match actual `Client.make()` API (no Scope, returns sync).
+
+6. **query-options.md** - Remove Schedule-based polling, update to match actual `QueryOptions` interface.
+
+7. **server-components.md** - Document that `effect-trpc/server` exists but doesn't have a separate client API yet.
+
+8. **desired-api.ts** - Remove batching config, add comments noting which features are unimplemented.
+
+### Medium Priority
+
+9. **TRANSPORT-SPEC.md** - Note that batching is not implemented.
+
+10. **advanced/imperative-api.md** - Remove `runPromiseExit()` and `prefetchPromise()` references.
+
+### Low Priority (Future features)
+
+11. **advanced/optimistic-atoms.md** - Keep as design doc, mark as unimplemented.
+
+12. **advanced/suspense.md** - Keep as design doc, mark as unimplemented.
+
+---
+
+## Recommendations
+
+### Short Term
+1. Add "Status" badges to each doc: IMPLEMENTED, PARTIAL, PLANNED
+2. Fix examples in implemented docs to match actual API
+3. Move aspirational docs to `docs/design/` folder
+
+### Medium Term
+1. Implement missing core features (cancellation, query options)
+2. Add proper server client for RSC
+3. Implement useInfiniteQuery
+
+### Long Term
+1. Implement hydration system
+2. Add optimistic update integration with effect-atom
+3. Add batching to HTTP transport

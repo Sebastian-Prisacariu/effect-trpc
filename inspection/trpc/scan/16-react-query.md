@@ -1,54 +1,81 @@
-# Hypothesis H16: React Query Integration
+# H16: React Query Integration
 
-## Summary
+## Overview
 
-tRPC's React Query integration is a sophisticated wrapper that:
-1. Uses Proxies extensively to generate type-safe hooks from router definitions
-2. Generates deterministic query keys from procedure paths + input
-3. Wraps React Query's primitives (`useQuery`, `useMutation`, etc.) with tRPC-specific logic
-4. Provides utilities for cache manipulation via `useUtils()`
+tRPC provides two React Query integration packages:
+1. **`@trpc/react-query`** - Full-featured React hooks integration (legacy approach)
+2. **`@trpc/tanstack-react-query`** - Newer options-based approach (recommended)
+
+Both integrate deeply with TanStack Query, generating type-safe hooks and query options from router types.
 
 ## Integration Architecture
 
-### Two Package Structure
-
-tRPC has **two** React Query packages:
-1. **`@trpc/react-query`** - The "classic" integration with hooks like `trpc.user.get.useQuery()`
-2. **`@trpc/tanstack-react-query`** - Newer, more flexible integration using `queryOptions` pattern
-
-### Classic Integration (`@trpc/react-query`)
-
 ```
-createTRPCReact()
-    |
-    +-- createRootHooks() --> Creates base hooks (useQuery, useMutation, etc.)
-    |
-    +-- createHooksInternal() --> Wraps hooks with proxy decoration
-    |
-    +-- createFlatProxy() --> Final API with Provider, useContext, etc.
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         createTRPCReact<AppRouter>()                    │
+│                                    │                                    │
+│         ┌──────────────────────────┼──────────────────────────┐        │
+│         │                          │                          │        │
+│         ▼                          ▼                          ▼        │
+│   TRPCProvider              Proxy Generator           Hook Factory     │
+│   (React Context)           (createRecursiveProxy)    (createRootHooks)│
+│         │                          │                          │        │
+│         │    ┌─────────────────────┴─────────────────────┐   │        │
+│         │    │      DecorateRouterRecord<Router>         │   │        │
+│         │    │  Recursively maps procedures to hooks     │   │        │
+│         │    └─────────────────────┬─────────────────────┘   │        │
+│         │                          │                          │        │
+│         ▼                          ▼                          ▼        │
+│   ┌──────────────────────────────────────────────────────────────┐    │
+│   │                    trpc.user.getById                          │    │
+│   │    .useQuery(input)  .useMutation()  .useInfiniteQuery()     │    │
+│   │    .useSuspenseQuery()  .useSubscription()  .queryKey()      │    │
+│   └──────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**File: `createTRPCReact.tsx:508-518`**
+## Hook Generation Pattern
+
+### 1. Root Hooks Factory (`createRootHooks`)
+
+Located at `packages/react-query/src/shared/hooks/createHooksInternal.tsx`
+
 ```typescript
-export function createTRPCReact<TRouter extends AnyRouter, TSSRContext = unknown>(
-  opts?: CreateTRPCReactOptions<TRouter>,
-): CreateTRPCReact<TRouter, TSSRContext> {
-  const hooks = createRootHooks<TRouter, TSSRContext>(opts);
-  const proxy = createHooksInternal<TRouter, TSSRContext>(hooks);
-  return proxy as any;
+export function createRootHooks<TRouter extends AnyRouter, TSSRContext = unknown>(
+  config?: CreateTRPCReactOptions<TRouter>
+) {
+  // Creates all base hooks that get attached to procedures
+  return {
+    Provider: TRPCProvider,
+    createClient,
+    useContext,
+    useUtils: useContext,
+    useQuery,           // Wrapped useQuery from @tanstack/react-query
+    usePrefetchQuery,
+    useSuspenseQuery,
+    useQueries,
+    useSuspenseQueries,
+    useMutation,
+    useSubscription,
+    useInfiniteQuery,
+    usePrefetchInfiniteQuery,
+    useSuspenseInfiniteQuery,
+  };
 }
 ```
 
-### Proxy-Based Hook Generation
+### 2. Decoration Proxy (`createReactDecoration`)
 
-**File: `shared/proxy/decorationProxy.ts:9-35`**
+Located at `packages/react-query/src/shared/proxy/decorationProxy.ts`
+
 ```typescript
 export function createReactDecoration<TRouter extends AnyRouter, TSSRContext>(
-  hooks: CreateReactQueryHooks<TRouter, TSSRContext>,
+  hooks: CreateReactQueryHooks<TRouter, TSSRContext>
 ) {
   return createRecursiveProxy(({ path, args }) => {
     const pathCopy = [...path];
-    const lastArg = pathCopy.pop()!; // e.g., 'useMutation', 'useQuery'
+    // Last arg is the hook name: 'useQuery', 'useMutation', etc.
+    const lastArg = pathCopy.pop()!;
 
     if (lastArg === 'useMutation') {
       return (hooks as any)[lastArg](pathCopy, ...args);
@@ -60,474 +87,437 @@ export function createReactDecoration<TRouter extends AnyRouter, TSSRContext>(
 
     const [input, ...rest] = args;
     const opts = rest[0] ?? {};
+    
+    // Call the hook with path, input, and options
     return (hooks as any)[lastArg](pathCopy, input, opts);
   });
 }
 ```
 
-This enables the ergonomic API:
+### 3. Type-Safe Hook Types
+
 ```typescript
-// Access: trpc.user.byId.useQuery({ id: 1 })
-// Resolves to: hooks.useQuery(['user', 'byId'], { id: 1 }, opts)
-```
-
-## Hook API Design
-
-### Query Hooks
-
-**Core hooks created in `createHooksInternal.tsx`:**
-
-| Hook | Purpose |
-|------|---------|
-| `useQuery` | Standard data fetching |
-| `useSuspenseQuery` | Suspense-compatible query |
-| `useInfiniteQuery` | Paginated/cursor-based queries |
-| `useSuspenseInfiniteQuery` | Suspense infinite query |
-| `usePrefetchQuery` | Prefetch without subscribing |
-| `useQueries` | Batch multiple queries |
-| `useSuspenseQueries` | Batch suspense queries |
-
-### useQuery Implementation Pattern
-
-**File: `shared/hooks/createHooksInternal.tsx:171-242`**
-```typescript
-function useQuery(
-  path: readonly string[],
-  input: unknown,
-  opts?: UseTRPCQueryOptions<unknown, unknown, TError>,
-): UseTRPCQueryResult<unknown, TError> {
-  const context = useContext();
-  const { abortOnUnmount, client, ssrState, queryClient, prefetchQuery } = context;
-  
-  // Generate deterministic query key
-  const queryKey = getQueryKeyInternal(path, input, 'query');
-
-  // SSR prepass handling
-  if (typeof window === 'undefined' && ssrState === 'prepass' && ...) {
-    void prefetchQuery(queryKey, opts as any);
-  }
-
-  // Wrap React Query's useQuery
-  const hook = __useQuery({
-    ...ssrOpts,
-    queryKey: queryKey as any,
-    queryFn: isInputSkipToken
-      ? input
-      : async (queryFunctionContext) => {
-          // Call tRPC client with abort signal support
-          const result = await client.query(
-            ...getClientArgs(queryKey, actualOpts),
-          );
-          
-          // Handle async iterables (streaming)
-          if (isAsyncIterable(result)) {
-            return buildQueryFromAsyncIterable(result, queryClient, queryKey);
-          }
-          return result;
-        },
-  }, queryClient);
-
-  // Attach tRPC metadata
-  hook.trpc = useHookResult({ path });
-  return hook;
+// For queries
+export interface ProcedureUseQuery<TDef extends ResolverDef> {
+  <TQueryFnData extends TDef['output'], TData = TQueryFnData>(
+    input: TDef['input'] | SkipToken,
+    opts?: UseTRPCQueryOptions<TQueryFnData, TData, TRPCClientErrorLike<TDef>>
+  ): UseTRPCQueryResult<TData, TRPCClientErrorLike<TDef>>;
 }
-```
 
-### Mutation Hook
+// For mutations
+export type DecoratedMutation<TDef extends ResolverDef> = {
+  useMutation: <TContext = unknown>(
+    opts?: UseTRPCMutationOptions<TDef['input'], TRPCClientErrorLike<TDef>, TDef['output'], TContext>
+  ) => UseTRPCMutationResult<TDef['output'], TRPCClientErrorLike<TDef>, TDef['input'], TContext>;
+};
 
-**File: `shared/hooks/createHooksInternal.tsx:320-358`**
-```typescript
-function useMutation(
-  path: readonly string[],
-  opts?: UseTRPCMutationOptions<unknown, TError, unknown, unknown>,
-): UseTRPCMutationResult<unknown, TError, unknown, unknown> {
-  const { client, queryClient } = useContext();
-  const mutationKey = getMutationKeyInternal(path);
-
-  const hook = __useMutation({
-    ...opts,
-    mutationKey: mutationKey,
-    mutationFn: (input) => {
-      return client.mutation(...getClientArgs([path, { input }], opts));
-    },
-    onSuccess(...args) {
-      // Allow custom success override for cache invalidation
-      const originalFn = () => opts?.onSuccess?.(...args) ?? defaultOpts?.onSuccess?.(...args);
-      return mutationSuccessOverride({
-        originalFn,
-        queryClient,
-        meta: opts?.meta ?? defaultOpts?.meta ?? {},
-      });
-    },
-  }, queryClient);
-
-  hook.trpc = useHookResult({ path });
-  return hook;
-}
-```
-
-### Subscription Hook
-
-Custom state machine for WebSocket subscriptions:
-
-**File: `shared/hooks/createHooksInternal.tsx:375-522`**
-```typescript
-function useSubscription(
-  path: readonly string[],
-  input: unknown,
-  opts: UseTRPCSubscriptionOptions<unknown, TError>,
-) {
-  // State machine: 'idle' | 'connecting' | 'pending' | 'error'
-  const [state, setState] = React.useState<$Result>(...);
-  
-  // Track which properties are accessed for render optimization
-  const [trackedProps] = React.useState(new Set<keyof $Result>([]));
-  
-  const reset = React.useCallback((): void => {
-    currentSubscriptionRef.current?.unsubscribe();
-    
-    const subscription = client.subscription(path.join('.'), input, {
-      onStarted: () => { ... },
-      onData: (data) => { ... },
-      onError: (error) => { ... },
-      onComplete: () => { ... },
-    });
-    
-    currentSubscriptionRef.current = subscription;
-  }, [...]);
-
-  React.useEffect(() => {
-    reset();
-    return () => { currentSubscriptionRef.current?.unsubscribe(); };
-  }, [reset]);
-
-  return state;
-}
+// Router record decoration
+export type DecorateRouterRecord<TRoot extends AnyRootTypes, TRecord extends RouterRecord> = {
+  [TKey in keyof TRecord]: TRecord[TKey] extends AnyProcedure
+    ? DecorateProcedure<$Value['_def']['type'], { ... }>
+    : TRecord[TKey] extends RouterRecord
+      ? DecorateRouterRecord<TRoot, TRecord[TKey]>
+      : never;
+};
 ```
 
 ## Query Key Generation
 
-### Key Structure
+### Structure
 
-**File: `internals/getQueryKey.ts:11-14`**
+Located at `packages/react-query/src/internals/getQueryKey.ts`
+
 ```typescript
+// Query key format
 export type TRPCQueryKey = [
-  readonly string[],                              // Path segments
-  { input?: unknown; type?: Exclude<QueryType, 'any'> }?,  // Optional metadata
+  readonly string[],                                    // Path segments
+  { input?: unknown; type?: 'query' | 'infinite' }?    // Options
 ];
 
-// Examples:
-// ['user', 'byId']                           -- for invalidating all user.byId queries
-// [['user', 'byId'], { input: { id: 1 } }]   -- specific query with input
-// [['user', 'list'], { type: 'infinite' }]   -- infinite query type
-```
+// Mutation key format
+export type TRPCMutationKey = [readonly string[]];
 
-### Key Generation Logic
-
-**File: `internals/getQueryKey.ts:28-74`**
-```typescript
+// Query key generation
 export function getQueryKeyInternal(
   path: readonly string[],
   input: unknown,
-  type: QueryType,
+  type: QueryType
 ): TRPCQueryKey {
-  // Split dot-separated path segments
+  // Split dot-separated paths
   const splitPath = path.flatMap((part) => part.split('.'));
 
-  // No input, any type -> minimal key for broad invalidation
+  // No input, no type = match all (for invalidation)
   if (!input && (!type || type === 'any')) {
-    return splitPath.length ? [splitPath] : ([] as unknown as TRPCQueryKey);
+    return splitPath.length ? [splitPath] : [];
   }
 
   // Infinite queries: strip cursor/direction from input
   if (type === 'infinite' && isObject(input) && ('direction' in input || 'cursor' in input)) {
-    const { cursor: _, direction: __, ...inputWithoutCursorAndDirection } = input;
-    return [splitPath, { input: inputWithoutCursorAndDirection, type: 'infinite' }];
+    const { cursor: _, direction: __, ...inputWithoutCursor } = input;
+    return [splitPath, { input: inputWithoutCursor, type: 'infinite' }];
   }
 
-  // Standard query with input and type
   return [
     splitPath,
     {
-      ...(typeof input !== 'undefined' && input !== skipToken && { input }),
+      ...(input !== undefined && input !== skipToken && { input }),
       ...(type && type !== 'any' && { type }),
     },
   ];
 }
 ```
 
-### Why Array-Based Keys?
+### Examples
 
-From the comments in the code:
-> "To allow easy interactions with groups of related queries, such as invalidating all queries of a router, we use an array as the path when storing in tanstack query."
-
-This enables:
 ```typescript
-// Invalidate all user queries
-queryClient.invalidateQueries({ queryKey: [['user']] });
+// trpc.user.getById.useQuery({ id: '1' })
+// Query key: [['user', 'getById'], { input: { id: '1' }, type: 'query' }]
 
-// Invalidate specific procedure
-queryClient.invalidateQueries({ queryKey: [['user', 'byId']] });
+// trpc.posts.list.useInfiniteQuery({ limit: 10 })
+// Query key: [['posts', 'list'], { input: { limit: 10 }, type: 'infinite' }]
 
-// Invalidate specific input
-queryClient.invalidateQueries({ queryKey: [['user', 'byId'], { input: { id: 1 } }] });
+// trpc.user.update.useMutation()
+// Mutation key: [['user', 'update']]
+
+// Path-based invalidation: trpc.user.invalidate()
+// Query key: [['user']]  // Matches all user.* queries
 ```
 
-## How Mutations Work
+### Key Prefix Support (New in tanstack-react-query)
 
-### Mutation Key (simpler than query key)
-
-**File: `internals/getQueryKey.ts:76-78`**
 ```typescript
-export function getMutationKeyInternal(path: readonly string[]) {
-  return getQueryKeyInternal(path, undefined, 'any') as TRPCMutationKey;
-}
+// With prefix enabled
+export type TRPCQueryKeyWithPrefix = [
+  prefix: string[],
+  path: string[],
+  opts?: { input?: unknown; type?: 'query' | 'infinite' }
+];
 
-// Result: [['user', 'create']]  -- just the path, no input
+// Without prefix (default)
+export type TRPCQueryKeyWithoutPrefix = [
+  path: string[],
+  opts?: { input?: unknown; type?: 'query' | 'infinite' }
+];
 ```
 
-### Mutation Success Override Pattern
+## useQuery Implementation
 
-**File: `shared/hooks/createHooksInternal.tsx:87-89`**
 ```typescript
-const mutationSuccessOverride: UseMutationOverride['onSuccess'] =
-  config?.overrides?.useMutation?.onSuccess ??
-  ((options) => options.originalFn());
-```
+function useQuery(
+  path: readonly string[],
+  input: unknown,
+  opts?: UseTRPCQueryOptions<unknown, unknown, TError>
+): UseTRPCQueryResult<unknown, TError> {
+  const context = useContext();
+  const { abortOnUnmount, client, ssrState, queryClient, prefetchQuery } = context;
+  
+  // Generate query key from path and input
+  const queryKey = getQueryKeyInternal(path, input, 'query');
+  
+  // SSR prefetching
+  if (typeof window === 'undefined' && ssrState === 'prepass' && ...) {
+    void prefetchQuery(queryKey, opts);
+  }
 
-This allows library consumers to globally intercept mutation success for automatic cache invalidation:
-```typescript
-createTRPCReact({
-  overrides: {
-    useMutation: {
-      onSuccess: async ({ originalFn, queryClient }) => {
-        await originalFn();
-        // Global: invalidate all queries after any mutation
-        await queryClient.invalidateQueries();
-      },
+  // Wrap TanStack Query's useQuery
+  const hook = __useQuery(
+    {
+      ...ssrOpts,
+      queryKey: queryKey,
+      queryFn: isInputSkipToken
+        ? input
+        : async (queryFunctionContext) => {
+            const result = await client.query(
+              ...getClientArgs(queryKey, actualOpts)
+            );
+            
+            // Handle async iterables (streaming)
+            if (isAsyncIterable(result)) {
+              return buildQueryFromAsyncIterable(result, queryClient, queryKey);
+            }
+            return result;
+          },
     },
-  },
-});
+    queryClient
+  );
+
+  // Add tRPC metadata
+  hook.trpc = useHookResult({ path });
+  
+  return hook;
+}
 ```
 
-## Utils Proxy (`useUtils()`)
+## New Options-Based Approach (`@trpc/tanstack-react-query`)
 
-### Purpose
-Provides programmatic access to query cache operations:
+### Context Setup
 
-**File: `shared/proxy/utilsProxy.ts:64-355`**
 ```typescript
-export type DecorateQueryProcedure<TRoot, TProcedure> = {
-  queryOptions: ...;           // Get options object for useQuery
-  infiniteQueryOptions: ...;   // Get options for useInfiniteQuery
-  fetch: ...;                  // Fetch and cache
-  prefetch: ...;               // Prefetch without returning
-  ensureData: ...;             // Fetch if not cached
-  invalidate: ...;             // Mark stale
-  refetch: ...;                // Refetch active queries  
-  cancel: ...;                 // Cancel in-flight
-  reset: ...;                  // Reset to initial state
-  setData: ...;                // Optimistic update
-  setQueriesData: ...;         // Batch optimistic update
-  setInfiniteData: ...;        // Update infinite query
-  getData: ...;                // Read from cache
-  getInfiniteData: ...;        // Read infinite data
+// New approach: createTRPCContext
+export function createTRPCContext<TRouter extends AnyTRPCRouter>(): {
+  TRPCProvider: React.FC<{ children; queryClient; trpcClient }>;
+  useTRPC: () => TRPCOptionsProxy<TRouter>;
+  useTRPCClient: () => TRPCClient<TRouter>;
 };
 
-export type DecorateMutationProcedure<TRoot, TProcedure> = {
-  setMutationDefaults: ...;    // Set default mutation options
-  getMutationDefaults: ...;    // Get default mutation options
-  isMutating: ...;             // Count active mutations
-};
+// Usage
+const { TRPCProvider, useTRPC, useTRPCClient } = createTRPCContext<AppRouter>();
 ```
 
-### Utils Implementation
+### Options Proxy Pattern
 
-**File: `shared/proxy/utilsProxy.ts:465-517`**
+Instead of hooks directly, returns TanStack Query options:
+
 ```typescript
-function createRecursiveUtilsProxy<TRouter>(context: TRPCQueryUtils<TRouter>) {
-  return createRecursiveProxy<CreateQueryUtils<TRouter>>((opts) => {
-    const path = [...opts.path];
-    const utilName = path.pop() as keyof AnyDecoratedProcedure;
-    const args = [...opts.args];
-    const input = args.shift();
-    const queryType = getQueryType(utilName);
-    const queryKey = getQueryKeyInternal(path, input, queryType);
-
-    const contextMap: Record<keyof AnyDecoratedProcedure, () => unknown> = {
-      fetch: () => context.fetchQuery(queryKey, ...args),
-      prefetch: () => context.prefetchQuery(queryKey, ...args),
-      invalidate: () => context.invalidateQueries(queryKey, ...args),
-      setData: () => { context.setQueryData(queryKey, args[0], args[1]); },
-      getData: () => context.getQueryData(queryKey),
-      // ... etc
+export function createTRPCOptionsProxy<TRouter extends AnyTRPCRouter>(
+  opts: TRPCOptionsProxyOptions<TRouter>
+): TRPCOptionsProxy<TRouter> {
+  return createTRPCRecursiveProxy(({ args, path }) => {
+    const utilName = path.pop();  // 'queryOptions', 'mutationOptions', etc.
+    
+    const contextMap = {
+      queryOptions: () => trpcQueryOptions({ input, opts, path, queryKey, query }),
+      infiniteQueryOptions: () => trpcInfiniteQueryOptions({ ... }),
+      mutationOptions: () => trpcMutationOptions({ ... }),
+      subscriptionOptions: () => trpcSubscriptionOptions({ ... }),
+      queryKey: () => getQueryKeyInternal({ path, input, type: 'query', prefix }),
+      mutationKey: () => getMutationKeyInternal({ path, prefix }),
+      pathKey: () => getQueryKeyInternal({ path, type: 'any', prefix }),
+      pathFilter: () => ({ ...filters, queryKey: ... }),
     };
-
+    
     return contextMap[utilName]();
   });
 }
 ```
 
-## New `queryOptions` Pattern (tanstack-react-query package)
+### Usage Pattern
 
-### Why a New Package?
-
-The newer `@trpc/tanstack-react-query` package provides a more composable API aligned with TanStack Query v5:
-
-**File: `tanstack-react-query/src/internals/createOptionsProxy.ts`**
 ```typescript
-// Instead of hooks, generate options objects
-trpc.user.byId.queryOptions({ id: 1 })
-// Returns: { queryKey, queryFn, ...options }
+// Old approach (hooks)
+const { data } = trpc.user.getById.useQuery({ id: '1' });
 
-// Then use with any React Query hook
-useQuery(trpc.user.byId.queryOptions({ id: 1 }))
-useSuspenseQuery(trpc.user.byId.queryOptions({ id: 1 }))
+// New approach (options)
+const trpc = useTRPC();
+const { data } = useQuery(trpc.user.getById.queryOptions({ id: '1' }));
+
+// Benefits of options approach:
+// - Works with TanStack Query's queryOptions/mutationOptions
+// - Better composability
+// - Works outside React components
+// - Server component support
 ```
 
-### Benefits
-1. **Decoupled from hooks** - Can use outside React (e.g., loaders, server components)
-2. **Composable** - Pass options to any hook
-3. **Server Components** - Works with RSC via `createTRPCOptionsProxy({ router, ctx })`
+## Utils/Context API
 
-**File: `tanstack-react-query/src/internals/queryOptions.ts:220-265`**
+### Query Utilities
+
 ```typescript
-export function trpcQueryOptions<TFeatureFlags extends FeatureFlags>(args: {
-  input: unknown;
-  query: typeof TRPCUntypedClient.prototype.query;
-  queryClient: QueryClient | (() => QueryClient);
-  path: string[];
-  queryKey: TRPCQueryKey<TFeatureFlags['keyPrefix']>;
-  opts: AnyTRPCQueryOptionsIn<TFeatureFlags> | undefined;
-}): AnyTRPCQueryOptionsOut<TFeatureFlags> {
-  const { input, query, path, queryKey, opts } = args;
+export interface TRPCQueryUtils<TRouter extends AnyRouter> {
+  // Query options factories
+  queryOptions(path, queryKey, opts): TRPCQueryOptionsOut;
+  infiniteQueryOptions(path, queryKey, opts): TRPCInfiniteQueryOptionsOut;
   
-  const queryFn: QueryFunction = async (queryFnContext) => {
-    const result = await query(...getClientArgs(queryKey, actualOpts));
-    if (isAsyncIterable(result)) {
-      return buildQueryFromAsyncIterable(result, queryClient, queryKey);
-    }
-    return result;
-  };
-
-  return Object.assign(
-    queryOptions({
-      ...opts,
-      queryKey: queryKey,
-      queryFn: inputIsSkipToken ? skipToken : queryFn,
-    }),
-    { trpc: createTRPCOptionsResult({ path }) },
-  );
+  // Direct query operations
+  fetchQuery(queryKey, opts): Promise<unknown>;
+  fetchInfiniteQuery(queryKey, opts): Promise<InfiniteData>;
+  prefetchQuery(queryKey, opts): Promise<void>;
+  prefetchInfiniteQuery(queryKey, opts): Promise<void>;
+  ensureQueryData(queryKey, opts): Promise<unknown>;
+  
+  // Cache manipulation
+  invalidateQueries(queryKey, filters, options): Promise<void>;
+  resetQueries(queryKey, filters, options): Promise<void>;
+  refetchQueries(queryKey, filters, options): Promise<void>;
+  cancelQuery(queryKey, options): Promise<void>;
+  
+  // Data access
+  setQueryData(queryKey, updater, options): void;
+  setQueriesData(queryKey, filters, updater, options): void;
+  getQueryData(queryKey): unknown;
+  setInfiniteQueryData(queryKey, updater, options): void;
+  getInfiniteQueryData(queryKey): InfiniteData | undefined;
+  
+  // Mutation utilities
+  setMutationDefaults(mutationKey, options): void;
+  getMutationDefaults(mutationKey): MutationOptions | undefined;
+  isMutating(filters): number;
 }
 ```
 
-## Patterns We Should Consider Adopting
+### Utils Proxy
 
-### 1. Proxy-Based Hook Generation
-The recursive proxy pattern is elegant for generating typed APIs from router definitions:
 ```typescript
-createRecursiveProxy(({ path, args }) => {
-  const method = path.pop();
-  return hooks[method](path, ...args);
-});
+// Provides procedure-specific access to utils
+type CreateReactUtils<TRouter, TSSRContext> = {
+  client: TRPCClient<TRouter>;
+  queryClient: QueryClient;
+  // Per-procedure utils
+  [procedure]: {
+    fetch(input, opts): Promise<Output>;
+    prefetch(input, opts): Promise<void>;
+    invalidate(input?, filters?, options?): Promise<void>;
+    refetch(input?, filters?, options?): Promise<void>;
+    cancel(input?, options?): Promise<void>;
+    reset(input?, options?): Promise<void>;
+    setData(input, updater, options?): void;
+    getData(input?): Output | undefined;
+    // For infinite queries
+    fetchInfinite(input, opts): Promise<InfiniteData>;
+    setInfiniteData(input, updater, options?): void;
+    getInfiniteData(input?): InfiniteData | undefined;
+  };
+};
 ```
 
-**Applicability**: We can use similar patterns with Effect-Atom to generate `useAtom`, `useAtomValue` hooks from procedure definitions.
+## SSR Support
 
-### 2. Deterministic Query Keys from Path + Input
-The key structure `[path[], { input, type }?]` enables:
-- Broad invalidation (by path prefix)
-- Specific invalidation (by exact input)
-- Type differentiation (query vs infinite)
+### Server-Side Rendering Pattern
 
-**Applicability**: Effect-Atom atoms don't use query keys, but we could use path-based atom naming for debugging/devtools.
-
-### 3. Provider Pattern with Context
 ```typescript
-<TRPCProvider client={client} queryClient={queryClient}>
-  {children}
-</TRPCProvider>
+function useQuery(...) {
+  const { ssrState, queryClient, prefetchQuery } = useContext();
+  const queryKey = getQueryKeyInternal(path, input, 'query');
+
+  // During SSR prepass, prefetch queries automatically
+  if (
+    typeof window === 'undefined' &&     // Server environment
+    ssrState === 'prepass' &&            // In prepass phase
+    opts?.trpc?.ssr !== false &&         // SSR not disabled
+    opts?.enabled !== false &&           // Query enabled
+    !queryClient.getQueryCache().find({ queryKey })  // Not already cached
+  ) {
+    void prefetchQuery(queryKey, opts);
+  }
+
+  // Handle SSR error state
+  const ssrOpts = useSSRQueryOptionsIfNeeded(queryKey, opts);
+  // ...
+}
+
+function useSSRQueryOptionsIfNeeded(queryKey, opts) {
+  const { queryClient, ssrState } = useContext();
+  
+  // Prevent retry on mount if query errored during SSR
+  return ssrState && ssrState !== 'mounted' &&
+    queryClient.getQueryCache().find({ queryKey })?.state.status === 'error'
+    ? { retryOnMount: false, ...opts }
+    : opts;
+}
 ```
 
-**Applicability**: We need a similar provider for Effect-tRPC to:
-- Provide the Effect runtime
-- Provide RPC client configuration
-- Enable SSR state management
+### SSR State Machine
 
-### 4. Utils Proxy for Cache Operations
-The `useUtils()` pattern gives programmatic cache access:
 ```typescript
-const utils = trpc.useUtils();
-await utils.user.byId.invalidate({ id: 1 });
-utils.user.byId.setData({ id: 1 }, (old) => ({ ...old, name: 'New' }));
+type SSRState = 
+  | false        // Not using SSR
+  | 'prepass'    // Server: collecting queries
+  | 'mounting'   // Client: before hydration
+  | 'mounted';   // Client: after hydration
+
+// Provider manages SSR state
+const TRPCProvider = (props) => {
+  const [ssrState, setSSRState] = useState(props.ssrState ?? false);
+  
+  useEffect(() => {
+    // Transition to 'mounted' after hydration
+    setSSRState((state) => (state ? 'mounted' : false));
+  }, []);
+  
+  // ...
+};
 ```
 
-**Applicability**: With Effect-Atom, cache operations would be:
+## Subscription Hook
+
 ```typescript
-const userAtom = client.user.byId.atom({ id: 1 });
-Atom.invalidate(userAtom);  // Built into atom-core
+function useSubscription(
+  path: readonly string[],
+  input: unknown,
+  opts: UseTRPCSubscriptionOptions<unknown, TError>
+) {
+  const enabled = opts?.enabled ?? input !== skipToken;
+  const { client } = useContext();
+  
+  // Track which result properties are accessed for optimized re-renders
+  const [trackedProps] = useState(new Set<keyof $Result>([]));
+  
+  const reset = useCallback(() => {
+    currentSubscriptionRef.current?.unsubscribe();
+    
+    if (!enabled) {
+      updateState(() => ({ ...initialStateIdle, reset }));
+      return;
+    }
+    
+    updateState(() => ({ ...initialStateConnecting, reset }));
+    
+    const subscription = client.subscription(path.join('.'), input, {
+      onStarted: () => updateState(prev => ({ ...prev, status: 'pending' })),
+      onData: (data) => updateState(prev => ({ ...prev, data, status: 'pending' })),
+      onError: (error) => updateState(prev => ({ ...prev, error, status: 'error' })),
+      onComplete: () => updateState(prev => ({ ...prev, status: 'idle' })),
+      onConnectionStateChange: (result) => { /* ... */ },
+    });
+    
+    currentSubscriptionRef.current = subscription;
+  }, [client, queryKey, enabled]);
+  
+  useEffect(() => {
+    reset();
+    return () => currentSubscriptionRef.current?.unsubscribe();
+  }, [reset]);
+  
+  return state;
+}
 ```
 
-### 5. Mutation Success Override
-Global mutation success interception is powerful for automatic invalidation:
-```typescript
-createTRPCReact({
-  overrides: {
-    useMutation: {
-      onSuccess: async ({ originalFn, queryClient }) => {
-        await originalFn();
-        await queryClient.invalidateQueries();
-      },
-    },
-  },
-});
-```
+## Key Design Patterns
 
-**Applicability**: Effect-tRPC mutations should integrate with atom invalidation patterns.
+### 1. Proxy-Based API Generation
+- Uses `createRecursiveProxy` to dynamically handle any procedure path
+- Path accumulated until terminal method called (useQuery, useMutation, etc.)
 
-### 6. SSR State Machine
-The `ssrState: 'prepass' | 'mounting' | 'mounted' | false` pattern handles:
-- Server-side data prefetching
-- Hydration without refetch
-- Client mounting detection
+### 2. Query Key Design
+- Hierarchical: supports path-based invalidation
+- Type-discriminated: separates query vs infinite query keys
+- Input-aware: includes input for cache matching
 
-**Applicability**: Critical for Effect-tRPC SSR support.
+### 3. Hook Result Extension
+- Standard TanStack Query results extended with `trpc` metadata
+- Provides path information for debugging/tooling
 
-### 7. queryOptions Pattern (Composable)
-The newer pattern separates options generation from hook usage:
-```typescript
-const options = trpc.user.byId.queryOptions({ id: 1 });
-useQuery(options);           // In component
-prefetchQuery(options);      // In loader
-```
+### 4. Options Factory Pattern (New)
+- Returns TanStack Query options objects instead of calling hooks
+- Better separation of concerns
+- Enables server component usage
 
-**Applicability**: This aligns well with Effect's composable philosophy. We could have:
-```typescript
-const effect = client.user.byId.effect({ id: 1 });
-// Use in component, stream, or loader
-```
+### 5. Context-Free Operation
+- `createTRPCQueryUtils` works without React context
+- Enables server-side data fetching
+- Supports multiple query clients
 
-## Key Differences from Our Approach
+## Comparison: Old vs New Approach
 
-| Aspect | tRPC + React Query | Effect-tRPC (planned) |
-|--------|-------------------|----------------------|
-| State management | React Query cache | Effect-Atom reactive state |
-| Data fetching | `queryFn` callbacks | Effect programs |
-| Error handling | `TRPCClientError` | Effect typed errors |
-| Subscriptions | Custom state machine | Atom subscriptions |
-| SSR | Hydration + prefetch | Effect fibers |
-| Cache invalidation | Query keys | Atom dependencies |
+| Feature | `@trpc/react-query` | `@trpc/tanstack-react-query` |
+|---------|---------------------|------------------------------|
+| API Style | Direct hooks | Options factories |
+| Usage | `trpc.x.useQuery()` | `useQuery(trpc.x.queryOptions())` |
+| Server Components | Limited | Full support |
+| Context Dependency | Required | Optional |
+| Composability | Hook-based | Options-based |
+| Key Prefix | No | Yes |
+| Bundle Size | Larger | Smaller |
 
-## Files Analyzed
+## Implications for Effect-tRPC
 
-- `packages/react-query/src/createTRPCReact.tsx`
-- `packages/react-query/src/shared/hooks/createHooksInternal.tsx`
-- `packages/react-query/src/shared/proxy/decorationProxy.ts`
-- `packages/react-query/src/shared/proxy/utilsProxy.ts`
-- `packages/react-query/src/internals/getQueryKey.ts`
-- `packages/react-query/src/internals/context.tsx`
-- `packages/react-query/src/shared/hooks/types.ts`
-- `packages/tanstack-react-query/src/internals/createOptionsProxy.ts`
-- `packages/tanstack-react-query/src/internals/queryOptions.ts`
-- `packages/tanstack-react-query/src/internals/mutationOptions.ts`
-- `packages/tanstack-react-query/src/internals/utils.ts`
+1. **Options-Based API Recommended**: Follow the newer `tanstack-react-query` pattern for better composability with Effect
+
+2. **Query Key Generation**: Reuse the hierarchical key structure for invalidation patterns
+
+3. **Type Generation**: Use `DecorateRouterRecord` pattern for recursive type mapping
+
+4. **Atom Integration**: Could use Effect Atom instead of TanStack Query context
+
+5. **Streaming Support**: Both packages handle async iterables - relevant for Effect Stream

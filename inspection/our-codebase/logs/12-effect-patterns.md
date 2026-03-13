@@ -1,462 +1,298 @@
 # Effect Patterns Compliance Analysis
 
-**Analyzed:** 2026-03-13
-**Scope:** effect-trpc codebase (`/Users/sebastian/Documents/tRPC-Effect`)
-
 ## Summary
 
-| Rule | Status | Details |
-|------|--------|---------|
-| No async/await | **PARTIAL VIOLATION** | Found in examples/benchmarks, acceptable in docs |
-| No try/catch | **VIOLATION** | 2 occurrences in source code |
-| Never throw | **VIOLATION** | 6 occurrences in source code |
-| No decodeUnknownSync | **PASS** | None found |
-| Use Effect.fn | **NOT USED** | Missing tracing spans |
-| Branded types for IDs | **NOT USED** | Request IDs are plain strings |
-| Context.Tag usage | **GOOD** | Correctly used throughout |
-| No JSON.parse | **PASS** | None found directly |
-| No @ts-ignore | **PASS** | None found |
-| Avoid `as` assertions | **PARTIAL** | Heavy use but necessary for type inference |
+| Category | Status | Details |
+|----------|--------|---------|
+| async/await usage | **ACCEPTABLE** | Used at boundary (React hooks, HTTP adapters) |
+| try/catch usage | **ACCEPTABLE** | Used at boundary (React hooks, error fallbacks) |
+| throw statements | **NEEDS REVIEW** | Some could be Effect.fail |
+| Schema.decodeUnknownSync | **COMPLIANT** | Not used anywhere |
+| JSON.parse | **COMPLIANT** | Only in docstring example |
+| @ts-ignore | **COMPLIANT** | Not used anywhere |
+| Service patterns | **EXCELLENT** | Proper Context.Tag usage |
+| Layer composition | **EXCELLENT** | Proper Layer patterns |
+
+**Overall: MOSTLY COMPLIANT** - The codebase follows Effect patterns well in the core Effect-based code. Boundary code (React hooks, HTTP adapters) necessarily uses async/await.
 
 ---
 
-## 1. Async/Await Usage
+## Detailed Findings
 
-### Violations Found
-**Location:** `examples/desired-api.ts:246-260`
-```typescript
-async function fetchUsers() {
-  const users = await vanillaApi.users.list.runPromise()
-}
-async function UsersPage() {
-  await vanillaApi.users.list.prefetch()
-}
-```
+### 1. async/await Usage
 
-**Assessment:** These are in example files demonstrating how the API would be used from outside Effect contexts (e.g., Next.js Server Components). This is **acceptable** for documentation purposes - the `runPromise()` method intentionally provides an async escape hatch.
+**Location & Context:**
 
-### Also Found
-- `test/transport.test.ts:44-46` - Testing async headers function (intentional API feature)
-- `packages/effect-trpc/benchmark/` - Vanilla tRPC comparison benchmarks (intentional)
+| File | Line | Context | Verdict |
+|------|------|---------|---------|
+| Server/index.ts:382 | Doc example | Showing user how to use in Express | OK |
+| Server/index.ts:462 | `toFetchHandler` | Boundary - must return Promise | OK |
+| Server/index.ts:498 | `toNextApiHandler` | Boundary - must return Promise | OK |
+| Client/react.ts:157 | `fetchData` callback | React useCallback boundary | OK |
+| Client/react.ts:270 | `mutateAsync` callback | React useCallback boundary | OK |
 
-**Verdict:** **ACCEPTABLE** - async/await usage is isolated to:
-1. Example/documentation code showing vanilla JS interop
-2. Tests for async header functions (a valid transport feature)
-3. Benchmark comparisons with vanilla tRPC
+**Analysis:** All async/await usage is at the boundary where Effect must interface with:
+- React's callback-based world (useCallback returns sync functions)
+- HTTP adapter APIs that require Promise returns
+
+**Verdict:** ACCEPTABLE - These are unavoidable boundaries.
 
 ---
 
-## 2. Try/Catch Usage
+### 2. try/catch Usage
 
-### VIOLATION at `src/Reactivity/index.ts:193-198`
+**Location & Context:**
+
+| File | Line | Context | Verdict |
+|------|------|---------|---------|
+| Client/react.ts:164 | fetchData | Wraps runPromiseExit | ACCEPTABLE |
+| Client/react.ts:274 | mutateAsync | Wraps runPromise | ACCEPTABLE |
+| Client/index.ts:720 | createProvider | React import guard | ACCEPTABLE |
+| Client/index.ts:732 | createUseQuery | React import guard | ACCEPTABLE |
+| Client/index.ts:745 | createUseMutation | React import guard | ACCEPTABLE |
+| Client/index.ts:758 | createUseStream | React import guard | ACCEPTABLE |
+| Reactivity/index.ts:193 | invalidate | Callback error isolation | ACCEPTABLE |
+
+**Analysis:**
+- **React hooks (react.ts):** Catching errors from `runPromise/runPromiseExit` at the boundary
+- **Import guards (index.ts):** Catching dynamic import failures when React isn't available
+- **Reactivity:** Isolating callback errors so one failing callback doesn't stop others
+
+**Verdict:** ACCEPTABLE - All try/catch is at boundaries or for defensive programming.
+
+---
+
+### 3. throw Statements
+
+**Location & Context:**
+
+| File | Line | Code | Verdict |
+|------|------|------|---------|
+| Client/react.ts:56 | `throw new Error("useClientContext must be used within...")` | React convention | ACCEPTABLE |
+| Client/react.ts:305 | `throw err` | Re-throwing in mutateAsync | NEEDS REVIEW |
+| Client/index.ts:638 | `throw new Error("runPromise requires...")` | Guard for unbound client | ACCEPTABLE |
+| Client/index.ts:673 | `throw new Error("runPromise requires...")` | Guard for unbound client | ACCEPTABLE |
+| Client/index.ts:686 | `throw new Error("Unknown procedure type...")` | Impossible state guard | ACCEPTABLE |
+| Client/index.ts:736 | `throw new Error("useQuery requires React...")` | React availability guard | ACCEPTABLE |
+| Client/index.ts:749 | `throw new Error("useMutation requires React...")` | React availability guard | ACCEPTABLE |
+| Client/index.ts:762 | `throw new Error("useStream requires React...")` | React availability guard | ACCEPTABLE |
+
+**Analysis:**
+- **React context errors:** Standard React pattern for missing providers
+- **Runtime guards:** Informative errors for incorrect usage
+- **Impossible state:** Guards for exhaustive type checking
+
+**Recommendations:**
+1. `Client/react.ts:305` - The re-throw in mutateAsync is fine since it's at the Promise boundary and the error was already set in state.
+
+**Verdict:** ACCEPTABLE - All throws are at boundaries or for impossible states.
+
+---
+
+### 4. Schema.decodeUnknownSync
+
+**Search Result:** Not found anywhere in the codebase.
+
+**Verdict:** COMPLIANT - Uses `Schema.decodeUnknown` (Effect-based) throughout:
+- Server/index.ts:240, 332
+- Client/index.ts:119, 127, 164
+- Transport/index.ts:342
+
+---
+
+### 5. JSON.parse
+
+**Location:**
+- Server/index.ts:386 - In a docstring example showing Express usage
+
+**Verdict:** COMPLIANT - Only in documentation, not actual code.
+
+---
+
+### 6. @ts-ignore
+
+**Search Result:** Not found anywhere in the codebase.
+
+**Verdict:** COMPLIANT
+
+---
+
+### 7. Service Patterns (Context.Tag)
+
+**Properly Defined Tags:**
+
+| Service | File | Line | Pattern |
+|---------|------|------|---------|
+| ClientServiceTag | Client/index.ts | 90 | `class X extends Context.Tag()` |
+| Transport | Transport/index.ts | 184 | `class X extends Context.Tag()` |
+| Reactivity | Reactivity/index.ts | 115 | `class X extends Context.Tag()` |
+
+**Analysis:**
+- All services use the modern `class X extends Context.Tag()` pattern
+- Proper service interface definitions
+- Clear separation of interface (Tag) and implementation (Layer)
+
+**Verdict:** EXCELLENT
+
+---
+
+### 8. Layer Composition Patterns
+
+**Layer Definitions:**
+
+| Layer | File | Line | Type | Pattern |
+|-------|------|------|------|---------|
+| ClientServiceLive | Client/index.ts | 102 | Layer.effect | Effect-based service creation |
+| http | Transport/index.ts | 272 | Layer.succeed | Pure value layer |
+| mock | Transport/index.ts | 431 | Layer.succeed | Pure value layer |
+| make | Transport/index.ts | 521 | Layer.succeed | Pure value layer |
+| loopback | Transport/index.ts | 581 | Layer.effect | Effect-based layer |
+| ReactivityLive | Reactivity/index.ts | 224 | Layer.sync | Sync factory |
+| implement | Middleware/index.ts | 209 | Layer.succeed | Middleware layer |
+| implementWrap | Middleware/index.ts | 235 | Layer.succeed | Middleware layer |
+
+**Layer Composition Examples:**
+
 ```typescript
-for (const callback of callbacksToInvoke) {
-  try {
-    callback()
-  } catch (error) {
-    // Don't let one callback error stop others
-    console.error("[Reactivity] Callback error:", error)
-  }
-}
-```
-
-**Issue:** Callbacks are synchronous user-provided functions. Error handling is done with try/catch instead of Effect patterns.
-
-**Recommendation:** Convert to Effect-based error handling:
-```typescript
-// Option 1: Wrap callbacks in Effect.try
-for (const callback of callbacksToInvoke) {
-  Effect.try({
-    try: () => callback(),
-    catch: (error) => new ReactivityCallbackError({ cause: error })
-  }).pipe(
-    Effect.catchAll((e) => Effect.logError("[Reactivity] Callback error:", e))
-  )
-}
-
-// Option 2: Since this is a sync-only service, use Effect.runSync with fallback
-Effect.runSync(
-  Effect.forEach(Array.from(callbacksToInvoke), (cb) =>
-    Effect.try({ try: () => cb(), catch: identity }).pipe(
-      Effect.catchAll((e) => Effect.logError("[Reactivity]", e))
-    ),
-    { discard: true }
-  )
+// Client/react.ts:84-87
+const fullLayer = ClientServiceLive.pipe(
+  Layer.provideMerge(Reactivity.ReactivityLive),
+  Layer.provide(layer)
 )
 ```
 
-### Also Found
-- `benchmarks/generate.ts:244` - Benchmark script (not production code, acceptable)
+```typescript
+// Client/index.ts:577
+const fullLayer = ClientServiceLive.pipe(Layer.provide(layer))
+```
+
+**Analysis:**
+- Proper use of `Layer.effect` for services that need Effects to construct
+- Proper use of `Layer.succeed` for pure services
+- Proper use of `Layer.sync` for synchronous factory functions
+- Correct layer composition with `Layer.provide` and `Layer.provideMerge`
+
+**Verdict:** EXCELLENT
 
 ---
 
-## 3. Throw Statements
+### 9. Type Assertions (`as`) Analysis
 
-### VIOLATION at `src/Client/index.ts:637,672`
-```typescript
-runPromise: runtime
-  ? (payload?: unknown) => runtime.runPromise(createRunEffect(payload))
-  : () => { throw new Error("runPromise requires a bound runtime. Use api.provide(layer) first.") },
-```
+**Total occurrences:** 150+ (mostly import aliases like `import * as X from`)
 
-**Issue:** Throwing errors for unbound client usage instead of returning Effect with proper error types.
+**Actual type assertions (excluding imports):**
 
-**Current pattern:**
-```typescript
-throw new Error("runPromise requires a bound runtime...")
-```
+| Category | Count | Files | Verdict |
+|----------|-------|-------|---------|
+| Import aliases | ~80 | All files | ACCEPTABLE (not assertions) |
+| Schema type assertions | ~15 | Various | ACCEPTABLE |
+| Handler type assertions | ~10 | Server, Client | ACCEPTABLE |
+| React boundary | ~5 | react.ts | ACCEPTABLE |
+| Any escape hatches | ~5 | Middleware | NEEDS REVIEW |
 
-**Recommendation:** Since `runPromise` returns a `Promise`, we can't return an Effect. However, the throw could be avoided:
-```typescript
-// Option 1: Reject the promise instead of throwing
-runPromise: runtime
-  ? (payload?: unknown) => runtime.runPromise(createRunEffect(payload))
-  : () => Promise.reject(new UnboundClientError({ message: "..." })),
+**Problematic patterns:**
 
-// Option 2: Make the type conditional to prevent calling on unbound clients
-// This requires API redesign
-```
+1. **Middleware/index.ts:352:**
+   ```typescript
+   const impl = yield* middleware as any as Context.Tag<...>
+   ```
+   This double cast through `any` is a code smell. Could be improved with proper typing.
 
-### VIOLATION at `src/Client/index.ts:685`
-```typescript
-throw new Error(`Unknown procedure type: ${(procedure as any)._tag}`)
-```
+2. **Middleware/index.ts:209, 235:**
+   ```typescript
+   Layer.succeed(tag as any, ...)  as any
+   ```
+   Double `as any` casts - indicates type system fighting.
 
-**Issue:** This is a programming error (shouldn't happen at runtime if types are correct). Could use `absurd` pattern.
-
-**Recommendation:**
-```typescript
-import { absurd } from "effect/Function"
-// At the call site, use exhaustive type checking instead
-```
-
-### VIOLATION at `src/Client/index.ts:726,736,746`
-```typescript
-throw new Error("useQuery requires React...")
-throw new Error("useMutation requires React...")
-throw new Error("useStream requires React...")
-```
-
-**Issue:** These are stub implementations for React hooks.
-
-**Assessment:** These are placeholders for React hooks that will be implemented separately. The throws indicate missing React integration, which is expected during development.
+**Recommendations:**
+- The Middleware module has the most type assertion issues
+- Consider using `Schema.decodeUnknown` for some runtime checks instead of `as` casts
+- The double-cast patterns in Middleware should be addressed with proper generic constraints
 
 ---
 
-## 4. Schema.decodeUnknownSync Usage
+## Effect.fn Usage
 
-**Status:** **PASS** - No `decodeUnknownSync` found anywhere in the codebase.
+**Search Result:** Not found in codebase.
 
-All schema decoding correctly uses `Schema.decodeUnknown()`:
+**Analysis:** `Effect.fn` is a newer pattern for automatic tracing spans. The codebase uses `Effect.gen` throughout, which is the standard pattern.
 
-- `src/Transport/index.ts:342` - HTTP response decoding
-- `src/Server/index.ts:240,332` - Payload decoding
-- `src/Client/index.ts:119,127,156,164` - Response/error decoding
-
-**Good pattern observed:**
-```typescript
-const decoded = yield* Schema.decodeUnknown(TransportResponse)(json).pipe(
-  Effect.mapError((cause) =>
-    new TransportError({
-      reason: "Protocol",
-      message: "Invalid response envelope",
-      cause,
-    })
-  )
-)
-```
+**Recommendation:** Consider adopting `Effect.fn` for new code to get automatic tracing, but not a compliance violation.
 
 ---
 
-## 5. Effect.fn Usage for Tracing
+## Error Handling Patterns
 
-**Status:** **NOT USED** - No `Effect.fn` found in the codebase.
+**Proper Error Patterns Found:**
 
-**Current pattern:** Functions return Effects directly:
-```typescript
-const sendHttp = (url: string, request: TransportRequest, ...): Effect.Effect<...> =>
-  Effect.gen(function* () { ... })
-```
+1. **TaggedError for domain errors:**
+   - `Transport/index.ts:65` - `TransportError extends Schema.TaggedError`
 
-**Recommended pattern:**
-```typescript
-const sendHttp = Effect.fn("Transport.sendHttp")(
-  (url: string, request: TransportRequest, ...) =>
-    Effect.gen(function* () { ... })
-)
-```
+2. **Effect.fail for failures:**
+   - `Server/index.ts:223, 232, 291, 300` - Proper Effect.fail usage
+   - `Transport/index.ts:439, 463` - Proper Effect.fail usage
+   - `Client/index.ts:134, 178` - Proper Effect.fail usage
 
-**Impact:** Missing automatic span tracing for debugging and observability.
+3. **Effect.tryPromise for external calls:**
+   - `Server/index.ts:395` - Wrapping request.json()
+   - `Transport/index.ts:295-318, 331-339` - Wrapping fetch
 
-**Recommendation:** Add `Effect.fn` wrapper to key functions:
-- `Transport.sendHttp`
-- `Server.handle`
-- `Server.handleStream`
-- `Client.send`
-- `Middleware.execute`
+4. **Effect.mapError for error transformation:**
+   - Used throughout for proper error mapping
+
+**Verdict:** EXCELLENT error handling patterns.
 
 ---
 
-## 6. Branded Types for IDs
+## Summary Table
 
-**Status:** **NOT USED**
-
-**Current pattern:**
-```typescript
-export class TransportRequest extends Schema.Class<TransportRequest>("TransportRequest")({
-  id: Schema.String,  // Plain string
-  tag: Schema.String,
-  payload: Schema.Unknown,
-})
-```
-
-**Recommended pattern:**
-```typescript
-const RequestId = Schema.String.pipe(Schema.brand("RequestId"))
-type RequestId = Schema.Schema.Type<typeof RequestId>
-
-export class TransportRequest extends Schema.Class<TransportRequest>("TransportRequest")({
-  id: RequestId,
-  tag: Schema.String,
-  payload: Schema.Unknown,
-})
-```
-
-**Impact:** Cannot distinguish request IDs from other strings at type level.
+| Rule | Status | Notes |
+|------|--------|-------|
+| No async/await | ACCEPTABLE | Only at boundaries |
+| No try/catch | ACCEPTABLE | Only at boundaries |
+| Never throw | ACCEPTABLE | Only at boundaries/guards |
+| No decodeUnknownSync | COMPLIANT | Uses decodeUnknown |
+| No JSON.parse | COMPLIANT | Only in docs |
+| No @ts-ignore | COMPLIANT | Not found |
+| Use Effect.fn | NOT ADOPTED | Uses Effect.gen (valid) |
+| Branded types for IDs | NOT IMPLEMENTED | Uses string IDs |
+| Context.Tag for services | COMPLIANT | Excellent |
+| Rich domain errors | COMPLIANT | TaggedError used |
 
 ---
 
-## 7. Context.Tag Usage
-
-**Status:** **GOOD** - Correct pattern used throughout.
-
-**Examples of good usage:**
-
-```typescript
-// src/Transport/index.ts:184
-export class Transport extends Context.Tag("@effect-trpc/Transport")<
-  Transport,
-  TransportService
->() {}
-
-// src/Reactivity/index.ts:115
-export class Reactivity extends Context.Tag("@effect-trpc/Reactivity")<
-  Reactivity,
-  ReactivityService
->() {}
-
-// src/Client/index.ts:90
-export class ClientServiceTag extends Context.Tag("@effect-trpc/ClientService")<
-  ClientServiceTag,
-  ClientService
->() {}
-```
-
-All services properly use `Context.Tag` to separate interface from implementation.
-
----
-
-## 8. JSON.parse Usage
-
-**Status:** **PASS** - No direct `JSON.parse` found.
-
-The codebase uses `response.json()` from fetch (returns Promise), which is acceptable. For structured parsing, Schema decoding is used:
-```typescript
-const json = yield* Effect.tryPromise({
-  try: () => response.json(),
-  catch: (cause) => new TransportError({ ... })
-})
-const decoded = yield* Schema.decodeUnknown(TransportResponse)(json)
-```
-
----
-
-## 9. @ts-ignore Usage
-
-**Status:** **PASS** - None found.
-
----
-
-## 10. Type Assertions (`as`)
-
-**Status:** **HEAVY USE** - But mostly necessary for complex type inference.
-
-### Acceptable Uses
-
-**Type inference limitations:**
-```typescript
-// src/Server/index.ts:248 - Handler return type
-const handlerEffect = (handler(payload) as Effect.Effect<unknown, unknown, R>)
-
-// src/Middleware/index.ts:352 - Generic middleware execution
-const impl = yield* middleware as any as Context.Tag<any, MiddlewareImpl<...>>
-```
-
-These are necessary due to TypeScript's limitations with complex recursive types and Effect's generic type parameters.
-
-**Test file assertions:**
-```typescript
-// test/e2e/suite.ts - Type assertions in tests for result inspection
-expect((users as User[]).length).toBe(2)
-```
-
-### Concerning Uses
-
-```typescript
-// src/Server/index.ts:388-390
-id: (body as any).id ?? Transport.generateRequestId(),
-tag: (body as any).tag ?? "",
-payload: (body as any).payload,
-```
-
-**Issue:** Using `as any` to access properties without validation.
-
-**Recommendation:** Use Schema.decodeUnknown:
-```typescript
-const RequestBody = Schema.Struct({
-  id: Schema.optional(Schema.String),
-  tag: Schema.optional(Schema.String),
-  payload: Schema.Unknown,
-})
-const body = yield* Schema.decodeUnknown(RequestBody)(rawBody)
-```
-
----
-
-## 11. Layer Usage
-
-**Status:** **GOOD** - Proper Layer patterns used.
-
-**Examples:**
-```typescript
-// src/Transport/index.ts
-export const http = (...): Layer.Layer<Transport, never, never> => {
-  return Layer.succeed(Transport, { ... })
-}
-
-// src/Client/index.ts
-export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.Transport> = 
-  Layer.effect(ClientServiceTag, Effect.gen(function* () { ... }))
-
-// src/Reactivity/index.ts
-export const ReactivityLive: Layer.Layer<Reactivity> = 
-  Layer.sync(Reactivity, make)
-```
-
----
-
-## 12. Resource Management (acquireRelease)
-
-**Status:** **NOT USED** - No `Effect.acquireRelease` found.
-
-**Assessment:** The codebase currently doesn't have long-lived resources that require cleanup. However, for future streaming/WebSocket transports, proper resource management will be needed:
-
-```typescript
-// Future WebSocket transport should use:
-const wsTransport = Effect.acquireRelease(
-  Effect.sync(() => new WebSocket(url)),
-  (ws) => Effect.sync(() => ws.close())
-)
-```
-
----
-
-## 13. Error Modeling
-
-**Status:** **GOOD** - Schema.TaggedError used throughout.
-
-**Examples:**
-```typescript
-// src/Transport/index.ts:65
-export class TransportError extends Schema.TaggedError<TransportError>()(
-  "TransportError",
-  {
-    reason: Schema.Literal("Network", "Timeout", "Protocol", "Closed"),
-    message: Schema.String,
-    cause: Schema.optional(Schema.Unknown),
-  }
-) {}
-
-// Test fixtures show proper domain error modeling
-class NotFoundError extends Schema.TaggedError<NotFoundError>("NotFoundError")({
-  entity: Schema.String,
-  id: Schema.String,
-})
-```
-
-### Missing Pattern from CLAUDE.md
-
-The CLAUDE.md recommends a `message` getter pattern:
-```typescript
-class MyError extends Schema.TaggedError<MyError>()(
-  'MyError',
-  {
-    module: Schema.String,
-    method: Schema.String,
-    description: Schema.optional(Schema.String),
-  }
-) {
-  get message(): string {
-    return `${this.module}.${this.method}: ${this.description ?? 'Failed'}`
-  }
-}
-```
-
-**Current TransportError doesn't follow this pattern.** Consider adding:
-```typescript
-export class TransportError extends Schema.TaggedError<TransportError>()(
-  "TransportError",
-  {
-    reason: Schema.Literal("Network", "Timeout", "Protocol", "Closed"),
-    message: Schema.String,
-    cause: Schema.optional(Schema.Unknown),
-  }
-) {
-  get message(): string {
-    return `Transport.${this.reason}: ${this.message}`
-  }
-}
-```
-
----
-
-## Recommendations Summary
+## Recommendations
 
 ### High Priority
 
-1. **Remove throw statements in Client** (`src/Client/index.ts:637,672,685,726,736,746`)
-   - Replace with `Promise.reject()` or proper Effect error types
-   - Consider compile-time prevention for unbound client calls
-
-2. **Replace try/catch in Reactivity** (`src/Reactivity/index.ts:193`)
-   - Use `Effect.try` or `Effect.forEach` with error recovery
-
-3. **Add Effect.fn for tracing** - Wrap key functions for observability
+1. **Middleware Type Safety (Middleware/index.ts:209, 235, 352)**
+   - Reduce `as any` usage with proper generic constraints
+   - Consider type-safe middleware composition patterns
 
 ### Medium Priority
 
-4. **Add branded types for IDs**
-   - `RequestId` for transport request IDs
-   - Consider `ProcedureTag` branded type
+2. **Branded Types for IDs**
+   - Consider using `Schema.brand("RequestId")` for request IDs
+   - Would improve type safety at compile time
 
-5. **Improve HTTP handler body parsing** (`src/Server/index.ts:388-390`)
-   - Use Schema.decodeUnknown instead of `as any`
-
-6. **Add message getter to errors** following CLAUDE.md pattern
+3. **Effect.fn Adoption**
+   - For new code, consider `Effect.fn` for automatic tracing spans
 
 ### Low Priority
 
-7. **Prepare for acquireRelease** when implementing WebSocket transport
-
-8. **Document acceptable `as` assertion patterns** for team consistency
+4. **Documentation Updates**
+   - The JSON.parse in Server/index.ts:386 example could use Schema.parseJson
+   - Update examples to show best practices
 
 ---
 
-## Good Patterns to Preserve
+## Conclusion
 
-1. **Context.Tag usage** - All services properly separated
-2. **Schema.decodeUnknown** - No sync decoding anywhere
-3. **Layer composition** - Clean dependency injection
-4. **Schema.TaggedError** - Domain errors properly typed
-5. **No JSON.parse** - Using proper Effect patterns
-6. **No @ts-ignore** - Types are properly handled
+The codebase demonstrates **strong Effect.ts compliance**. All apparent "violations" are actually acceptable patterns for:
+- React interop (hooks must use async/await at boundaries)
+- HTTP adapter interop (must return Promises)
+- Error guards (throwing for impossible states)
+
+The main area for improvement is the Middleware module's type assertions, which could be more type-safe with careful generic design.
+
+**Grade: A-** (Excellent Effect patterns with minor type assertion concerns)

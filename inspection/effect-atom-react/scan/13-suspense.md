@@ -2,11 +2,16 @@
 
 ## Summary
 
-Effect Atom React provides **first-class React Suspense integration** through the `useAtomSuspense` hook. The implementation follows the standard Suspense pattern of throwing promises for loading states and re-throwing errors for error boundary integration.
+**Effect Atom React has full React Suspense support via `useAtomSuspense`.**
 
-## Key Finding: `useAtomSuspense` Hook
+The implementation uses the standard React Suspense pattern of throwing promises to suspend rendering until async data is available.
 
-Location: `Hooks.ts:257-270`
+## Key Implementation
+
+### Location
+`packages/atom-react/src/Hooks.ts:217-270`
+
+### Core Suspense Hook: `useAtomSuspense`
 
 ```typescript
 export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = false>(
@@ -25,16 +30,9 @@ export const useAtomSuspense = <A, E, const IncludeFailure extends boolean = fal
 }
 ```
 
-### Key Options
+### Promise Throwing Pattern
 
-| Option | Default | Purpose |
-|--------|---------|---------|
-| `suspendOnWaiting` | `false` | Whether to suspend during refetches (when `result.waiting === true`) |
-| `includeFailure` | `false` | If `true`, returns failures instead of throwing them |
-
-## Promise Throwing Pattern
-
-Location: `Hooks.ts:241-251`
+The Suspense integration works via `atomResultOrSuspend`:
 
 ```typescript
 function atomResultOrSuspend<A, E>(
@@ -44,24 +42,15 @@ function atomResultOrSuspend<A, E>(
 ) {
   const value = useStore(registry, atom)
   if (value._tag === "Initial" || (suspendOnWaiting && value.waiting)) {
-    throw atomToPromise(registry, atom, suspendOnWaiting)
+    throw atomToPromise(registry, atom, suspendOnWaiting)  // <-- Promise throwing!
   }
   return value
 }
 ```
 
-### Suspension Conditions
+### Promise Caching
 
-1. **`_tag === "Initial"`**: Always suspends when no data exists
-2. **`waiting === true`**: Only suspends if `suspendOnWaiting` option is enabled
-
-This allows:
-- Initial load: Always shows Suspense fallback
-- Refetch: Shows stale data by default (like SWR), optionally suspend
-
-## Promise Factory Pattern
-
-Location: `Hooks.ts:209-239`
+Promises are cached in a global map to ensure React Suspense works correctly:
 
 ```typescript
 const atomPromiseMap = globalValue(
@@ -87,7 +76,7 @@ function atomToPromise<A, E>(
       if (result._tag === "Initial" || (suspendOnWaiting && result.waiting)) {
         return
       }
-      setTimeout(dispose, 1000)  // Cleanup delay
+      setTimeout(dispose, 1000)  // Cleanup after 1 second
       resolve()
       map.delete(atom)
     })
@@ -97,194 +86,103 @@ function atomToPromise<A, E>(
 }
 ```
 
-### Promise Caching Strategy
+## Suspense Behavior Matrix
 
-1. **Two separate maps**: One for `suspendOnWaiting=true`, one for `false`
-2. **Single promise per atom**: Prevents multiple subscriptions
-3. **Cleanup with delay**: `setTimeout(dispose, 1000)` prevents race conditions
-4. **Resolution condition**: Resolves when result is no longer Initial (and not waiting, if configured)
+| Result State | `suspendOnWaiting: false` | `suspendOnWaiting: true` |
+|--------------|---------------------------|--------------------------|
+| `Initial` | **Suspends** | **Suspends** |
+| `Initial` (waiting) | **Suspends** | **Suspends** |
+| `Success` | Returns value | Returns value |
+| `Success` (waiting) | Returns value | **Suspends** |
+| `Failure` | Throws error* | Throws error* |
+| `Failure` (waiting) | Throws error* | **Suspends** |
 
-## Error Boundary Integration
+*Unless `includeFailure: true`, then returns the Failure result
 
-### Throwing Behavior
+## Options
 
-Location: `Hooks.ts:266-268`
+### `suspendOnWaiting`
+- Default: `false`
+- When `true`: Suspends even when there's a previous value but new data is loading
+- Use case: Show loading state during refetch instead of stale data
 
-```typescript
-if (result._tag === "Failure" && !options?.includeFailure) {
-  throw Cause.squash(result.cause)
-}
-```
+### `includeFailure`
+- Default: `false`
+- When `false`: Throws errors as exceptions (caught by Error Boundary)
+- When `true`: Returns `Failure` result to component for manual handling
 
-When a Result is `Failure`:
-- **Default**: Throws the squashed error for error boundaries to catch
-- **`includeFailure: true`**: Returns the `Failure` for manual handling
+## Integration with Result Type
 
-### `Cause.squash` Transformation
-
-The `Cause` is converted to a plain Error:
-- `Fail(error)` -> throws `error`
-- `Die(defect)` -> throws `defect`
-- `Interrupt` -> throws `InterruptedException`
-
-## Test Evidence
-
-Location: `test/index.test.tsx:115-158`
-
-### Suspense Success Test
-```tsx
-test("suspense success", () => {
-  const atom = Atom.make(Effect.never)  // Never resolves
-
-  function TestComponent() {
-    const value = useAtomSuspense(atom).value
-    return <div data-testid="value">{value}</div>
-  }
-
-  render(
-    <Suspense fallback={<div data-testid="loading">Loading...</div>}>
-      <TestComponent />
-    </Suspense>
-  )
-
-  expect(screen.getByTestId("loading")).toBeInTheDocument()
-})
-```
-
-### Error Boundary Test
-```tsx
-test("suspense error", () => {
-  const atom = Atom.make(Effect.fail(new Error("test")))
-  
-  function TestComponent() {
-    const value = useAtomSuspense(atom).value
-    return <div data-testid="value">{value}</div>
-  }
-
-  render(
-    <ErrorBoundary fallback={<div data-testid="error">Error</div>}>
-      <Suspense fallback={<div data-testid="loading">Loading...</div>}>
-        <TestComponent />
-      </Suspense>
-    </ErrorBoundary>
-  )
-
-  expect(screen.getByTestId("error")).toBeInTheDocument()
-})
-```
-
-## Comparison: useAtomValue vs useAtomSuspense
-
-| Aspect | `useAtomValue` | `useAtomSuspense` |
-|--------|---------------|------------------|
-| Input | Any `Atom<A>` | `Atom<Result<A, E>>` |
-| Loading state | Returns `Result.Initial` | Suspends (throws Promise) |
-| Error state | Returns `Result.Failure` | Throws error (or returns if `includeFailure`) |
-| Success | Returns `Result.Success` | Returns `Result.Success` |
-| Recommended for | Manual state handling | Declarative Suspense UI |
-
-## Alternative: Result.builder Pattern
-
-For non-Suspense usage, Effect Atom provides a builder pattern:
+The Suspense hook works specifically with atoms containing `Result<A, E>`:
 
 ```typescript
-function Component() {
-  const result = useAtomValue(queryAtom)
-  
-  return Result.builder(result)
-    .onWaiting(() => <Spinner />)
-    .onError((e) => <Error error={e} />)
-    .onSuccess((data) => <DataView data={data} />)
-    .render()
+type Result<A, E> = Initial<A, E> | Success<A, E> | Failure<A, E>
+
+interface Initial<A, E> {
+  readonly _tag: "Initial"
+  readonly waiting: boolean  // Loading state
+}
+
+interface Success<A, E> {
+  readonly _tag: "Success"
+  readonly value: A
+  readonly waiting: boolean  // Refetching indicator
+  readonly timestamp: number
+}
+
+interface Failure<A, E> {
+  readonly _tag: "Failure"
+  readonly cause: Cause.Cause<E>
+  readonly previousSuccess: Option<Success<A, E>>  // Stale-while-revalidate
+  readonly waiting: boolean
 }
 ```
 
-The `render()` method:
-- Returns `null` for `Initial`
-- Throws for unhandled `Failure`
-- Returns handler output for matched states
-
-## Application to Our useQuery
-
-### Recommended Pattern
-
-```typescript
-// Primary: Suspense-based API
-export function useQuery<A, E>(
-  atom: Atom<Result<A, E>>,
-  options?: { suspendOnWaiting?: boolean }
-): Result.Success<A, E> {
-  // Delegate to useAtomSuspense
-  return useAtomSuspense(atom, options)
-}
-
-// Alternative: Non-suspense API
-export function useQueryResult<A, E>(
-  atom: Atom<Result<A, E>>
-): Result<A, E> {
-  return useAtomValue(atom)
-}
-```
-
-### Key Design Decisions
-
-1. **Default `suspendOnWaiting: false`**: Show stale data during refetch
-2. **Use error boundaries**: Let React handle errors declaratively
-3. **Provide escape hatch**: `useQueryResult` for manual control
-
-### Usage Example
+## Usage Pattern
 
 ```tsx
-function UserProfile({ userId }: { userId: string }) {
-  const userAtom = useMemo(() => createUserQuery(userId), [userId])
-  const { value: user } = useQuery(userAtom)
-  
-  return <div>{user.name}</div>
+import { useAtomSuspense } from "@effect-atom/atom-react"
+import { Suspense, ErrorBoundary } from "react"
+
+// Async atom that fetches data
+const userAtom = Atom.async(() => fetchUser())
+
+function UserProfile() {
+  // Suspends until data is ready
+  const result = useAtomSuspense(userAtom)
+  return <div>{result.value.name}</div>
 }
 
-function Page() {
+function App() {
   return (
-    <ErrorBoundary fallback={<ErrorPage />}>
-      <Suspense fallback={<ProfileSkeleton />}>
-        <UserProfile userId="123" />
+    <ErrorBoundary fallback={<Error />}>
+      <Suspense fallback={<Loading />}>
+        <UserProfile />
       </Suspense>
     </ErrorBoundary>
   )
 }
 ```
 
-## Architecture Insights
+## Key Design Decisions
 
-### Why Promise Caching Matters
+1. **Global Promise Cache**: Uses `WeakMap` for registry-level caching and `Map` for atom-level caching to prevent duplicate promise creation during React's concurrent rendering
 
-React may call components multiple times during concurrent rendering. The promise cache ensures:
-1. Same promise is thrown each time (React can track it)
-2. Single subscription per atom (no duplicate effects)
-3. Proper cleanup after resolution
+2. **Delayed Cleanup**: `setTimeout(dispose, 1000)` ensures subscription is cleaned up after promise resolves, but not immediately (handles edge cases with React re-renders)
 
-### The `useSyncExternalStore` Foundation
+3. **Separate Maps**: Maintains separate promise maps for `suspendOnWaiting: true/false` to handle different suspension semantics correctly
 
-All hooks build on `useSyncExternalStore`:
-```typescript
-function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
-  const store = makeStore(registry, atom)
-  return React.useSyncExternalStore(store.subscribe, store.snapshot, store.getServerSnapshot)
-}
-```
+4. **Error Throwing**: Non-suspending failures throw via `Cause.squash()` - integrates with React Error Boundaries
 
-This provides:
-- Concurrent mode compatibility
-- SSR support via `getServerSnapshot`
-- Tearing prevention
+5. **Works with useSyncExternalStore**: The underlying `useStore` uses React 18's `useSyncExternalStore` for tear-free concurrent reads
 
-## Summary
+## Implications for effect-trpc
 
-Effect Atom React's Suspense integration is **production-ready** and follows best practices:
+Effect Atom's Suspense support is well-designed and production-ready. For effect-trpc integration:
 
-1. **Standard Suspense pattern**: Throw promises for loading, throw errors for failures
-2. **Configurable waiting behavior**: `suspendOnWaiting` option for refetch handling
-3. **Error boundary compatible**: Errors bubble up to nearest ErrorBoundary
-4. **Promise deduplication**: Global cache prevents multiple subscriptions
-5. **Clean separation**: `useAtomSuspense` for Suspense, `useAtomValue` for manual control
+1. **RPC queries should return `Result<A, E>`** to work with `useAtomSuspense`
+2. **The `waiting` flag enables optimistic updates** - show previous data while refetching
+3. **Error handling integrates with React patterns** - Error Boundaries + typed errors
+4. **Concurrent Mode compatible** - uses proper React 18 primitives
 
-For our tRPC-Effect library, we should **delegate to useAtomSuspense** and expose the same options, providing a thin wrapper that creates the appropriate query atom.
+The Suspense implementation is complete and follows React best practices. No additional Suspense work needed in effect-trpc - just ensure RPC atoms produce `Result` values.

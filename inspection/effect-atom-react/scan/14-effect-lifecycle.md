@@ -1,72 +1,25 @@
-# H14: Effect in React Lifecycle
+# H14: Effect Lifecycle in React - Effect Atom React Analysis
 
 ## Summary
 
-Effect Atom uses a **synchronous-first execution model** where Effects are run during atom value computation, not during React's render or effect phases. The key insight is that Effects are run via `runCallbackSync` which attempts synchronous execution first, falling back to async with observer callbacks.
+Effect Atom React provides a sophisticated system for running Effects within React's lifecycle. Unlike naive `runPromise` approaches, it uses a custom runtime execution model with proper lifecycle management, synchronous optimization paths, and automatic cleanup integration.
 
-## Where Effects Are Executed
+## Key Finding: No Direct `runPromise` Usage
 
-### 1. Atom Value Computation (NOT render phase)
+Effect Atom React does **not** use `Effect.runPromise` in React lifecycle code. Instead, it implements a custom `runCallbackSync` pattern that:
 
-Effects are executed when an atom's value is computed. This happens:
+1. Optimizes for synchronous completion
+2. Provides proper cancellation
+3. Integrates with React's `useSyncExternalStore`
 
-1. **On first subscription/mount** - When React mounts a component using `useAtomValue`, the registry creates the atom node and computes its value
-2. **On invalidation** - When dependencies change, the atom recomputes
+---
 
-**File:** `packages/atom/src/Atom.ts:482-525`
-```typescript
-function makeEffect<A, E>(
-  ctx: Context,
-  effect: Effect.Effect<A, E, Scope.Scope | AtomRegistry>,
-  initialValue: Result.Result<A, E>,
-  runtime = Runtime.defaultRuntime,
-  uninterruptible = false
-): Result.Result<A, E> {
-  const previous = ctx.self<Result.Result<A, E>>()
+## Effect Execution Patterns
 
-  // Create a scope for cleanup
-  const scope = Effect.runSync(Scope.make())
-  ctx.addFinalizer(() => {
-    Effect.runFork(Scope.close(scope, Exit.void))
-  })
-  
-  // Build runtime with scope + registry
-  const contextMap = new Map(runtime.context.unsafeMap)
-  contextMap.set(Scope.Scope.key, scope)
-  contextMap.set(AtomRegistry.key, ctx.registry)
-  const scopedRuntime = Runtime.make({...})
-  
-  // Execute synchronously if possible
-  let syncResult: Result.Result<A, E> | undefined
-  let isAsync = false
-  const cancel = runCallbackSync(scopedRuntime)(
-    effect,
-    function(exit) {
-      syncResult = Result.fromExitWithPrevious(exit, previous)
-      if (isAsync) {
-        ctx.setSelf(syncResult)  // Update atom value asynchronously
-      }
-    },
-    uninterruptible
-  )
-  isAsync = true
-  if (cancel !== undefined) {
-    ctx.addFinalizer(cancel)
-  }
-  
-  // Return synchronous result or waiting state
-  if (syncResult !== undefined) {
-    return syncResult
-  } else if (previous._tag === "Some") {
-    return Result.waitingFrom(previous)
-  }
-  return Result.waiting(initialValue)
-}
-```
+### 1. Custom Runtime Callback (`internal/runtime.ts:35-63`)
 
-### 2. Synchronous-First Execution via `runCallbackSync`
+The core execution primitive is `runCallbackSync`:
 
-**File:** `packages/atom/src/internal/runtime.ts:35-63`
 ```typescript
 export const runCallbackSync = <R, ER = never>(runtime: Runtime.Runtime<R>) => {
   const runFork = Runtime.runFork(runtime)
@@ -75,25 +28,26 @@ export const runCallbackSync = <R, ER = never>(runtime: Runtime.Runtime<R>) => {
     onExit: (exit: Exit.Exit<A, E | ER>) => void,
     uninterruptible = false
   ): (() => void) | undefined => {
-    // Fast path for already-completed Effects
+    // Fast path for immediate values
     const op = fastPath(effect)
     if (op) {
       onExit(op)
-      return undefined
+      return undefined  // No cleanup needed
     }
     
-    // Try synchronous execution first
+    // Sync scheduler for immediate execution attempt
     const scheduler = new SyncScheduler()
     const fiberRuntime = runFork(effect, { scheduler })
     scheduler.flush()
     
+    // Check if completed synchronously
     const result = fiberRuntime.unsafePoll()
     if (result) {
       onExit(result)
-      return undefined  // No cleanup needed - completed synchronously
+      return undefined  // No cleanup needed
     }
     
-    // Async case - add observer for completion
+    // Async: register observer and return cancel function
     fiberRuntime.addObserver(onExit)
     function cancel() {
       fiberRuntime.removeObserver(onExit)
@@ -106,21 +60,327 @@ export const runCallbackSync = <R, ER = never>(runtime: Runtime.Runtime<R>) => {
 }
 ```
 
-## Runtime Management
+**Key characteristics:**
+- Uses `SyncScheduler` for synchronous execution attempt
+- Returns `undefined` (no cancel) if effect completes synchronously
+- Returns cancel function for async effects
+- Supports uninterruptible mode for critical operations
 
-### 1. Registry as Runtime Context
+### 2. Fast Path Optimization (`internal/runtime.ts:11-32`)
 
-The Registry serves as the runtime context for all atoms:
+Direct handling of already-resolved values:
 
-**File:** `packages/atom-react/src/RegistryContext.ts:22-25`
 ```typescript
-export const RegistryContext = React.createContext<Registry.Registry>(Registry.make({
-  scheduleTask,
-  defaultIdleTTL: 400
-}))
+const fastPath = <R, E, A>(effect: Effect.Effect<A, E, R>): Exit.Exit<A, E> | undefined => {
+  const op = effect as any
+  switch (op._tag) {
+    case "Failure":
+    case "Success":
+      return op
+    case "Left":
+      return Exit.fail(op.left)
+    case "Right":
+      return Exit.succeed(op.right)
+    case "Some":
+      return Exit.succeed(op.value)
+    case "None":
+      return Exit.fail(new NoSuchElementException())
+  }
+}
 ```
 
-### 2. Scheduler Integration with React
+---
+
+## Cleanup Patterns
+
+### 1. Lifetime-Based Cleanup (`internal/registry.ts:495-719`)
+
+Each atom computation gets a `Lifetime` object that manages:
+
+```typescript
+interface Lifetime<A> extends Atom.Context {
+  isFn: boolean
+  readonly node: Node<A>
+  finalizers: Array<() => void> | undefined
+  disposed: boolean
+  readonly dispose: () => void
+}
+```
+
+The `addFinalizer` method registers cleanup callbacks:
+
+```typescript
+addFinalizer(this: Lifetime<any>, f: () => void): void {
+  if (this.disposed) {
+    throw disposedError(this.node.atom)
+  }
+  this.finalizers ??= []
+  this.finalizers.push(f)
+}
+```
+
+Cleanup is invoked in reverse order on disposal:
+
+```typescript
+dispose(this: Lifetime<any>): void {
+  this.disposed = true
+  if (this.finalizers === undefined) {
+    return
+  }
+  const finalizers = this.finalizers
+  this.finalizers = undefined
+  // Reverse order - LIFO
+  for (let i = finalizers.length - 1; i >= 0; i--) {
+    finalizers[i]()
+  }
+}
+```
+
+### 2. Effect Cleanup Integration (`Atom.ts:482-525`)
+
+When an effect is executed, cleanup is automatically registered:
+
+```typescript
+function makeEffect<A, E>(
+  ctx: Context,
+  effect: Effect.Effect<A, E, Scope.Scope | AtomRegistry>,
+  initialValue: Result.Result<A, E>,
+  runtime = Runtime.defaultRuntime,
+  uninterruptible = false
+): Result.Result<A, E> {
+  // Create a scoped runtime
+  const scope = Effect.runSync(Scope.make())
+  
+  // Register scope cleanup as finalizer
+  ctx.addFinalizer(() => {
+    Effect.runFork(Scope.close(scope, Exit.void))
+  })
+  
+  // Execute effect
+  const cancel = runCallbackSync(scopedRuntime)(
+    effect,
+    function(exit) {
+      syncResult = Result.fromExitWithPrevious(exit, previous)
+      if (isAsync) {
+        ctx.setSelf(syncResult)
+      }
+    },
+    uninterruptible
+  )
+  
+  // Register fiber cancellation as finalizer
+  if (cancel !== undefined) {
+    ctx.addFinalizer(cancel)
+  }
+  // ...
+}
+```
+
+### 3. Registry Provider Cleanup (`RegistryContext.ts:52-62`)
+
+React-level cleanup with graceful timeout:
+
+```typescript
+React.useEffect(() => {
+  if (ref.current?.timeout !== undefined) {
+    clearTimeout(ref.current.timeout)
+  }
+  return () => {
+    // Delayed disposal allows for fast remounts
+    ref.current!.timeout = setTimeout(() => {
+      ref.current?.registry.dispose()
+      ref.current = null
+    }, 500)
+  }
+}, [ref])
+```
+
+### 4. Registry Disposal (`internal/registry.ts:247-259`)
+
+Complete cleanup of all resources:
+
+```typescript
+reset(): void {
+  // Clear all timeout buckets
+  this.timeoutBuckets.forEach(([, handle]) => clearTimeout(handle))
+  this.timeoutBuckets.clear()
+  this.nodeTimeoutBucket.clear()
+
+  // Dispose all nodes
+  this.nodes.forEach((node) => node.remove())
+  this.nodes.clear()
+}
+
+dispose(): void {
+  this.disposed = true
+  this.reset()
+}
+```
+
+---
+
+## React Integration Patterns
+
+### 1. useSyncExternalStore Integration (`Hooks.ts:53-57`)
+
+The primary React hook uses `useSyncExternalStore`:
+
+```typescript
+function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
+  const store = makeStore(registry, atom)
+  return React.useSyncExternalStore(
+    store.subscribe, 
+    store.snapshot, 
+    store.getServerSnapshot
+  )
+}
+```
+
+This ensures proper React 18 concurrent mode compatibility.
+
+### 2. Mount Effect Pattern (`Hooks.ts:99-101`)
+
+Atoms are mounted via `useEffect`:
+
+```typescript
+function mountAtom<A>(registry: Registry.Registry, atom: Atom.Atom<A>): void {
+  React.useEffect(() => registry.mount(atom), [atom, registry])
+}
+```
+
+The `mount` returns an unsubscribe function that React calls on cleanup.
+
+### 3. Suspense Pattern (`Hooks.ts:241-251`)
+
+For async atoms, suspense is implemented by throwing a Promise:
+
+```typescript
+function atomResultOrSuspend<A, E>(
+  registry: Registry.Registry,
+  atom: Atom.Atom<Result.Result<A, E>>,
+  suspendOnWaiting: boolean
+) {
+  const value = useStore(registry, atom)
+  if (value._tag === "Initial" || (suspendOnWaiting && value.waiting)) {
+    throw atomToPromise(registry, atom, suspendOnWaiting)
+  }
+  return value
+}
+```
+
+The Promise is cached to prevent duplicate suspensions:
+
+```typescript
+const atomPromiseMap = globalValue(
+  "@effect-atom/atom-react/atomPromiseMap",
+  () => ({
+    suspendOnWaiting: new Map<Atom.Atom<any>, Promise<void>>(),
+    default: new Map<Atom.Atom<any>, Promise<void>>()
+  })
+)
+```
+
+---
+
+## Scoped Effect Execution
+
+### 1. Effect.Scope Integration (`Atom.ts:490-502`)
+
+Each atom effect gets its own scope:
+
+```typescript
+const scope = Effect.runSync(Scope.make())
+ctx.addFinalizer(() => {
+  Effect.runFork(Scope.close(scope, Exit.void))
+})
+
+const contextMap = new Map(runtime.context.unsafeMap)
+contextMap.set(Scope.Scope.key, scope)
+contextMap.set(AtomRegistry.key, ctx.registry)
+
+const scopedRuntime = Runtime.make({
+  context: EffectContext.unsafeMake(contextMap),
+  fiberRefs: runtime.fiberRefs,
+  runtimeFlags: runtime.runtimeFlags
+})
+```
+
+### 2. AtomRuntime for Service Layers (`Atom.ts:652-706`)
+
+Service layers get their own scoped runtime:
+
+```typescript
+export const context: (options: {
+  readonly memoMap: Layer.MemoMap
+}) => RuntimeFactory = (options) => {
+  function factory<E, R>(
+    create: Layer.Layer<R, E, AtomRegistry | Reactivity.Reactivity>
+  ): AtomRuntime<R, E> {
+    // Build layer with memoization
+    self.read = function read(get: Context) {
+      const layer = get(layerAtom)
+      const build = Effect.flatMap(
+        Effect.flatMap(Effect.scope, (scope) => 
+          Layer.buildWithMemoMap(layer, options.memoMap, scope)
+        ),
+        (context) => Effect.provide(Effect.runtime<R>(), context)
+      )
+      // Uninterruptible to prevent partial initialization
+      return effect(get, build, { uninterruptible: true })
+    }
+  }
+}
+```
+
+---
+
+## Stream Execution Pattern (`Atom.ts:753-818`)
+
+Streams are handled with a channel-based approach:
+
+```typescript
+function makeStream<A, E>(
+  ctx: Context,
+  stream: Stream.Stream<A, E, AtomRegistry>,
+  initialValue: Result.Result<A, E | NoSuchElementException>,
+  runtime = Runtime.defaultRuntime
+): Result.Result<A, E | NoSuchElementException> {
+  const writer: Channel.Channel<never, Chunk.Chunk<A>, never, E> = Channel.readWithCause({
+    onInput(input: Chunk.Chunk<A>) {
+      return Channel.suspend(() => {
+        const last = Chunk.last(input)
+        if (last._tag === "Some") {
+          ctx.setSelf(Result.success(last.value, { waiting: true }))
+        }
+        return writer
+      })
+    },
+    onFailure(cause: Cause.Cause<E>) {
+      return Channel.sync(() => {
+        ctx.setSelf(Result.failureWithPrevious(cause, {
+          previous: ctx.self<Result.Result<A, E | NoSuchElementException>>()
+        }))
+      })
+    },
+    onDone(_done: unknown) {
+      // Handle stream completion
+    }
+  })
+
+  const cancel = runCallbackSync(registryRuntime)(
+    Channel.runDrain(Channel.pipeTo(Stream.toChannel(stream), writer)),
+    constVoid,
+    false
+  )
+  if (cancel !== undefined) {
+    ctx.addFinalizer(cancel)
+  }
+}
+```
+
+---
+
+## React Scheduler Integration (`RegistryContext.ts:14-16`)
 
 Uses React's scheduler for task scheduling:
 
@@ -132,258 +392,118 @@ export function scheduleTask(f: () => void): void {
 }
 ```
 
-### 3. Scoped Runtime per Effect Execution
+This ensures atom updates are coordinated with React's rendering priority.
 
-Each Effect atom creates a scoped runtime with:
-- Fresh `Scope` for resource management
-- `AtomRegistry` service for atom access
-- Inherited `Runtime` context (layers, fiber refs)
+---
 
-## Cleanup Patterns
+## Batching System (`internal/registry.ts:760-820`)
 
-### 1. Lifetime-based Cleanup
-
-Each atom node has a `Lifetime` that tracks finalizers:
-
-**File:** `packages/atom/src/internal/registry.ts:495-501`
-```typescript
-interface Lifetime<A> extends Atom.Context {
-  isFn: boolean
-  readonly node: Node<A>
-  finalizers: Array<() => void> | undefined
-  disposed: boolean
-  readonly dispose: () => void
-}
-```
-
-### 2. Scope Closure on Dispose
-
-When an atom's lifetime ends, the scope is closed:
+Effect executions are batched for performance:
 
 ```typescript
-const scope = Effect.runSync(Scope.make())
-ctx.addFinalizer(() => {
-  Effect.runFork(Scope.close(scope, Exit.void))
-})
-```
-
-### 3. Fiber Interruption on Cancellation
-
-For async Effects, the fiber is interrupted on cleanup:
-
-```typescript
-function cancel() {
-  fiberRuntime.removeObserver(onExit)
-  if (!uninterruptible) {
-    fiberRuntime.unsafeInterruptAsFork(FiberId.none)
+export function batch(f: () => void): void {
+  batchState.phase = BatchPhase.collect
+  batchState.depth++
+  try {
+    f()
+    if (batchState.depth === 1) {
+      // Rebuild stale nodes
+      for (let i = 0; i < batchState.stale.length; i++) {
+        batchRebuildNode(batchState.stale[i])
+      }
+      // Notify listeners
+      batchState.phase = BatchPhase.commit
+      for (const node of batchState.notify) {
+        node.notify()
+      }
+      batchState.notify.clear()
+    }
+  } finally {
+    batchState.depth--
+    if (batchState.depth === 0) {
+      batchState.phase = BatchPhase.disabled
+      batchState.stale = []
+    }
   }
 }
-return cancel
 ```
 
-### 4. Registry Provider Cleanup
+---
 
-**File:** `packages/atom-react/src/RegistryContext.ts:52-62`
+## TTL-Based Garbage Collection (`internal/registry.ts:188-245`)
+
+Idle atoms are cleaned up with configurable TTL:
+
 ```typescript
-React.useEffect(() => {
-  if (ref.current?.timeout !== undefined) {
-    clearTimeout(ref.current.timeout)
+setNodeTimeout(node: Node<any>): void {
+  let idleTTL = node.atom.idleTTL ?? this.defaultIdleTTL!
+  const ttl = Math.ceil(idleTTL! / this.timeoutResolution) * this.timeoutResolution
+  const timestamp = Date.now() + ttl
+  const bucket = timestamp - (timestamp % this.timeoutResolution) + this.timeoutResolution
+
+  let entry = this.timeoutBuckets.get(bucket)
+  if (entry === undefined) {
+    entry = [
+      new Set<Node<any>>(),
+      setTimeout(() => this.sweepBucket(bucket), bucket - Date.now())
+    ]
+    this.timeoutBuckets.set(bucket, entry)
   }
-  return () => {
-    // Delayed disposal to handle React StrictMode double-mount
-    ref.current!.timeout = setTimeout(() => {
-      ref.current?.registry.dispose()
-      ref.current = null
-    }, 500)
-  }
-}, [ref])
-```
-
-### 5. Atom Mount/Unmount Lifecycle
-
-**File:** `packages/atom-react/src/Hooks.ts:99-101`
-```typescript
-function mountAtom<A>(registry: Registry.Registry, atom: Atom.Atom<A>): void {
-  React.useEffect(() => registry.mount(atom), [atom, registry])
+  entry[0].add(node)
+  this.nodeTimeoutBucket.set(node, bucket)
 }
 ```
 
-## Rules for Effect Execution in React
+---
 
-### Rule 1: Effects Run Outside Render Phase
-Effects are executed when atom nodes compute their values, which happens:
-- During the first `useSyncExternalStore` subscription
-- When the atom is invalidated and needs recomputation
+## Key Patterns for effect-trpc
 
-### Rule 2: Synchronous Effects Complete Immediately
-If an Effect can complete synchronously (using `SyncScheduler`), the atom value is immediately available without triggering a re-render.
+### 1. Avoid `runPromise` in Hooks
+Use callback-based execution with proper cleanup registration.
 
-### Rule 3: Async Effects Return Waiting State
-Async Effects return `Result.waiting(initialValue)` and trigger a re-render when they complete via `ctx.setSelf()`.
+### 2. Synchronous Fast Path
+Optimize for effects that complete synchronously using `SyncScheduler`.
 
-### Rule 4: Cleanup via Scope and Finalizers
-- Effects get a fresh `Scope` 
-- Finalizers are registered via `ctx.addFinalizer()`
-- Scope closes when atom is invalidated or removed
+### 3. Scoped Effect Context
+Provide proper Effect context (Scope, services) to effects.
 
-### Rule 5: Interruption is Supported
-Async Effects can be interrupted when:
-- The atom is invalidated (new value computation)
-- The atom is removed from the registry
-- The component unmounts (via subscription cleanup)
+### 4. Automatic Cleanup
+Register cleanup functions via `addFinalizer` pattern.
 
-## How This Applies to Our Mutation Hooks
+### 5. React Scheduler Coordination
+Use React's scheduler for updates to ensure proper priority.
 
-### Pattern 1: Use `Atom.fn` for Mutations
+### 6. useSyncExternalStore
+For React 18 compatibility and concurrent mode support.
 
-```typescript
-// Creates a writable atom that runs an Effect when written to
-const mutationAtom = Atom.fn<Input, Output, Error>(
-  (input, get) => Effect.gen(function*() {
-    // Your mutation logic here
-    return yield* someEffect(input)
-  })
-)
+### 7. Suspense Integration
+Throw cached promises for suspense boundaries.
 
-// In React:
-const [result, mutate] = useAtom(mutationAtom)
-// mutate(input) triggers the Effect
-```
+### 8. Batching
+Batch multiple atom updates for performance.
 
-### Pattern 2: Runtime Integration for Services
+---
 
-```typescript
-const Rx = Atom.context({ memoMap: Atom.defaultMemoMap })
+## Architecture Comparison
 
-const myRuntime = Rx(MyServiceLayer)
+| Pattern | Naive Approach | Effect Atom React |
+|---------|----------------|-------------------|
+| Execution | `runPromise` in useEffect | `runCallbackSync` with cancellation |
+| Cleanup | Manual fiber tracking | Automatic via `addFinalizer` |
+| Sync optimization | None | Fast path + SyncScheduler |
+| React integration | useState + useEffect | useSyncExternalStore |
+| Scope management | Manual | Automatic per-atom scopes |
+| Error handling | Try/catch | Result type with Cause |
+| Suspense | Custom | Built-in with Promise caching |
 
-const mutationAtom = myRuntime.fn<Input, A, E>(
-  (input, get) => Effect.gen(function*() {
-    const service = yield* MyService
-    return yield* service.mutate(input)
-  })
-)
-```
+---
 
-### Pattern 3: Handle Result States
+## Files Analyzed
 
-```typescript
-const result = useAtomValue(mutationAtom)
-
-Result.match(result, {
-  onInitial: () => <IdleState />,
-  onSuccess: (data) => <SuccessState data={data} />,
-  onFailure: (error) => <ErrorState error={error} />
-})
-
-// Or with waiting state:
-if (result.waiting) {
-  return <LoadingState previousData={Result.value(result)} />
-}
-```
-
-### Pattern 4: Suspense Integration
-
-```typescript
-// useAtomSuspense throws a promise for React Suspense
-const result = useAtomSuspense(queryAtom, { 
-  suspendOnWaiting: true 
-})
-// result is always Success | Failure (never Initial)
-```
-
-### Key Insights for effect-trpc
-
-1. **No `Effect.runPromise` in React components** - Atom handles execution
-2. **Mutations use `Atom.fn`** - Returns `Result<A, E>` automatically
-3. **Cleanup is automatic** - Scopes close on unmount/invalidation
-4. **Reactivity via `withReactivity`** - Ties atoms to server mutation keys
-
-### Example Mutation Pattern
-
-```typescript
-// Define mutation atom
-const createUserAtom = Rx.fn<CreateUserInput, User, CreateUserError>(
-  (input, _get) => Effect.gen(function*() {
-    const client = yield* TrpcClient
-    return yield* client.user.create(input)
-  }),
-  { reactivityKeys: ["users"] }  // Invalidates user queries on success
-)
-
-// Use in component
-function CreateUserForm() {
-  const [result, createUser] = useAtom(createUserAtom)
-  
-  return (
-    <form onSubmit={(e) => {
-      e.preventDefault()
-      createUser({ name: "..." })
-    }}>
-      {result.waiting && <Spinner />}
-      {Result.isFailure(result) && <Error cause={result.cause} />}
-      {Result.isSuccess(result) && <Success user={result.value} />}
-      <button type="submit">Create</button>
-    </form>
-  )
-}
-```
-
-## Sequence Diagram
-
-```
-Component Mount
-     │
-     ▼
-useAtomValue(atom)
-     │
-     ▼
-useSyncExternalStore
-     │
-     ▼
-registry.subscribe(atom)
-     │
-     ▼
-registry.ensureNode(atom)
-     │
-     ▼
-node.value() ◀─── First value computation
-     │
-     ▼
-atom.read(lifetime)
-     │
-     ▼
-makeEffect(ctx, effect)
-     │
-     ▼
-runCallbackSync(runtime)(effect)
-     │
-     ├─sync─► Return Result immediately
-     │
-     └─async─► Return Result.waiting
-                    │
-                    ▼ (later)
-              fiber completes
-                    │
-                    ▼
-              ctx.setSelf(result)
-                    │
-                    ▼
-              node.setValue(result)
-                    │
-                    ▼
-              listeners notified
-                    │
-                    ▼
-              React re-renders
-```
-
-## Summary Table
-
-| Phase | Where Effects Run | API Used |
-|-------|-------------------|----------|
-| Mount | Node value computation | `runCallbackSync` |
-| Recomputation | Node invalidation | `runCallbackSync` |
-| Cleanup | Lifetime disposal | `Scope.close`, `fiber.interrupt` |
-| Async completion | Fiber observer | `ctx.setSelf()` |
-| React notification | `useSyncExternalStore` | Registry subscription |
+- `packages/atom-react/src/Hooks.ts` - React hooks
+- `packages/atom-react/src/RegistryContext.ts` - Registry provider
+- `packages/atom-react/src/ScopedAtom.ts` - Scoped atom pattern
+- `packages/atom/src/Atom.ts` - Core atom implementation
+- `packages/atom/src/Registry.ts` - Registry public API
+- `packages/atom/src/internal/registry.ts` - Registry implementation
+- `packages/atom/src/internal/runtime.ts` - Effect execution primitives

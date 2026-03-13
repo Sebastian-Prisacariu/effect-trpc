@@ -1,16 +1,90 @@
-# Performance Considerations
+# Performance Analysis
 
-## Executive Summary
+## Overview
 
-The effect-trpc codebase shows thoughtful design for runtime performance, with some areas worth monitoring. TypeScript performance benchmarks show **significant improvements** over vanilla tRPC (42-88% faster compilation). Runtime concerns are generally minimal but include a few areas for optimization.
+This analysis examines potential performance issues in the effect-trpc codebase, focusing on hot paths, unnecessary allocations, memoization opportunities, and schema compilation caching.
 
 ---
 
-## 1. Proxy Creation Efficiency
+## Hot Path Analysis
 
-### Current Implementation
+### 1. Server Request Handling (`Server/index.ts:217-282`)
 
-**Location:** `src/Client/index.ts:544-598`
+**Path:** `server.handle()` -> payload decode -> handler execution -> response encode
+
+**Issues Found:**
+
+#### 1.1 Handler Map Lookup - GOOD
+```typescript
+const entry = handlerMap.get(request.tag)
+```
+- Uses `Map.get()` which is O(1) - efficient for hot path
+- Handler map is built once at server creation time
+
+#### 1.2 Middleware Request Creation - ALLOCATION ON EVERY REQUEST
+```typescript
+const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
+  id: request.id,
+  tag: request.tag,
+  headers: {
+    get: (name: string) => request.headers[name.toLowerCase()] ?? null,  // closure allocation
+    has: (name: string) => name.toLowerCase() in request.headers,        // closure allocation
+  },
+  payload: request.payload,
+})
+```
+**Problem:** Creates new closures on every request for `headers.get` and `headers.has`.
+
+**Recommendation:** Pre-compute lowercase headers or use a class-based wrapper:
+```typescript
+class MiddlewareHeaders implements Middleware.Headers {
+  constructor(private readonly headers: Record<string, string>) {}
+  get(name: string) { return this.headers[name.toLowerCase()] ?? null }
+  has(name: string) { return name.toLowerCase() in this.headers }
+}
+```
+
+### 2. Schema Operations - CRITICAL PATH
+
+#### 2.1 No Schema Compilation Caching
+
+**Files affected:** Server/index.ts, Client/index.ts, Transport/index.ts
+
+Every request performs:
+```typescript
+Schema.decodeUnknown(procedure.payloadSchema)(request.payload)
+Schema.encode(procedure.successSchema)(value)
+Schema.encode(procedure.errorSchema)(error)
+```
+
+**Analysis:**
+- Effect's `Schema.decodeUnknown` and `Schema.encode` internally compile the schema on first use
+- However, the API we're using creates new decoder/encoder functions per call
+- Effect's schemas ARE cached internally via WeakMap, so this is NOT as bad as it looks
+
+**Status:** ACCEPTABLE - Effect handles schema compilation caching internally
+
+#### 2.2 Schema.is Guards in Hot Path
+
+```typescript
+// Client/index.ts:118, 155, 163
+if (Schema.is(Transport.Success)(response)) { ... }
+if (Schema.is(Transport.StreamChunk)(response)) { ... }
+if (Schema.is(Transport.Failure)(response)) { ... }
+```
+
+**Problem:** `Schema.is()` recompiles the guard each time. While Effect caches these, calling `Schema.is()` in a tight loop is suboptimal.
+
+**Recommendation:** Pre-compile guards:
+```typescript
+// At module level or in service initialization
+const isSuccess = Schema.is(Transport.Success)
+const isFailure = Schema.is(Transport.Failure)
+const isStreamChunk = Schema.is(Transport.StreamChunk)
+const isStreamEnd = Schema.is(Transport.StreamEnd)
+```
+
+### 3. Client Proxy Building (`Client/index.ts:545-559`)
 
 ```typescript
 const buildProxy = <Def extends Router.Definition>(
@@ -18,321 +92,250 @@ const buildProxy = <Def extends Router.Definition>(
   pathParts: readonly string[]
 ): ClientProxy<Def> =>
   Record.map(def, (value, key) => {
-    const newPath = [...pathParts, key]
-    const tag = [rootTag, ...newPath].join("/")
-    
-    if (Procedure.isProcedure(value)) {
-      return createProcedureClient(tag, value, null)
-    }
-    return buildProxy(value as Router.Definition, newPath)
+    const newPath = [...pathParts, key]  // Array allocation on each key
+    const tag = [rootTag, ...newPath].join("/")  // Array + string allocation
+    ...
   }) as ClientProxy<Def>
 ```
 
-### Analysis
+**Analysis:**
+- This runs only at `Client.make()` time, not on each request
+- Acceptable allocation since it's initialization code
 
-**Good:**
-- Proxies are built once at `Client.make()` time, not per-request
-- Uses `Record.map` from Effect which is optimized
-- No Proxy traps (uses plain object traversal)
+**Status:** ACCEPTABLE - One-time initialization cost
 
-**Concern - Minor:**
-- `[...pathParts, key]` creates a new array per procedure during proxy building
-- `[rootTag, ...newPath].join("/")` creates string allocations
-
-**Recommendation:** Low priority. This happens once at startup, not per request. Could optimize with `pathParts.concat(key)` but unlikely to matter.
-
----
-
-## 2. Map/Set Usage and Memory
-
-### Router PathMap
-
-**Location:** `src/Router/index.ts:173-230`
+### 4. Router Path Map Building (`Router/index.ts:179-207`)
 
 ```typescript
-const pathToTag = new Map<string, string>()
-const tagToPath = new Map<string, string>()
-const proceduresByPath = new Map<string, TaggedProcedure>()
-```
-
-### Analysis
-
-**Good:**
-- Uses `ReadonlyMap` interface - immutable after construction
-- Created once per router, reused for all operations
-- Efficient O(1) lookups for tag resolution
-
-**Concern - None:** Maps are appropriately sized and long-lived.
-
-### Reactivity Subscriptions
-
-**Location:** `src/Reactivity/index.ts:132-160`
-
-```typescript
-const subscriptions = new Map<string, Set<InvalidationCallback>>()
-```
-
-### Analysis
-
-**Concern - Minor:**
-- `WeakMap` for callback IDs is good (prevents memory leaks)
-- Sets grow/shrink with subscriptions - normal React lifecycle
-
-**Recommendation:** Consider pooling callback Sets if subscriptions churn heavily. Low priority.
-
----
-
-## 3. Object Allocation in Hot Paths
-
-### Per-Request Allocations
-
-**Location:** `src/Transport/index.ts:278-353` (sendHttp)
-
-Each HTTP request creates:
-1. `TransportRequest` schema class instance
-2. `AbortController` instance
-3. Headers object
-4. JSON body string
-5. Response parsing objects
-
-**Location:** `src/Client/index.ts:108-136` (ClientService.send)
-
-```typescript
-const request = new Transport.TransportRequest({
-  id: Transport.generateRequestId(),
-  tag,
-  payload,
-})
-```
-
-### Analysis
-
-**Concern - Moderate:**
-- Schema class instantiation has overhead vs plain objects
-- `generateRequestId()` creates strings on every request
-
-**Recommendation:** 
-- Consider using plain objects for internal transport (schemas only for encoding/decoding at boundaries)
-- Pool request IDs or use more efficient generation (see below)
-
----
-
-## 4. Request ID Generation
-
-**Location:** `src/Transport/index.ts:546-547`
-
-```typescript
-export const generateRequestId = (): string =>
-  `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-```
-
-### Collision Analysis
-
-**Risk Assessment:** LOW
-
-- Timestamp component: millisecond resolution
-- Random component: 9 base-36 characters (~46 bits of entropy)
-- Same-millisecond collision: ~1/70 trillion per millisecond
-
-**Performance:**
-- `Date.now()`: Fast, native
-- `Math.random()`: Fast, native  
-- `.toString(36)`: String allocation
-- `.slice(2, 11)`: Substring allocation
-- Template literal: Final string allocation
-
-**Recommendation:** 
-- Collision risk is acceptable
-- For performance-critical paths, consider:
-  ```typescript
-  let counter = 0
-  const prefix = Math.random().toString(36).slice(2)
-  export const generateRequestId = (): string => `${prefix}-${counter++}`
-  ```
-
----
-
-## 5. N+1 Patterns
-
-### Current Design
-
-The codebase doesn't exhibit N+1 patterns because:
-
-1. **No implicit data fetching** - Handlers are explicit Effects
-2. **No automatic batching bypass** - Transport batching is configurable
-3. **Invalidation is tag-based** - Single broadcast, not per-item
-
-### Potential N+1 Scenarios
-
-**Reactivity invalidation** (`src/Reactivity/index.ts:162-199`):
-
-```typescript
-for (const tag of tags) {
-  for (const [subscribedTag, callbacks] of subscriptions) {
-    // Nested iteration
+const walk = (def: Definition, pathPrefix: string, tagPrefix: string): void => {
+  for (const key of Object.keys(def)) {
+    const path = pathPrefix ? `${pathPrefix}.${key}` : key  // String allocation
+    const procedureTag = `${tagPrefix}/${key}`  // String allocation
+    ...
   }
 }
 ```
 
-**Analysis:** 
-- O(tags * subscriptions) - could be O(n^2) with many tags
-- Uses `Set<InvalidationCallback>` for deduplication (good)
-
-**Recommendation:** For large-scale invalidation, consider:
-- Prefix tree for subscriptions
-- Batch callback invocations with microtask
+**Status:** ACCEPTABLE - One-time initialization at router creation
 
 ---
 
-## 6. Large Object Allocations Per Request
+## Unnecessary Allocations Found
 
-### Server Request Handling
+### 1. CRITICAL: Middleware Request Headers Closure (`Server/index.ts:206-214`)
 
-**Location:** `src/Server/index.ts:217-282`
+**Every request allocates:**
+- 1 object for MiddlewareRequest
+- 2 closures for headers.get/has
 
-Per-request allocations:
-1. `toMiddlewareRequest()` - headers adapter object
-2. Schema decode/encode operations
-3. Response envelope (`Transport.Success` or `Transport.Failure`)
+**Impact:** High - runs on every single RPC call
 
-### Memory Profiling Estimate
+### 2. MODERATE: Array Spread in Middleware Chain (`Server/index.ts:180`)
 
-| Component | Est. Bytes | Created Per |
-|-----------|-----------|-------------|
-| TransportRequest | ~200-500 | Request |
-| MiddlewareRequest | ~100 | Request |
-| Success/Failure | ~100-200 | Request |
-| Schema decode result | Variable | Request |
-| JSON.stringify | Variable | Response |
-
-**Total:** ~500-1000 bytes base + payload per request
-
-**Recommendation:** Acceptable for RPC. Consider object pooling only if profiling shows GC pressure.
-
----
-
-## 7. Stream Laziness
-
-**Location:** `src/Transport/index.ts:355-371`, `src/Server/index.ts:285-337`
-
-### Analysis
-
-**Good:**
-- Uses `Stream.unwrap` - stream creation is lazy
-- `Stream.takeWhile` - efficient termination
-- `Stream.mapEffect` - back-pressure aware
-
-**Concern - Minor:**
 ```typescript
-// Currently just converts single response
-Stream.fromEffect(
-  sendHttp(url, request, fetchFn, headers, undefined).pipe(...)
+const currentMiddlewares = [...inheritedMiddlewares, ...groupMiddlewares]
+```
+
+**Analysis:** Only runs during server initialization, not per-request.
+
+**Status:** ACCEPTABLE
+
+### 3. MODERATE: Stream Mapping Closures (`Server/index.ts:309-323`)
+
+```typescript
+return stream.pipe(
+  Stream.map((value): Transport.StreamResponse => 
+    new Transport.StreamChunk({ ... })  // Object allocation per chunk
+  ),
+  ...
 )
 ```
 
-**Issue:** SSE streaming not fully implemented - TODO comment at line 361.
+**Analysis:** Creating response objects is necessary. No optimization possible without protocol changes.
 
-**Recommendation:** When implementing real streaming:
-- Use `Stream.async` with proper cancellation
-- Consider `Stream.ensuring` for cleanup
+**Status:** ACCEPTABLE - Inherent to streaming
 
----
+### 4. LOW: Reactivity Callback Sets (`Reactivity/index.ts:162-199`)
 
-## 8. Effect Fiber Creation
-
-### Current Fiber Usage
-
-**Explicit fiber creation:** None found (no `Effect.fork`, `Fiber.fork`, etc. in main code)
-
-**Implicit fiber creation:**
-- `ManagedRuntime.make()` - Single runtime per client (`src/Client/index.ts:576`)
-- `runtime.runPromise()` - Runs on existing runtime
-
-### Analysis
-
-**Good:**
-- Single `ManagedRuntime` per `BoundClient` - efficient
-- No spurious fiber spawning in hot paths
-- Middleware execution is sequential Effect composition
-
-**Potential Issue:**
 ```typescript
-// Middleware.all() with concurrency
-concurrency: "unbounded" | number
+const callbacksToInvoke = new Set<InvalidationCallback>()
 ```
 
-Setting unbounded concurrency would create fiber per middleware. This is:
-- Intentional for parallel middleware
-- Should be documented
+**Analysis:** Creates new Set on each invalidation. Since invalidation is infrequent (only after mutations), this is acceptable.
+
+**Status:** ACCEPTABLE
 
 ---
 
-## 9. Existing Benchmark Results
+## Missing Memoization Opportunities
 
-**Location:** `packages/effect-trpc/benchmark/results/RESULTS.md`
+### 1. Schema Type Guards (`Client/index.ts`, `Transport/index.ts`)
 
-### TSC Compilation Time
+**Current:**
+```typescript
+if (Schema.is(Transport.Success)(response)) { ... }
+```
 
-| Routes | vanilla-trpc | effect-trpc | Improvement |
-|--------|--------------|-------------|-------------|
-| 100 | 1270ms | 735ms | **-42%** |
-| 400 | 2629ms | 809ms | **-69%** |
-| 800 | 4641ms | 741ms | **-84%** |
-| 1600 | 8518ms | 1024ms | **-88%** |
+**Should be:**
+```typescript
+// Module-level or in lazy init
+const isSuccess = Schema.is(Transport.Success)
+const isFailure = Schema.is(Transport.Failure)
 
-**Conclusion:** TypeScript type performance is significantly better than vanilla tRPC, especially at scale.
+// Usage
+if (isSuccess(response)) { ... }
+```
 
-### IDE Performance (TSServer)
+**Impact:** Minor - Effect caches internally, but explicit memoization is cleaner
 
-- Hover time: 0ms (both)
-- Autocomplete: 0-1ms (both)
-- Go to definition: 0ms (both)
+### 2. Tag Building in Client (`Client/index.ts:551`)
 
-**Conclusion:** IDE performance is excellent.
+**Current:**
+```typescript
+const tag = [rootTag, ...newPath].join("/")
+```
+
+**Already Optimized:** This only runs at initialization, not per-request. The tag is captured in the closure for `createProcedureClient`.
+
+### 3. Paths to Tags Conversion (`Reactivity/index.ts:279-283`)
+
+```typescript
+export const pathsToTags = (
+  rootTag: string,
+  paths: ReadonlyArray<string>
+): ReadonlyArray<string> =>
+  paths.map((path) => `${rootTag}/${path.replace(/\./g, "/")}`)
+```
+
+**Optimization opportunity:** If the same paths are converted frequently, consider a WeakMap cache keyed on the paths array. However, mutation paths are typically static, so this is low priority.
 
 ---
 
-## 10. Optimization Recommendations
+## Schema Compilation Caching Status
 
-### High Priority
+### Effect's Built-in Caching
 
-None identified. The codebase is well-designed for performance.
+Effect uses WeakMaps internally for schema compilation. Key functions:
 
-### Medium Priority
+1. **`Schema.decode`** / **`Schema.encode`** - Compiled AST is cached
+2. **`Schema.is`** - Type guard is cached per schema reference
+3. **`Schema.decodeUnknown`** - Same as decode, handles unknown input
 
-1. **Implement proper SSE streaming** (`src/Transport/index.ts:361`)
-   - Current TODO stub could cause issues when streaming is used
+### Our Usage Patterns
 
-2. **Consider request ID optimization** for very high throughput
-   ```typescript
-   // Current
-   `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-   
-   // Alternative: ~3x faster, no collision risk
-   let seq = 0
-   const session = crypto.randomUUID().slice(0, 8)
-   export const generateRequestId = () => `${session}-${seq++}`
-   ```
+| Location | Pattern | Cache Status |
+|----------|---------|--------------|
+| Server.handle | `Schema.decodeUnknown(procedure.payloadSchema)` | CACHED - schema ref stable |
+| Server.handle | `Schema.encode(procedure.successSchema)` | CACHED - schema ref stable |
+| Client.send | `Schema.decodeUnknown(successSchema)` | CACHED - schema ref stable |
+| Transport | `Schema.decodeUnknown(TransportResponse)` | CACHED - module-level schema |
 
-### Low Priority
+**Conclusion:** Schema caching is working correctly. Effect handles this automatically.
 
-1. **Object pooling for TransportRequest** - Only if GC pressure is observed
-2. **Prefix tree for subscriptions** - Only if >100 subscription tags
-3. **Batch array spreading** in proxy construction - Micro-optimization
+---
+
+## Performance Recommendations
+
+### Priority 1: HIGH IMPACT
+
+#### 1.1 Pre-compile Schema Type Guards
+
+**File:** Create `src/internal/guards.ts`
+
+```typescript
+import * as Schema from "effect/Schema"
+import * as Transport from "../Transport/index.js"
+
+// Pre-compiled guards for hot path
+export const isSuccess = Schema.is(Transport.Success)
+export const isFailure = Schema.is(Transport.Failure)
+export const isStreamChunk = Schema.is(Transport.StreamChunk)
+export const isStreamEnd = Schema.is(Transport.StreamEnd)
+```
+
+**Benefit:** Eliminates guard compilation on first use in hot path
+
+#### 1.2 Optimize Middleware Request Headers
+
+**File:** `Server/index.ts`
+
+```typescript
+class MiddlewareHeaders {
+  private readonly normalized: Record<string, string>
+  
+  constructor(headers: Record<string, string>) {
+    // Pre-normalize all keys to lowercase
+    this.normalized = Object.fromEntries(
+      Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])
+    )
+  }
+  
+  get(name: string): string | null {
+    return this.normalized[name.toLowerCase()] ?? null
+  }
+  
+  has(name: string): boolean {
+    return name.toLowerCase() in this.normalized
+  }
+}
+```
+
+**Benefit:** Avoids closure allocation per request, single object reusable
+
+### Priority 2: MEDIUM IMPACT
+
+#### 2.1 Add Request Batching Support
+
+**Current status:** Batching options exist in `HttpOptions` but are not implemented.
+
+**Impact:** Critical for production use - reduces HTTP round trips
+
+#### 2.2 Consider Connection Pooling
+
+For HTTP transport, consider implementing keep-alive connections and connection pooling.
+
+### Priority 3: LOW IMPACT (Future Optimization)
+
+#### 3.1 Lazy Handler Map Building
+
+Currently the handler map is built eagerly at server creation. For very large routers (1000+ procedures), consider lazy building.
+
+**Current impact:** Minimal - most apps have <100 procedures
+
+#### 3.2 Stream Response Object Pooling
+
+For high-throughput streaming, consider pooling `StreamChunk` objects.
+
+**Current impact:** Minimal - JS engines handle small object allocation efficiently
+
+---
+
+## Benchmark Considerations
+
+The project has a benchmark setup at `packages/effect-trpc/benchmark/` comparing effect-trpc with vanilla tRPC. Key observations:
+
+1. **Type-level performance** is being tested (6400 routes)
+2. **Runtime benchmarks** are not implemented yet
+
+### Recommended Runtime Benchmarks
+
+1. **Single request latency** - time for one query round trip
+2. **Throughput** - requests per second at saturation
+3. **Memory allocation** - bytes allocated per request
+4. **GC pressure** - GC pauses under load
 
 ---
 
 ## Summary
 
-| Area | Status | Notes |
-|------|--------|-------|
-| Proxy creation | **Good** | Built once, not per-request |
-| Map/Set usage | **Good** | Appropriate, no leaks |
-| Hot path allocations | **Acceptable** | ~500-1000 bytes/request |
-| Request ID collisions | **Safe** | ~46 bits entropy per ms |
-| N+1 patterns | **None** | Explicit data fetching |
-| Stream laziness | **Good** | Proper Effect streaming |
-| Fiber creation | **Good** | No unnecessary fibers |
-| TypeScript perf | **Excellent** | 42-88% faster than tRPC |
+| Area | Status | Action Required |
+|------|--------|-----------------|
+| Schema caching | GOOD | None - Effect handles this |
+| Handler lookup | GOOD | O(1) Map lookup |
+| Middleware request | NEEDS FIX | Create MiddlewareHeaders class |
+| Type guards | COULD IMPROVE | Pre-compile at module level |
+| Proxy building | GOOD | One-time initialization |
+| Batching | MISSING | Implement HTTP batching |
+| Connection pooling | MISSING | Consider for production |
 
-**Overall Assessment:** The codebase is performant. Focus optimization efforts on completing SSE streaming implementation rather than micro-optimizations.
+**Overall Assessment:** The codebase has reasonable performance characteristics. The main hot path (request handling) has one allocation issue with middleware headers that should be fixed. Schema handling leverages Effect's internal caching correctly. The most impactful improvement would be implementing HTTP request batching.

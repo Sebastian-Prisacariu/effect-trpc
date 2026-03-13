@@ -1,13 +1,14 @@
-# H19: Middleware Pattern Analysis
+# H19: tRPC Middleware Context Analysis
 
-## tRPC Middleware Architecture
+## Summary
 
-### Core Middleware Structure
+tRPC middleware has **full access** to procedure type and path. This is a key insight for effect-trpc.
 
-tRPC middleware is defined in `middleware.ts` with a sophisticated type-safe pattern:
+## Middleware Function Signature
+
+From `middleware.ts:89-120`:
 
 ```typescript
-// middleware.ts:89-120
 export type MiddlewareFunction<
   TContext,
   TMeta,
@@ -17,13 +18,13 @@ export type MiddlewareFunction<
 > = {
   (opts: {
     ctx: Simplify<Overwrite<TContext, TContextOverridesIn>>;
-    type: ProcedureType;
-    path: string;
-    input: TInputOut;
-    getRawInput: GetRawInputFn;
-    meta: TMeta | undefined;
-    signal: AbortSignal | undefined;
-    batchIndex: number;
+    type: ProcedureType;           // 'query' | 'mutation' | 'subscription'
+    path: string;                   // Full procedure path (e.g., "user.getById")
+    input: TInputOut;               // Parsed input (after previous middleware)
+    getRawInput: GetRawInputFn;     // () => Promise<unknown>
+    meta: TMeta | undefined;        // Procedure metadata
+    signal: AbortSignal | undefined;// Request abort signal
+    batchIndex: number;             // Index in batch request (0 for non-batch)
     next: {
       (): Promise<MiddlewareResult<TContextOverridesIn>>;
       <$ContextOverride>(opts: {
@@ -35,54 +36,38 @@ export type MiddlewareFunction<
       }): Promise<MiddlewareResult<TContextOverridesIn>>;
     };
   }): Promise<MiddlewareResult<$ContextOverridesOut>>;
-  _type?: string | undefined;
+  _type?: string | undefined;  // Internal marker (e.g., 'input', 'output')
 };
 ```
 
-### Middleware Options Available in tRPC
+## Context Fields
 
-Every middleware receives these options:
-
-| Option | Type | Purpose |
-|--------|------|---------|
-| `ctx` | `TContext` | Current context (accumulated from previous middleware) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `ctx` | `TContext & TContextOverrides` | User context + middleware additions |
 | `type` | `'query' \| 'mutation' \| 'subscription'` | Procedure type |
-| `path` | `string` | Full procedure path (e.g., `"user.getById"`) |
+| `path` | `string` | Full dot-separated path (e.g., `"user.posts.list"`) |
 | `input` | `TInputOut` | Parsed/validated input |
-| `getRawInput` | `() => Promise<unknown>` | Raw input before validation |
-| `meta` | `TMeta \| undefined` | Procedure metadata |
-| `signal` | `AbortSignal \| undefined` | Request abort signal |
-| `batchIndex` | `number` | Index in batch (for batched calls) |
-| `next` | `NextFunction` | Call next middleware/resolver |
+| `getRawInput` | `() => Promise<unknown>` | Raw input before parsing |
+| `meta` | `TMeta \| undefined` | User-defined metadata |
+| `signal` | `AbortSignal \| undefined` | Request cancellation |
+| `batchIndex` | `number` | Position in batch (0 = first or non-batch) |
+| `next` | function | Continue to next middleware |
 
-### The `next()` Function
+## Procedure Types
 
-The `next` function is overloaded to support multiple patterns:
+From `procedure.ts:5-9`:
 
 ```typescript
-next: {
-  // Simple call - just continue
-  (): Promise<MiddlewareResult<TContextOverridesIn>>;
-  
-  // Extend context and/or modify input
-  <$ContextOverride>(opts: {
-    ctx?: $ContextOverride;
-    input?: unknown;
-  }): Promise<MiddlewareResult<$ContextOverride>>;
-  
-  // Replace getRawInput (for deferred parsing)
-  (opts: {
-    getRawInput: GetRawInputFn;
-  }): Promise<MiddlewareResult<TContextOverridesIn>>;
-}
+export const procedureTypes = ['query', 'mutation', 'subscription'] as const;
+export type ProcedureType = (typeof procedureTypes)[number];
 ```
 
-### Context Propagation
+## Middleware Invocation Chain
 
-tRPC uses **context overwriting** with type accumulation:
+From `procedureBuilder.ts:634-672`:
 
 ```typescript
-// procedureBuilder.ts:634-672 - Recursive execution
 async function callRecursive(
   index: number,
   _def: AnyProcedureBuilderDef,
@@ -91,15 +76,18 @@ async function callRecursive(
   try {
     const middleware = _def.middlewares[index]!;
     const result = await middleware({
-      ...opts,
-      meta: _def.meta,
+      ...opts,              // includes path, type, ctx, signal, batchIndex
+      meta: _def.meta,      // procedure-defined meta
       input: opts.input,
       next(_nextOpts?: any) {
-        const nextOpts = _nextOpts as { ctx?: Record<string, unknown>; input?: unknown; getRawInput?: GetRawInputFn } | undefined;
+        const nextOpts = _nextOpts as {
+          ctx?: Record<string, unknown>;
+          input?: unknown;
+          getRawInput?: GetRawInputFn;
+        } | undefined;
 
         return callRecursive(index + 1, _def, {
           ...opts,
-          // Context merging: shallow merge of new context into existing
           ctx: nextOpts?.ctx ? { ...opts.ctx, ...nextOpts.ctx } : opts.ctx,
           input: nextOpts && 'input' in nextOpts ? nextOpts.input : opts.input,
           getRawInput: nextOpts?.getRawInput ?? opts.getRawInput,
@@ -117,353 +105,145 @@ async function callRecursive(
 }
 ```
 
-### Middleware Marker Pattern
+## ProcedureCallOptions
 
-tRPC uses a compile-time marker to ensure middleware always returns via `next()`:
+From `procedureBuilder.ts:615-626`:
 
 ```typescript
-// middleware.ts:7-11
-export const middlewareMarker = 'middlewareMarker' as 'middlewareMarker' & {
-  __brand: 'middlewareMarker';
-};
-
-interface MiddlewareResultBase {
-  readonly marker: MiddlewareMarker;  // Forces returning through next()
+export interface ProcedureCallOptions<TContext> {
+  ctx: TContext;
+  getRawInput: GetRawInputFn;
+  input?: unknown;
+  path: string;
+  type: ProcedureType;
+  signal: AbortSignal | undefined;
+  batchIndex: number;
 }
 ```
 
-### Built-in Input/Output Middleware
+## How Path Gets Set
 
-tRPC creates middleware for input/output validation:
+In `router.ts:473-481`, when calling a procedure:
 
 ```typescript
-// middleware.ts:186-214 - Input validation as middleware
+return await procedure({
+  path: fullPath,           // Joined from proxy path segments
+  getRawInput: async () => args[0],
+  ctx,
+  type: procedure._def.type,
+  signal: opts?.signal,
+  batchIndex: 0,
+});
+```
+
+And in `resolveResponse.ts:374-381` for HTTP calls:
+
+```typescript
+const data: unknown = await proc({
+  path: call.path,          // From request URL
+  getRawInput: call.getRawInput,
+  ctx: ctxManager.value(),
+  type: proc._def.type,
+  signal: combinedAbort.signal,
+  batchIndex: call.batchIndex,
+});
+```
+
+## Special Middleware Types
+
+### Input Middleware
+
+```typescript
 export function createInputMiddleware<TInput>(parse: ParseFn<TInput>) {
   const inputMiddleware: AnyMiddlewareFunction = async function inputValidatorMiddleware(opts) {
-    let parsedInput: ReturnType<typeof parse>;
     const rawInput = await opts.getRawInput();
-    try {
-      parsedInput = await parse(rawInput);
-    } catch (cause) {
-      throw new TRPCError({
-        code: 'BAD_REQUEST',
-        cause,
-      });
-    }
-    // Multiple input parsers: merge objects
-    const combinedInput =
-      isObject(opts.input) && isObject(parsedInput)
-        ? { ...opts.input, ...parsedInput }
-        : parsedInput;
+    const parsedInput = await parse(rawInput);
+    
+    // Multiple input parsers combine objects
+    const combinedInput = isObject(opts.input) && isObject(parsedInput)
+      ? { ...opts.input, ...parsedInput }
+      : parsedInput;
 
     return opts.next({ input: combinedInput });
   };
   inputMiddleware._type = 'input';
   return inputMiddleware;
 }
+```
 
-// middleware.ts:219-243 - Output validation as middleware
+### Output Middleware
+
+```typescript
 export function createOutputMiddleware<TOutput>(parse: ParseFn<TOutput>) {
   const outputMiddleware: AnyMiddlewareFunction = async function outputValidatorMiddleware({ next }) {
     const result = await next();
-    if (!result.ok) {
-      return result; // Pass through failures
-    }
-    try {
-      const data = await parse(result.data);
-      return { ...result, data };
-    } catch (cause) {
-      throw new TRPCError({
-        message: 'Output validation failed',
-        code: 'INTERNAL_SERVER_ERROR',
-        cause,
-      });
-    }
+    if (!result.ok) return result;  // Pass through failures
+    
+    const data = await parse(result.data);
+    return { ...result, data };
   };
   outputMiddleware._type = 'output';
   return outputMiddleware;
 }
 ```
 
-### Middleware Builder Pattern
+## Middleware Chaining
 
-tRPC supports creating reusable middleware with `unstable_pipe`:
-
-```typescript
-// middleware.ts:43-84
-export interface MiddlewareBuilder<TContext, TMeta, TContextOverrides, TInputOut> {
-  unstable_pipe<$ContextOverridesOut>(
-    fn:
-      | MiddlewareFunction<TContext, TMeta, TContextOverrides, $ContextOverridesOut, TInputOut>
-      | MiddlewareBuilder<Overwrite<TContext, TContextOverrides>, TMeta, $ContextOverridesOut, TInputOut>,
-  ): MiddlewareBuilder<TContext, TMeta, Overwrite<TContextOverrides, $ContextOverridesOut>, TInputOut>;
-
-  _middlewares: MiddlewareFunction<TContext, TMeta, TContextOverrides, object, TInputOut>[];
-}
-```
-
-### Procedure Builder Integration
-
-Middleware is applied via `.use()`:
+From `middleware.ts:127-161`:
 
 ```typescript
-// procedureBuilder.ts:259-283
-use<$ContextOverridesOut>(
-  fn:
-    | MiddlewareBuilder<Overwrite<TContext, TContextOverrides>, TMeta, $ContextOverridesOut, TInputOut>
-    | MiddlewareFunction<TContext, TMeta, TContextOverrides, $ContextOverridesOut, TInputOut>,
-): ProcedureBuilder<
-  TContext, TMeta,
-  Overwrite<TContextOverrides, $ContextOverridesOut>,  // Types accumulate!
-  TInputIn, TInputOut,
-  TOutputIn, TOutputOut,
-  TCaller
->;
-```
-
----
-
-## Effect-tRPC Middleware Architecture
-
-### Current Implementation
-
-```typescript
-// src/Middleware/index.ts
-
-// Middleware provides a service
-export interface MiddlewareTag<Self, Provides, Failure = never>
-  extends Context.Tag<Self, MiddlewareImpl<Provides, Failure>> {
-  readonly provides: Context.Tag<any, Provides>
-}
-
-export interface MiddlewareImpl<Provides, Failure> {
-  readonly run: (request: MiddlewareRequest) => Effect.Effect<Provides, Failure>
-}
-
-// Or wraps execution
-export interface WrapMiddlewareImpl<Failure> {
-  readonly wrap: <A, E, R>(
-    request: MiddlewareRequest,
-    next: Effect.Effect<A, E, R>
-  ) => Effect.Effect<A, E | Failure, R>
-}
-```
-
-### Execution Model
-
-```typescript
-// src/Middleware/index.ts:346-365
-const executeOne = <A, E, R, Provides, Failure>(
-  middleware: MiddlewareTag<any, Provides, Failure>,
-  request: MiddlewareRequest,
-  next: Effect.Effect<A, E, R>
-): Effect.Effect<A, E | Failure, R> =>
-  Effect.gen(function* () {
-    const impl = yield* middleware as any
-    
-    if ("wrap" in impl) {
-      // Wrap middleware - wraps the handler execution
-      return yield* (impl as WrapMiddlewareImpl<Failure>).wrap(request, next)
-    } else {
-      // Provides middleware - runs first, then provides service to handler
-      const provided = yield* (impl as MiddlewareImpl<Provides, Failure>).run(request)
-      return yield* next.pipe(
-        Effect.provideService(middleware.provides, provided)
-      )
-    }
-  })
-```
-
----
-
-## Feature Comparison
-
-### What tRPC Has That We're Missing
-
-| Feature | tRPC | effect-trpc | Gap Analysis |
-|---------|------|-------------|--------------|
-| **Procedure Type** | `opts.type` available | Missing | Should have access to query/mutation |
-| **Procedure Path** | `opts.path` available | `request.tag` (partial) | Need full dotted path |
-| **getRawInput** | Lazy raw input access | Missing | Important for logging/auditing |
-| **batchIndex** | Index in batch request | Missing | Needed for batch context |
-| **AbortSignal** | `opts.signal` available | Missing | Should propagate for cancellation |
-| **Meta access** | `opts.meta` available | Missing | Procedure metadata in middleware |
-| **Input modification** | `next({ input })` | Not supported | Can't transform input in middleware |
-| **Context accumulation** | `next({ ctx })` | Service provision | Different model - see below |
-| **Standalone middleware** | `experimental_standaloneMiddleware` | Using Tags | Similar but different API |
-| **Middleware piping** | `unstable_pipe` | `Middleware.all()` | Similar functionality |
-| **concat()** | `procedure.concat()` | Not implemented | Composing procedure builders |
-
-### Context Model Differences
-
-**tRPC**: Mutable context accumulation
-```typescript
-// Context is an object that grows
-const authedProcedure = publicProcedure.use((opts) => {
-  if (!opts.ctx.user) throw new TRPCError({ code: 'UNAUTHORIZED' })
-  return opts.next({
-    ctx: { user: opts.ctx.user }  // Add to context
-  })
-})
-```
-
-**effect-trpc**: Service provision (Effect pattern)
-```typescript
-// Services are provided to the Effect environment
-const AuthMiddlewareLive = Middleware.implement(AuthMiddleware, (request) =>
-  Effect.gen(function* () {
-    const token = request.headers.get("authorization")
-    if (!token) return yield* Effect.fail(new UnauthorizedError({}))
-    return yield* verifyToken(token)
-  })
-)
-// Handler accesses via: yield* CurrentUser
-```
-
-### MiddlewareRequest - What We Have vs What We Need
-
-**Current (effect-trpc)**:
-```typescript
-interface MiddlewareRequest {
-  readonly id: string
-  readonly tag: string      // Procedure name
-  readonly headers: Headers
-  readonly payload: unknown
-}
-```
-
-**Should Add**:
-```typescript
-interface MiddlewareRequest {
-  readonly id: string
-  readonly path: string          // Full path: "user.getById"
-  readonly type: ProcedureType   // "query" | "mutation" | "subscription"
-  readonly headers: Headers
-  readonly payload: unknown
-  readonly getRawInput: () => Promise<unknown>
-  readonly meta: unknown
-  readonly signal: AbortSignal | undefined
-  readonly batchIndex: number
-}
-```
-
----
-
-## Missing Features Priority
-
-### High Priority
-
-1. **Procedure Type (`type`)** - Essential for middleware that behaves differently for mutations vs queries
-2. **Full Path (`path`)** - Required for logging, metrics, and authorization by path
-3. **Meta Access** - Critical for route-level configuration (roles, permissions, rate limits)
-4. **AbortSignal** - Needed for proper cancellation propagation
-
-### Medium Priority
-
-5. **getRawInput** - Useful for audit logging before validation
-6. **Input Modification** - Would enable middleware that transforms inputs
-7. **batchIndex** - Important for batch-aware middleware
-
-### Low Priority (Effect handles differently)
-
-8. **Context Accumulation** - Effect's service provision is arguably better
-9. **Middleware Piping** - `Middleware.all()` serves similar purpose
-
----
-
-## Recommendations
-
-### 1. Expand MiddlewareRequest
-
-```typescript
-interface MiddlewareRequest {
-  readonly id: string
-  readonly path: string
-  readonly type: "query" | "mutation" | "subscription"
-  readonly headers: Headers
-  readonly rawPayload: unknown
-  readonly input: unknown  // After validation (if available)
-  readonly meta: unknown
-  readonly signal: AbortSignal | undefined
-  readonly batchIndex: number
-}
-```
-
-### 2. Add getRawInput Pattern
-
-```typescript
-interface MiddlewareRequest {
-  // ... other fields
-  readonly getRawInput: Effect.Effect<unknown, never, never>
-}
-```
-
-### 3. Support Input Transformation
-
-Consider allowing wrap middleware to transform input:
-
-```typescript
-export interface WrapMiddlewareImpl<Failure> {
-  readonly wrap: <A, E, R>(
-    request: MiddlewareRequest,
-    next: (transformedInput?: unknown) => Effect.Effect<A, E, R>
-  ) => Effect.Effect<A, E | Failure, R>
-}
-```
-
-### 4. Add Procedure Type Guards
-
-```typescript
-// Allow middleware to be applied only to certain procedure types
-const MutationOnly = Middleware.forType("mutation")(AuthMiddleware)
-```
-
----
-
-## Error Handling Comparison
-
-### tRPC
-```typescript
-// Errors are caught and wrapped in MiddlewareResult
-try {
-  const result = await middleware({ ...opts, next });
-  return result;
-} catch (cause) {
+function createMiddlewareInner(middlewares: AnyMiddlewareFunction[]): AnyMiddlewareBuilder {
   return {
-    ok: false,
-    error: getTRPCErrorFromUnknown(cause),
-    marker: middlewareMarker,
+    _middlewares: middlewares,
+    unstable_pipe(middlewareBuilderOrFn) {
+      const pipedMiddleware = '_middlewares' in middlewareBuilderOrFn
+        ? middlewareBuilderOrFn._middlewares
+        : [middlewareBuilderOrFn];
+      return createMiddlewareInner([...middlewares, ...pipedMiddleware]);
+    },
   };
 }
 ```
 
-### effect-trpc
+## Error Handler Context
+
+From `procedure.ts:97-103`:
+
 ```typescript
-// Errors flow through Effect's error channel
-const executeOne = (...) =>
-  Effect.gen(function* () {
-    const impl = yield* middleware
-    if ("wrap" in impl) {
-      return yield* impl.wrap(request, next)  // Errors propagate naturally
-    } else {
-      const provided = yield* impl.run(request)  // Failures are typed
-      return yield* next.pipe(Effect.provideService(middleware.provides, provided))
-    }
-  })
+export interface ErrorHandlerOptions<TContext> {
+  error: TRPCError;
+  type: ProcedureType | 'unknown';
+  path: string | undefined;
+  input: unknown;
+  ctx: TContext | undefined;
+}
 ```
 
-**Effect's approach is arguably better** - typed errors flow through the normal Effect error channel, no need for Result wrapper pattern.
+## Key Insights for effect-trpc
 
----
+1. **Path is available**: Middleware always has access to the full procedure path
+2. **Type is available**: Procedure type (`query`/`mutation`/`subscription`) is always known
+3. **Meta is available**: Custom metadata defined via `.meta()` is passed through
+4. **Signal for cancellation**: AbortSignal enables proper cleanup
+5. **Batch awareness**: `batchIndex` tells middleware which request in a batch
 
-## Summary
+### What effect-trpc middleware should provide:
 
-Effect-tRPC's middleware model uses Effect's native service provision which is more type-safe and composable than tRPC's mutable context pattern. However, we're missing several **runtime context values** that tRPC middleware has access to:
+```typescript
+interface EffectMiddlewareOpts<Ctx, Meta, Input> {
+  ctx: Ctx
+  type: 'query' | 'mutation' | 'subscription'
+  path: string                      // Full procedure path
+  input: Input                      // Parsed input
+  getRawInput: Effect<unknown>      // Deferred raw input
+  meta: Meta | undefined            // Procedure metadata
+  signal: AbortSignal | undefined   // Request abort
+  batchIndex: number                // Position in batch
+  next: <NewCtx>(opts?: {
+    ctx?: NewCtx
+    input?: unknown
+  }) => Effect<Result, Error, R>
+}
+```
 
-**Critical gaps:**
-1. Procedure type (query/mutation/subscription)
-2. Full procedure path
-3. Meta/metadata access
-4. AbortSignal propagation
-
-These don't require changing the architectural model - they just need to be added to `MiddlewareRequest`.
+This is complete parity with tRPC - we have everything we need.

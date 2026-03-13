@@ -2,26 +2,51 @@
 
 ## Overview
 
-Effect Atom React uses a real Provider pattern with React Context to deliver the Registry to all hooks. This is **not a stub** - it performs actual initialization and lifecycle management.
+Effect Atom React uses a **Registry-based Provider pattern**, not atoms for context. The `RegistryProvider` creates and manages a `Registry` instance that serves as the central coordination point for all atoms.
 
-## Core Implementation
+## Provider Architecture
 
-### RegistryContext.ts
+```
+                    ┌─────────────────────────────────┐
+                    │         RegistryProvider        │
+                    │  ┌───────────────────────────┐  │
+                    │  │   Registry (singleton)    │  │
+                    │  │  - atom nodes map         │  │
+                    │  │  - subscription system    │  │
+                    │  │  - scheduler integration  │  │
+                    │  └───────────────────────────┘  │
+                    └─────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │    React.createContext()      │
+                    │    RegistryContext            │
+                    └───────────────────────────────┘
+                                    │
+            ┌───────────────────────┼───────────────────────┐
+            ▼                       ▼                       ▼
+     ┌──────────┐            ┌──────────┐            ┌──────────┐
+     │useAtom() │            │useAtom   │            │useAtom   │
+     │          │            │Value()   │            │Set()     │
+     └──────────┘            └──────────┘            └──────────┘
+```
 
+## Key Files
+
+### RegistryContext.ts (64 lines)
+
+**Default Registry Creation:**
 ```typescript
-// Default context with global registry
 export const RegistryContext = React.createContext<Registry.Registry>(
   Registry.make({
-    scheduleTask,         // Uses React Scheduler for optimal batching
-    defaultIdleTTL: 400   // 400ms idle time-to-live
+    scheduleTask,
+    defaultIdleTTL: 400
   })
 )
 ```
 
-Key insight: The default context value is a **real, working registry**. This means hooks work even without an explicit Provider - they just use the global default registry.
+The context has a **default value** - a pre-created registry. This means hooks work without an explicit provider (unlike traditional React patterns).
 
-### RegistryProvider Component
-
+**RegistryProvider Component:**
 ```typescript
 export const RegistryProvider = (options: {
   readonly children?: React.ReactNode | undefined
@@ -30,13 +55,11 @@ export const RegistryProvider = (options: {
   readonly timeoutResolution?: number | undefined
   readonly defaultIdleTTL?: number | undefined
 }) => {
-  // 1. Stable ref to hold registry across renders
   const ref = React.useRef<{
     readonly registry: Registry.Registry
     timeout?: number | undefined
   }>(null)
   
-  // 2. Lazy initialization (only on first render)
   if (ref.current === null) {
     ref.current = {
       registry: Registry.make({
@@ -47,43 +70,17 @@ export const RegistryProvider = (options: {
       })
     }
   }
-  
-  // 3. Lifecycle management with delayed cleanup
-  React.useEffect(() => {
-    // Clear any pending cleanup from previous mount
-    if (ref.current?.timeout !== undefined) {
-      clearTimeout(ref.current.timeout)
-    }
-    return () => {
-      // Delay disposal to handle React StrictMode double-mount
-      ref.current!.timeout = setTimeout(() => {
-        ref.current?.registry.dispose()
-        ref.current = null
-      }, 500)
-    }
-  }, [ref])
-  
-  // 4. Provide registry to children
-  return React.createElement(
-    RegistryContext.Provider, 
-    { value: ref.current.registry }, 
-    options?.children
-  )
+  // ...
 }
 ```
 
-## Provider Options
+**Key Design Choices:**
 
-| Option | Type | Default | Purpose |
-|--------|------|---------|---------|
-| `children` | `ReactNode` | - | Child components |
-| `initialValues` | `Iterable<[Atom, any]>` | - | Pre-populate atoms |
-| `scheduleTask` | `(f: () => void) => void` | React Scheduler | Task scheduling |
-| `timeoutResolution` | `number` | - | Timeout granularity |
-| `defaultIdleTTL` | `number` | 400 | Default idle cleanup delay |
+1. **Lazy initialization via useRef** - Registry is created once on first render
+2. **Deferred disposal** - Registry cleanup is delayed by 500ms to survive React StrictMode double-mounts
+3. **Scheduler integration** - Uses React's `scheduler` package for priority-aware task scheduling
 
-## React Scheduler Integration
-
+**Scheduler Integration:**
 ```typescript
 import * as Scheduler from "scheduler"
 
@@ -92,21 +89,30 @@ export function scheduleTask(f: () => void): void {
 }
 ```
 
-This integrates with React's internal scheduler for optimal batching and priority handling.
+This integrates atom effects with React's concurrent rendering scheduler.
+
+## Registry Initialization Options
+
+| Option | Type | Default | Purpose |
+|--------|------|---------|---------|
+| `initialValues` | `Iterable<[Atom, any]>` | - | Pre-populate atoms |
+| `scheduleTask` | `(f: () => void) => void` | React scheduler | Task scheduling |
+| `timeoutResolution` | `number` | - | Timeout granularity |
+| `defaultIdleTTL` | `number` | 400ms | Idle cleanup delay |
 
 ## How Hooks Access Registry
 
-Every hook uses `React.useContext(RegistryContext)`:
+All hooks use `React.useContext(RegistryContext)`:
 
 ```typescript
 // From Hooks.ts
 export const useAtomValue = <A>(atom: Atom.Atom<A>): A => {
-  const registry = React.useContext(RegistryContext)  // <-- Here
+  const registry = React.useContext(RegistryContext)
   return useStore(registry, atom)
 }
 
-export const useAtom = <R, W>(atom: Atom.Writable<R, W>): readonly [R, (v: W) => void] => {
-  const registry = React.useContext(RegistryContext)  // <-- Here
+export const useAtom = <R, W>(atom: Atom.Writable<R, W>) => {
+  const registry = React.useContext(RegistryContext)
   return [
     useStore(registry, atom),
     setAtom(registry, atom)
@@ -114,193 +120,140 @@ export const useAtom = <R, W>(atom: Atom.Writable<R, W>): readonly [R, (v: W) =>
 }
 ```
 
-## Registry Lifecycle
-
-1. **Creation**: Registry created lazily on first render via `useRef` pattern
-2. **Mounting**: Children receive registry through context
-3. **Unmounting**: Delayed disposal (500ms) handles React StrictMode
-4. **Cleanup**: `registry.dispose()` cleans up all subscriptions
-
-## StrictMode Handling
-
-The 500ms delay is intentional:
-- React StrictMode unmounts/remounts components immediately
-- Without delay, registry would be disposed then recreated
-- Delay allows remount to reuse existing registry
+## Store Integration Pattern
 
 ```typescript
-// On unmount
-ref.current!.timeout = setTimeout(() => {
-  ref.current?.registry.dispose()  // Only after 500ms
-  ref.current = null
-}, 500)
+interface AtomStore<A> {
+  readonly subscribe: (f: () => void) => () => void
+  readonly snapshot: () => A
+  readonly getServerSnapshot: () => A
+}
 
-// On remount (within 500ms)
-if (ref.current?.timeout !== undefined) {
-  clearTimeout(ref.current.timeout)  // Cancel disposal
+function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
+  const store = makeStore(registry, atom)
+  return React.useSyncExternalStore(
+    store.subscribe, 
+    store.snapshot, 
+    store.getServerSnapshot
+  )
 }
 ```
 
+Uses `useSyncExternalStore` for:
+- Concurrent mode compatibility
+- SSR support via `getServerSnapshot`
+- Automatic subscription management
+
 ## ScopedAtom Pattern
 
-For component-scoped atoms, there's a separate `ScopedAtom` utility:
+For component-scoped atoms (similar to local state):
 
 ```typescript
+export interface ScopedAtom<A extends Atom.Atom<any>, Input = never> {
+  use(): A
+  Provider: React.FC<{ children?: React.ReactNode; value?: Input }>
+  Context: React.Context<A>
+}
+
 export const make = <A extends Atom.Atom<any>, Input = never>(
   f: (() => A) | ((input: Input) => A)
 ): ScopedAtom<A, Input> => {
   const Context = React.createContext<A>(undefined as unknown as A)
-
-  const use = (): A => {
-    const atom = React.useContext(Context)
-    if (atom === undefined) {
-      throw new Error("ScopedAtom used outside of its Provider")
-    }
-    return atom
-  }
-
-  const Provider: React.FC<{ value: Input }> = ({ children, value }) => {
+  
+  const Provider: React.FC<...> = ({ children, value }) => {
     const atom = React.useRef<A | null>(null)
     if (atom.current === null) {
       atom.current = f(value)
     }
     return React.createElement(Context.Provider, { value: atom.current }, children)
   }
-
-  return { use, Provider, Context }
+  // ...
 }
 ```
 
-This creates isolated atom scopes - useful for lists where each item needs its own atom instance.
+This allows creating atoms that are scoped to a subtree, not global.
 
-## Comparison with tRPC React
-
-tRPC's `TRPCProvider` from `@trpc/tanstack-react-query`:
+## HydrationBoundary for SSR
 
 ```typescript
-// From trpc/packages/tanstack-react-query/src/internals/Context.tsx
-const TRPCProvider: TRPCProviderType = (props) => {
-  const value = useMemo(() => ({
-    queryClient: props.queryClient,
-    ...
-  }), [...]);
-
-  return (
-    <TRPCClientContext.Provider value={props.trpcClient}>
-      <TRPCContext.Provider value={value}>
-        {props.children}
-      </TRPCContext.Provider>
-    </TRPCClientContext.Provider>
-  );
-};
-```
-
-Key differences:
-- tRPC uses nested contexts (client + query)
-- No lazy initialization (client passed as prop)
-- No lifecycle management (React Query handles that)
-
-## Recommendations for effect-trpc
-
-### 1. Use Atom's RegistryProvider
-
-Since we're using `@effect-atom/atom-react`, we should compose with their Provider:
-
-```typescript
-import { RegistryProvider } from "@effect-atom/atom-react"
-
-export const TrpcProvider = (props: {
-  children: ReactNode
-  client: TrpcClient
-  // Optional: registry config
-  initialValues?: Iterable<readonly [Atom.Atom<any>, any]>
+export const HydrationBoundary: React.FC<HydrationBoundaryProps> = ({
+  children,
+  state
 }) => {
-  return (
-    <RegistryProvider initialValues={props.initialValues}>
-      <TrpcClientContext.Provider value={props.client}>
-        {props.children}
-      </TrpcClientContext.Provider>
-    </RegistryProvider>
-  )
-}
-```
-
-### 2. Create Client Context
-
-```typescript
-const TrpcClientContext = React.createContext<TrpcClient | null>(null)
-
-export const useTrpcClient = () => {
-  const client = React.useContext(TrpcClientContext)
-  if (client === null) {
-    throw new Error("useTrpcClient must be used within TrpcProvider")
-  }
-  return client
-}
-```
-
-### 3. Optional: Pre-hydration Support
-
-For SSR, accept initial atom values:
-
-```typescript
-export const TrpcProvider = (props: {
-  children: ReactNode
-  client: TrpcClient
-  // SSR hydration
-  dehydratedState?: Iterable<Hydration.DehydratedAtom>
-}) => {
-  return (
-    <RegistryProvider>
-      {props.dehydratedState && (
-        <HydrationBoundary state={props.dehydratedState} />
-      )}
-      <TrpcClientContext.Provider value={props.client}>
-        {props.children}
-      </TrpcClientContext.Provider>
-    </RegistryProvider>
-  )
-}
-```
-
-### 4. Consider Lazy Client Creation
-
-For better ergonomics, allow lazy client creation like Atom does:
-
-```typescript
-export const TrpcProvider = (props: {
-  children: ReactNode
-  // Either provide client or options to create one
-  client?: TrpcClient
-  createClient?: () => TrpcClient
-}) => {
-  const clientRef = React.useRef<TrpcClient | null>(props.client ?? null)
+  const registry = React.useContext(RegistryContext)
   
-  if (clientRef.current === null && props.createClient) {
-    clientRef.current = props.createClient()
-  }
+  // useMemo runs during render phase for SSR hydration
+  const hydrationQueue = React.useMemo(() => {
+    if (state) {
+      const nodes = registry.getNodes()
+      // Separate new vs existing atoms
+      // Hydrate new atoms immediately
+      // Queue existing atoms for post-render
+    }
+  }, [registry, state])
   
-  return (
-    <RegistryProvider>
-      <TrpcClientContext.Provider value={clientRef.current}>
-        {props.children}
-      </TrpcClientContext.Provider>
-    </RegistryProvider>
-  )
+  // Effect hydrates existing atoms after commit
+  React.useEffect(() => {
+    if (hydrationQueue) {
+      Hydration.hydrate(registry, hydrationQueue)
+    }
+  }, [registry, hydrationQueue])
+}
+```
+
+Smart hydration that:
+- Hydrates new atoms during render (for SSR)
+- Defers existing atom updates to avoid transition issues
+
+## Comparison: atom-react vs effect-trpc
+
+| Aspect | atom-react | effect-trpc |
+|--------|-----------|-------------|
+| Context value | Registry (mutable) | TRPCClient (immutable) |
+| Default context | Yes (pre-created) | No |
+| Scheduler | React scheduler | None |
+| SSR support | HydrationBoundary | Not implemented |
+| Scoped state | ScopedAtom | Not implemented |
+
+## Key Insights for effect-trpc
+
+1. **Registry as context value is correct** - atom-react does the same, not atoms
+2. **Default context value** - Allows hooks to work without explicit provider
+3. **Scheduler integration** - Could integrate with Effect's scheduler
+4. **Deferred disposal** - Handles React StrictMode gracefully
+5. **ScopedAtom pattern** - Could be useful for per-component clients
+6. **HydrationBoundary** - SSR pattern to adopt for data fetching
+
+## Provider Usage Example
+
+```tsx
+// Basic usage
+<RegistryProvider>
+  <App />
+</RegistryProvider>
+
+// With initial values
+<RegistryProvider 
+  initialValues={[[countAtom, 10], [userAtom, currentUser]]}
+  defaultIdleTTL={1000}
+>
+  <App />
+</RegistryProvider>
+
+// Works without provider (uses default registry)
+function Component() {
+  const [count, setCount] = useAtom(countAtom) // Works!
 }
 ```
 
 ## Summary
 
-Effect Atom's Provider pattern is well-designed:
-1. **Lazy initialization** via `useRef` pattern
-2. **StrictMode compatible** with delayed disposal
-3. **Composable** - just wraps React Context
-4. **Configurable** - accepts registry options
-5. **Works without Provider** - has sensible defaults
+The Provider pattern in atom-react:
+- Uses **Registry** (mutable coordination point), not atoms, as context value
+- Provides **sensible defaults** allowing hooks to work without explicit provider
+- Integrates with **React's scheduler** for priority-aware updates
+- Handles **React StrictMode** with deferred disposal
+- Supports **SSR** via HydrationBoundary with smart render/effect timing
+- Offers **ScopedAtom** for component-local atom instances
 
-Our effect-trpc Provider should:
-1. **Wrap** `RegistryProvider` (don't duplicate)
-2. **Add** client context layer
-3. **Support** SSR hydration via `HydrationBoundary`
-4. **Allow** lazy client creation for ergonomics
+This validates that effect-trpc's approach of providing TRPCClient via context is appropriate. The key enhancement would be adding scheduler integration and SSR support.

@@ -8,25 +8,23 @@
 
 ## Executive Summary
 
-This report consolidates findings from a comprehensive multi-day review of the effect-trpc codebase, comparing it against Effect RPC, Effect Atom, Effect Atom React, and vanilla tRPC.
+This report consolidates findings from a comprehensive review of the effect-trpc codebase, comparing it against Effect RPC, Effect Atom, Effect Atom React, and vanilla tRPC.
 
-### Current State: ~40% Complete
+### Current State: ~65% Complete
 
-The effect-trpc library has a solid core RPC mechanism but critical features are either stubs or completely unimplemented:
+The effect-trpc library has progressed from the previous review. React hooks now exist (though using vanilla React). However, critical issues remain:
 
-| Category | Status |
-|----------|--------|
-| Core RPC (Procedure/Router/Server) | Working |
-| Transport (HTTP basic) | Working |
-| React Integration | **100% Stubs** |
-| Caching | **Not Implemented** |
-| Request Batching | **Not Implemented** |
-| SSE/WebSocket | **Not Implemented** |
-| Stream Middleware | **Bypassed (Security Issue)** |
+| Category | Status | Notes |
+|----------|--------|-------|
+| Core RPC | Working | Procedure/Router/Server solid |
+| Transport (HTTP) | Partial | Batching/SSE not implemented |
+| React Integration | **Wrong Architecture** | Uses vanilla React, not @effect-atom/atom-react |
+| Stream Middleware | **BYPASSED** | Security issue |
+| Caching | **Not Implemented** | Reactivity without cache |
 
-### Key Recommendation
+### Top Recommendation
 
-**Build on Effect Atom, don't recreate it.** Effect Atom provides exactly the reactive state management we need. Our React hooks should wrap Effect Atom React, not implement parallel functionality.
+**Properly integrate with Effect Atom.** The codebase lists `@effect-atom/atom-react` as a peer dependency but never imports it. All React hooks use manual `useState` instead of atom-based reactivity.
 
 ---
 
@@ -34,140 +32,152 @@ The effect-trpc library has a solid core RPC mechanism but critical features are
 
 ### Critical Security Issue
 
-**Streams bypass all middleware** in `Server.handleStream()`. Authentication, authorization, and other middleware do NOT run for stream procedures. This must be fixed before any release.
+**Streams bypass all middleware** (`Server/index.ts:285-337`). Authentication, authorization, rate limiting - all bypassed for stream procedures.
 
-### Major Gaps
+```typescript
+// Current code - middlewares destructured but NEVER used
+const { handler, procedure, isStream } = entry  // WHERE IS middlewares?
+```
 
-1. **React hooks throw errors** - `useQuery`, `useMutation`, `useStream` are stubs
-2. **No cache exists** - Reactivity module has invalidation with nothing to invalidate
-3. **Batching config ignored** - `Transport.http({batching: {enabled: true}})` does nothing
-4. **SSE not implemented** - Has TODO comment, wraps single HTTP request
-5. **Test types not checked** - tsconfig excludes test/, 27+ type errors
+### Major Findings
+
+| Issue | Severity | Location |
+|-------|----------|----------|
+| Streams bypass middleware | CRITICAL | `Server/index.ts:285-337` |
+| @effect-atom/atom-react unused | CRITICAL | `Client/react.ts` - never imported |
+| No payload size limits | HIGH | DoS vulnerability |
+| Batching config ignored | HIGH | `Transport/index.ts:265-276` |
+| SSE not implemented | HIGH | `Transport/index.ts:361` |
+| Stream cancellation broken | HIGH | `Client/react.ts:432-436` |
+| Silent encoding fallbacks | MEDIUM | `Server/index.ts:252, 260` |
+| Custom Reactivity incompatible | MEDIUM | Doesn't use `@effect/experimental/Reactivity` |
 
 ### What Works Well
 
-- Procedure/Router/Server architecture
+- Core RPC mechanism (Procedure, Router, Server)
 - Type utilities (Paths, ProcedureAt, AutoComplete)
-- Middleware system (server-side)
-- Loopback and Mock transports
-- Effect patterns (mostly)
+- Effect patterns compliance (A- grade)
+- API consistency (8.2/10)
+- Module architecture (clean DAG except Client circular dep)
 
 ---
 
-## Part 2: External Analysis Findings
+## Part 2: External Analysis Key Findings
 
 ### From Effect RPC
 
-| Hypothesis | Finding | Action |
-|------------|---------|--------|
-| H1: Schema encoding | Uses bidirectional encode/decode, Exit schema | Adopt Exit schema, add client-side encode |
-| H2: Stream middleware | Streams converted to Effect BEFORE middleware | Fix our stream handling immediately |
-| H3: Batching | Not implemented in Effect RPC | Consider removing or implementing ourselves |
-| H4: Error handling | Never silent - layered fallbacks with logging | Replace `orElseSucceed` with proper handling |
-| H5: Transports | HTTP, WebSocket, Socket, Worker, Stdio | Add WebSocket, skip SSE for now |
+| Finding | Implication |
+|---------|-------------|
+| Uses Exit-based response model | We should adopt `Exit<Success, Error>` instead of `Success | Failure` |
+| Never uses silent fallbacks | Replace our `orElseSucceed` with proper error propagation |
+| Streams wrapped in Effects before middleware | **Fix for our stream middleware bypass** |
+| No batching implementation | Batching is optional - can remove or implement ourselves |
+| HTTP, WebSocket, Worker, Stdio transports | Add WebSocket for subscriptions |
 
-**Key Pattern:** Effect RPC wraps streams in Effects before applying middleware via `streamEffect()`. This ensures middleware runs and context propagates.
+**Critical Pattern for Stream Fix:**
+```typescript
+// Effect RPC wraps stream in Effect BEFORE middleware
+const handler = applyMiddleware(
+  rpc, context, clientId, payload, headers,
+  isStream ? streamEffect(stream) : effect  // Stream converted to Effect
+)
+```
 
 ### From Effect Atom
 
-| Hypothesis | Finding | Action |
-|------------|---------|--------|
-| H6: Cache storage | Registry-centric with Node objects | Build on Atom, don't reinvent |
-| H7: Subscriptions | Pull-based with push notifications | Use Atom's subscription model |
-| H8: Services | Clean Context.Tag pattern | Follow AtomRuntime pattern |
-| H9: Invalidation | Built-in refresh, reactivity keys | Leverage existing invalidation |
-| H10: Async state | Result<A,E> with waiting flag | Use Result type for query states |
-
-**Key Pattern:** Effect Atom's `Result<A, E>` type perfectly models query states:
-- `Initial` - Loading (no previous data)
-- `Success` - Data available (can have `waiting: true` for refetch)
-- `Failure` - Error (preserves `previousSuccess` for stale-while-revalidate)
+| Finding | Implication |
+|---------|-------------|
+| Registry-based storage with Nodes | This IS the cache - don't create separate one |
+| `Result<A, E>` type for async state | Use instead of manual loading/error states |
+| Uses `@effect/experimental/Reactivity` | Don't create custom Reactivity service |
+| Built-in invalidation via `reactivityKeys` | Leverage for mutation→query invalidation |
+| IdleTTL with bucket-based disposal | Use for automatic cache cleanup |
 
 ### From Effect Atom React
 
-| Hypothesis | Finding | Action |
-|------------|---------|--------|
-| H11: Hooks | useSyncExternalStore with WeakMap cache | Use their hooks, don't reimplement |
-| H12: Provider | RegistryProvider with React scheduler | Wrap their Provider |
-| H13: Suspense | useAtomSuspense with promise throwing | Delegate to their Suspense hook |
-| H14: Effect lifecycle | Sync-first execution, scope cleanup | Follow their patterns |
-| H15: SSR | "use client", HydrationBoundary | Use their SSR infrastructure |
-
-**Key Pattern:** All React hooks should delegate to Effect Atom React. We add tRPC-specific query/mutation atom creation, not new hook implementations.
+| Finding | Implication |
+|---------|-------------|
+| `useSyncExternalStore` foundation | Replace our `useState` with this |
+| WeakMap caching for stores | Adopt for memory safety |
+| HydrationBoundary for SSR | Use for server-side rendering |
+| Suspense via promise throwing | Implement `useQuerySuspense` |
+| `runCallbackSync` execution model | Use instead of `runPromise` |
 
 ### From tRPC
 
-| Hypothesis | Finding | Action |
-|------------|---------|--------|
-| H16: React Query | Proxy-based hook generation | Use proxy pattern for API |
-| H17: Batching | DataLoader pattern, setTimeout(0) | Implement if needed |
-| H18: Subscriptions | WebSocket + SSE with tracked events | Add WebSocket support |
-| H19: Middleware | Rich context (type, path, meta, signal) | Add missing context values |
-| H20: Links | Composable transport middleware | Don't adopt - Effect has better composition |
-
-**Key Pattern:** tRPC's proxy-based API (`trpc.users.get.useQuery()`) is excellent UX. We should generate this from router definitions.
+| Finding | Implication |
+|---------|-------------|
+| DataLoader pattern for batching | Implement with `setTimeout(dispatch)` |
+| Middleware has full context (type, path, meta, signal) | Add these to our middleware |
+| Tracked events for subscription reconnection | Consider for stream resumption |
+| Options-based API pattern | Aligns well with Effect's functional style |
+| Link architecture | Don't adopt - Effect has better composition |
 
 ---
 
 ## Part 3: Recommended Architecture
 
-### Package Structure
-
-```
-@effect-trpc/core          - Procedure, Router, Server, Transport
-@effect-trpc/client        - Type-safe client with proxy API
-@effect-trpc/atom          - Query atoms, mutation atoms (uses @effect-atom/atom)
-@effect-trpc/react         - React hooks (wraps @effect-atom/atom-react)
-```
-
-### Query State Model
-
-Use Effect Atom's `Result<A, E>`:
-
-```typescript
-type QueryResult<A, E> = Result.Result<A, E>
-// Initial - loading, no data
-// Success - data available, optional waiting flag for refetch
-// Failure - error, optional previousSuccess for SWR
-```
-
 ### React Integration Strategy
 
+**Current (Wrong):**
 ```typescript
-// Don't do this (our current approach):
-export const useQuery = () => {
-  throw new Error("requires React")  // Stub!
-}
+// Client/react.ts - uses vanilla React
+const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
+const [isLoading, setIsLoading] = useState(false)
+```
 
-// Do this instead:
-import { useAtomSuspense } from "@effect-atom/atom-react"
+**Recommended:**
+```typescript
+// Use @effect-atom/atom-react properly
+import { useAtomSuspense, useAtomValue } from "@effect-atom/atom-react"
+import { Atom, Result } from "@effect-atom/atom"
 
-export const useQuery = <A, E>(queryAtom: Atom<Result<A, E>>) => {
+export const useQuery = <A, E>(queryAtom: Atom.Atom<Result.Result<A, E>>) => {
   return useAtomSuspense(queryAtom)
 }
 ```
 
-### Middleware Fix (Critical)
+### Stream Middleware Fix
 
-Current (broken):
+**Current (Broken):**
 ```typescript
-// Server.handleStream() - middleware array is IGNORED
-const handler = procedureHandler
-// ...run handler without middleware
+// handleStream() ignores middlewares completely
+const { handler, procedure, isStream } = entry
 ```
 
-Fixed (from Effect RPC pattern):
+**Recommended (from Effect RPC):**
 ```typescript
-// Convert stream to Effect, then apply middleware
-const handler = applyMiddleware(
-  rpc,
-  context,
-  clientId,
-  payload,
-  headers,
-  isStream
-    ? streamEffect(client, request, streamOrEffect)  // Wrap stream first
-    : streamOrEffect
+const handleStream = (request) => {
+  const middlewareGate = middlewares.length > 0
+    ? Middleware.execute(middlewares, toMiddlewareRequest(request), Effect.void)
+    : Effect.void
+  
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      yield* middlewareGate  // Auth runs HERE
+      const payload = yield* Schema.decodeUnknown(procedure.payloadSchema)(request.payload)
+      return makeStream(payload)
+    })
+  )
+}
+```
+
+### Reactivity Integration
+
+**Current (Wrong):**
+```typescript
+// Custom Reactivity service incompatible with Effect Atom
+export class Reactivity extends Context.Tag("Reactivity")<Reactivity, ReactivityService>() {}
+```
+
+**Recommended:**
+```typescript
+// Use @effect/experimental/Reactivity
+import { Reactivity } from "@effect/experimental"
+
+// Then use Atom.withReactivity() for query atoms
+const queryAtom = Atom.of(Result.initial<User, Error>()).pipe(
+  Atom.withReactivity(["users", "list"])
 )
 ```
 
@@ -175,64 +185,80 @@ const handler = applyMiddleware(
 
 ## Part 4: Implementation Roadmap
 
-### Phase 1: Security & Correctness (Week 1)
+### Phase 1: Security & Critical Fixes (Week 1)
 
-1. **Fix stream middleware bypass** - Adopt Effect RPC's `streamEffect()` pattern
-2. **Fix silent error handling** - Replace `orElseSucceed` with logging/propagation
-3. **Enable test type-checking** - Remove exclude, fix 27+ errors
-4. **Add missing type exports** - ProcedurePayload, ProcedureSuccess, etc.
+| Task | Priority | Effort |
+|------|----------|--------|
+| Fix stream middleware bypass | CRITICAL | 2 days |
+| Add payload size limits | HIGH | 1 day |
+| Replace silent encoding fallbacks | HIGH | 1 day |
+| Enable test type-checking | MEDIUM | 0.5 days |
 
-### Phase 2: Remove Lies (Week 2)
+### Phase 2: React Architecture (Weeks 2-3)
 
-5. **Delete React stubs** - Remove hooks that throw errors
-6. **Remove batching config** - Or implement it (see Phase 4)
-7. **Update documentation** - Only document working features
-8. **Clean up examples** - Fix or remove desired-api.ts (88+ errors)
+| Task | Priority | Effort |
+|------|----------|--------|
+| Decide: use @effect-atom/atom-react OR remove peer dep | CRITICAL | Decision |
+| If using: refactor hooks to use `useAtomSuspense` | HIGH | 3 days |
+| Implement proper stream cancellation | HIGH | 2 days |
+| Add Suspense support | MEDIUM | 2 days |
+| Break circular dependency in Client | MEDIUM | 1 day |
 
-### Phase 3: Build on Effect Atom (Weeks 3-4)
+### Phase 3: Transport & Batching (Weeks 4-5)
 
-9. **Create @effect-trpc/atom** - Query/mutation atom factories
-10. **Create @effect-trpc/react** - Thin wrapper over atom-react
-11. **Implement QueryCache** - Use AtomRegistry as the cache
-12. **Implement invalidation** - Leverage Atom's reactivity keys
+| Task | Priority | Effort |
+|------|----------|--------|
+| Remove batching config OR implement batching | HIGH | 3 days |
+| Implement SSE OR remove references | MEDIUM | 3 days |
+| Add WebSocket transport for subscriptions | MEDIUM | 4 days |
 
-### Phase 4: Feature Parity (Weeks 5-8)
+### Phase 4: Middleware Enhancement (Week 6)
 
-13. **WebSocket transport** - For subscriptions
-14. **Request batching** - DataLoader pattern from tRPC
-15. **Middleware context** - Add type, path, meta, signal
-16. **SSR support** - Use Atom's HydrationBoundary
+| Task | Priority | Effort |
+|------|----------|--------|
+| Add procedure type to middleware context | MEDIUM | 1 day |
+| Add procedure path to middleware context | MEDIUM | 1 day |
+| Add AbortSignal support | MEDIUM | 2 days |
 
-### Phase 5: Polish (Weeks 9-12)
+### Phase 5: Polish & SSR (Weeks 7-8)
 
-17. **DevTools** - Query inspector, cache visualization
-18. **Optimistic updates** - Pattern from atom-react
-19. **Retry/stale-while-revalidate** - Built into atom
-20. **Full tRPC API compatibility** - Links equivalent via Transport
+| Task | Priority | Effort |
+|------|----------|--------|
+| SSR with HydrationBoundary | MEDIUM | 3 days |
+| DevTools (query inspector) | LOW | 3 days |
+| Documentation rewrite | MEDIUM | 3 days |
 
 ---
 
-## Part 5: Files Changed Summary
+## Part 5: Decision Points
 
-### Files Needing Immediate Attention
+### Decision 1: @effect-atom/atom-react
 
-| File | Issue | Priority |
-|------|-------|----------|
-| `src/Server/index.ts` | Stream middleware bypass | CRITICAL |
-| `src/Client/index.ts` | Stub React hooks | HIGH |
-| `src/Transport/index.ts` | Fake batching config | HIGH |
-| `src/Reactivity/index.ts` | Invalidation without cache | HIGH |
-| `tsconfig.json` | Test exclusion | MEDIUM |
-| `docs/*.md` | Fictional documentation | MEDIUM |
+**Options:**
+1. **Use it** - Refactor all hooks to use `useAtomSuspense`, `useAtomValue`, etc.
+2. **Remove it** - Delete from peer deps, document that hooks are vanilla React
 
-### Files That Are Good
+**Recommendation:** Use it. It provides:
+- Proper reactive subscriptions
+- Suspense support
+- SSR hydration
+- Memory-safe caching
 
-| File | Status |
-|------|--------|
-| `src/Procedure/index.ts` | Solid |
-| `src/Router/index.ts` | Good |
-| `src/Middleware/index.ts` | Good |
-| `src/Result/index.ts` | Fine (just re-export) |
+### Decision 2: Batching
+
+**Options:**
+1. **Remove config** - Delete `HttpOptions.batching` since Effect RPC doesn't have it either
+2. **Implement it** - Use tRPC's DataLoader pattern with `setTimeout(dispatch)`
+
+**Recommendation:** Remove for MVP, implement later if needed.
+
+### Decision 3: Custom Reactivity
+
+**Options:**
+1. **Keep custom** - Continue maintaining parallel system
+2. **Use @effect/experimental/Reactivity** - What Effect Atom uses
+
+**Recommendation:** Use `@effect/experimental/Reactivity` for compatibility with Effect ecosystem.
 
 ---
 
@@ -240,11 +266,11 @@ const handler = applyMiddleware(
 
 ### Internal Analysis (15 files)
 ```
-/inspection/our-codebase/logs/01-react-stubs.md
+/inspection/our-codebase/logs/01-react-integration.md
 /inspection/our-codebase/logs/02-transport-layer.md
 /inspection/our-codebase/logs/03-client-api.md
 /inspection/our-codebase/logs/04-server-handling.md
-/inspection/our-codebase/logs/05-type-utilities.md
+/inspection/our-codebase/logs/05-type-system.md
 /inspection/our-codebase/logs/06-reactivity-system.md
 /inspection/our-codebase/logs/07-error-handling.md
 /inspection/our-codebase/logs/08-api-consistency.md
@@ -297,13 +323,13 @@ const handler = applyMiddleware(
 
 ## Conclusion
 
-The effect-trpc library has a solid foundation in its core RPC mechanism, but significant work remains before it's production-ready. The most important findings are:
+The effect-trpc library has a solid foundation (~65% complete) but has architectural issues that need resolution:
 
-1. **Critical security fix needed** - Streams bypassing middleware
-2. **Don't reinvent Effect Atom** - Build on it instead
-3. **Delete stubs, don't ship lies** - Remove fake features
-4. **Follow Effect RPC patterns** - They've solved the hard problems
+1. **Critical: Fix stream middleware bypass** - Security issue
+2. **Critical: Actually use @effect-atom/atom-react** - Listed as peer dep but never imported
+3. **High: Implement or remove batching/SSE** - Don't ship fake features
+4. **Medium: Adopt @effect/experimental/Reactivity** - For ecosystem compatibility
 
-The recommended path forward is to leverage Effect Atom for state management and Effect Atom React for React integration, focusing effect-trpc on the RPC protocol layer and query/mutation atom creation.
+The recommended path forward is to properly integrate with Effect Atom rather than maintaining parallel implementations. This will provide reactive state management, SSR support, and Suspense integration with minimal effort.
 
-Total analysis: 35 detailed reports across 5 codebases.
+**Total Analysis:** 35 detailed reports across 5 codebases.

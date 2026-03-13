@@ -1,37 +1,45 @@
-# H9: Effect Atom Invalidation Patterns
+# H9: Invalidation Patterns in Effect Atom
 
 ## Summary
 
-Effect Atom provides **built-in invalidation mechanisms** at multiple levels, but leaves advanced patterns like tag-based cache invalidation to the `@effect/experimental/Reactivity` service integration. The invalidation model is graph-based, propagating stale state through atom dependencies.
+Effect Atom has **built-in invalidation** at two levels:
+1. **Node-level invalidation** - Internal graph mechanism for derived atoms
+2. **Reactivity service** - External key-based invalidation using `@effect/experimental/Reactivity`
 
-## Invalidation Mechanisms
+This is significantly more sophisticated than manual invalidation patterns.
 
-### 1. Node-Level Invalidation (Core)
+---
 
-The internal `Node` class manages invalidation state:
+## 1. Node-Level Invalidation (Internal Graph)
+
+### Core Mechanism
+
+Located in `packages/atom/src/internal/registry.ts`:
 
 ```typescript
-// internal/registry.ts
+// Node states
 const enum NodeState {
   uninitialized = NodeFlags.alive | NodeFlags.waitingForValue,
-  stale = NodeFlags.alive | NodeFlags.initialized | NodeFlags.waitingForValue,
+  stale = NodeFlags.alive | NodeFlags.initialized | NodeFlags.waitingForValue,  // <-- STALE STATE
   valid = NodeFlags.alive | NodeFlags.initialized,
   removed = 0
 }
 
+// Invalidation propagates through the dependency graph
 invalidate(): void {
   if (this.state === NodeState.valid) {
-    this.state = NodeState.stale
-    this.disposeLifetime()  // Clean up previous computation
+    this.state = NodeState.stale   // Mark as stale
+    this.disposeLifetime()         // Clean up subscriptions
   }
-  // Batch or immediate recomputation
+
+  // Either queue for batch processing or immediately rebuild
   if (batchState.phase === BatchPhase.collect) {
     batchState.stale.push(this)
-  } else if (this.atom.lazy && this.listeners.size === 0) {
-    this.invalidateChildren()
+  } else if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
+    this.invalidateChildren()      // Lazy: just propagate down
     this.skipInvalidation = true
   } else {
-    this.value()  // Immediate recompute
+    this.value()                   // Eager: recompute immediately
   }
 }
 
@@ -39,44 +47,234 @@ invalidateChildren(): void {
   const children = this.children
   this.children = []
   for (let i = 0; i < children.length; i++) {
-    children[i].invalidate()
+    children[i].invalidate()       // Recursive invalidation
   }
 }
 ```
 
-**Key Insight**: Invalidation propagates DOWN through dependent atoms (children), not up. Parents are source atoms; children depend on parents.
+### Key Insight: Parent-Child Tracking
 
-### 2. Registry.refresh() - Public API
+Atoms track their dependencies (parents) and dependents (children):
 
 ```typescript
-// Registry interface
+class Node<A> {
+  parents: Array<Node<any>> = []     // Atoms I depend on
+  children: Array<Node<any>> = []    // Atoms that depend on me
+  
+  // When I read another atom, establish parent-child relationship
+  addParent(parent: Node<any>): void {
+    this.parents.push(parent)
+    if (parent.children.indexOf(this) === -1) {
+      parent.children.push(this)
+    }
+  }
+}
+```
+
+### Lazy vs Eager Invalidation
+
+```typescript
+// Lazy atoms: defer recomputation until read
+if (this.atom.lazy && this.listeners.size === 0 && !childrenAreActive(this.children)) {
+  this.invalidateChildren()
+  this.skipInvalidation = true
+}
+// Eager atoms: recompute immediately on invalidation
+else {
+  this.value()  // Recompute now
+}
+```
+
+---
+
+## 2. Registry-Level Refresh
+
+The registry provides explicit refresh APIs:
+
+```typescript
+// Registry.ts interface
 readonly refresh: <A>(atom: Atom.Atom<A>) => void
 
 // Implementation
 refresh = <A>(atom: Atom.Atom<A>): void => {
   if (atom.refresh !== undefined) {
-    atom.refresh(this.refresh)  // Custom refresh handler
+    atom.refresh(this.refresh)      // Custom refresh logic
   } else {
-    this.invalidateAtom(atom)   // Default: simple invalidation
+    this.invalidateAtom(atom)       // Default: invalidate the node
+  }
+}
+
+invalidateAtom = <A>(atom: Atom.Atom<A>): void => {
+  this.ensureNode(atom).invalidate()
+}
+```
+
+### Usage: Effect.Effect API
+
+```typescript
+// Atom.ts - Effect API for refresh
+export const refresh = <A>(self: Atom<A>): Effect.Effect<void, never, AtomRegistry> =>
+  Effect.map(AtomRegistry, (_) => _.refresh(self))
+```
+
+---
+
+## 3. Reactivity Keys System (External Invalidation)
+
+### The `@effect/experimental/Reactivity` Service
+
+Effect Atom integrates with a dedicated Reactivity service for **key-based invalidation**:
+
+```typescript
+// AtomRpc.ts - Mutation triggers invalidation
+Effect.fnUntraced(function*({ headers, payload, reactivityKeys }) {
+  const client = yield* self
+  const effect = client(tag, payload, { headers } as any)
+  return yield* reactivityKeys
+    ? Reactivity.mutation(effect, reactivityKeys)  // Invalidates keys after mutation
+    : effect
+})
+```
+
+### Query Subscription to Reactivity Keys
+
+```typescript
+// Queries can subscribe to reactivity keys
+queryFamily(
+  new QueryKey({
+    tag,
+    payload: Data.struct(payload),
+    reactivityKeys: options?.reactivityKeys
+      ? wrapReactivityKeys(options.reactivityKeys)
+      : undefined,
+  })
+)
+
+// Factory wraps atoms with reactivity subscription
+return reactivityKeys
+  ? self.runtime.factory.withReactivity(reactivityKeys)(atom)
+  : atom
+```
+
+### `withReactivity` Implementation
+
+```typescript
+// Atom.ts
+factory.withReactivity =
+  (keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>) =>
+  <A extends Atom<any>>(atom: A): A =>
+    transform(atom, (get) => {
+      const reactivity = Result.getOrThrow(get(reactivityAtom))
+      
+      // Register for invalidation when keys change
+      get.addFinalizer(reactivity.unsafeRegister(keys, () => {
+        get.refresh(atom)  // <-- This is the callback!
+      }))
+      
+      get.subscribe(atom, (value) => get.setSelf(value))
+      return get.once(atom)
+    }) as any as A
+```
+
+### How Reactivity Works
+
+1. **Mutation**: `Reactivity.mutation(effect, keys)` - runs effect, then invalidates keys
+2. **Invalidation**: `Reactivity.invalidate(keys)` - directly invalidates keys (for streams)
+3. **Subscription**: `withReactivity(keys)` - atom refreshes when those keys are invalidated
+
+### Key Wrapping for Structural Equality
+
+```typescript
+// internal/data.ts
+export const wrapReactivityKeys = (
+  keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
+) => {
+  if (Array.isArray(keys)) {
+    return Data.array(keys)  // Structural equality for array keys
+  }
+  const obj: Record<string, ReadonlyArray<unknown>> = Object.create(Data.Structural.prototype)
+  for (const key in keys) {
+    obj[key] = Data.array(val)
+  }
+  return obj
+}
+```
+
+---
+
+## 4. Signal-Based Refresh
+
+Effect Atom provides signal-based refresh patterns:
+
+```typescript
+// Custom signal-based refresh
+export const makeRefreshOnSignal = <_>(signal: Atom<_>) => 
+  <A extends Atom<any>>(self: A): WithoutSerializable<A> =>
+    transform(self, (get) => {
+      get.once(signal)
+      get.subscribe(signal, (_) => get.refresh(self))  // Refresh on signal change
+      get.subscribe(self, (value) => get.setSelf(value))
+      return get.once(self)
+    }) as any
+
+// Built-in: refresh on window focus
+export const refreshOnWindowFocus = makeRefreshOnSignal(windowFocusSignal)
+```
+
+---
+
+## 5. Batching System
+
+Invalidations are batched to prevent cascade recomputation:
+
+```typescript
+// batchState tracks stale nodes during batch
+export const batchState = globalValue("@effect-atom/atom/Registry/batchState", () => ({
+  phase: BatchPhase.disabled,
+  depth: 0,
+  stale: [] as Array<Node<any>>,  // Nodes to rebuild
+  notify: new Set<Node<any>>()    // Nodes to notify listeners
+}))
+
+export function batch(f: () => void): void {
+  batchState.phase = BatchPhase.collect
+  batchState.depth++
+  try {
+    f()
+    if (batchState.depth === 1) {
+      // Rebuild all stale nodes
+      for (let i = 0; i < batchState.stale.length; i++) {
+        batchRebuildNode(batchState.stale[i])
+      }
+      // Then notify all listeners
+      batchState.phase = BatchPhase.commit
+      for (const node of batchState.notify) {
+        node.notify()
+      }
+    }
+  } finally {
+    batchState.depth--
+    if (batchState.depth === 0) {
+      batchState.phase = BatchPhase.disabled
+      batchState.stale = []
+    }
   }
 }
 ```
 
-Atoms can define custom `refresh` behavior:
+---
 
-```typescript
-export const readable = <A>(
-  read: (get: Context) => A,
-  refresh?: (f: <A>(atom: Atom<A>) => void) => void
-): Atom<A>
-```
+## 6. Context Methods for Invalidation
 
-### 3. Context Methods for Invalidation
+Within atom read functions, the context provides:
 
 ```typescript
 interface Context {
-  refresh<A>(this: Context, atom: Atom<A>): void     // Refresh any atom
-  refreshSelf(this: Context): void                   // Refresh current atom
+  // Refresh another atom (triggers its refresh logic)
+  refresh<A>(atom: Atom<A>): void
+  
+  // Refresh self (invalidate this atom)
+  refreshSelf(): void
 }
 
 // Implementation
@@ -89,220 +287,134 @@ refreshSelf(this: Lifetime<any>): void {
 }
 ```
 
-### 4. Effect-Level API
+### Custom Refresh Functions
+
+Atoms can define custom refresh behavior:
 
 ```typescript
-// Atom.ts
-export const refresh = <A>(self: Atom<A>): Effect.Effect<void, never, AtomRegistry> =>
-  Effect.map(AtomRegistry, (_) => _.refresh(self))
-```
+export const readable = <A>(
+  read: (get: Context) => A,
+  refresh?: (f: <A>(atom: Atom<A>) => void) => void  // Custom refresh
+): Atom<A>
 
-## Stale State Handling
+// Example: derived atom refreshes its source
+export const writable = <R, W>(
+  read: (get: Context) => R,
+  write: (ctx: WriteContext<R>, value: W) => void,
+  refresh?: (f: <A>(atom: Atom<A>) => void) => void
+): Writable<R, W>
 
-### Result Type with `waiting` Flag
-
-```typescript
-// Result.ts
-interface Success<A, E> {
-  readonly _tag: "Success"
-  readonly value: A
-  readonly waiting: boolean  // Indicates background refresh
-  readonly timestamp: number
-}
-
-// Helpers
-const waiting = <R extends Result<any, any>>(self: R): R => {
-  // Marks result as pending background refresh
-}
-```
-
-The `waiting` flag enables optimistic UI updates - showing stale data while fresh data loads.
-
-### Previous Value Preservation
-
-```typescript
-interface Failure<A, E> {
-  readonly _tag: "Failure"
-  readonly cause: Cause.Cause<E>
-  readonly previousSuccess: Option.Option<Success<A, E>>  // Stale data fallback
-}
-```
-
-## Automatic Refresh Patterns
-
-### 1. Window Focus Refresh
-
-```typescript
-// Atom.ts
-export const windowFocusSignal: Atom<number> = readable((get) => {
-  let count = 0
-  function update() {
-    if (document.visibilityState === "visible") {
-      get.setSelf(++count)
-    }
-  }
-  window.addEventListener("visibilitychange", update)
-  get.addFinalizer(() => window.removeEventListener("visibilitychange", update))
-  return count
-})
-
-export const refreshOnWindowFocus: <A extends Atom<any>>(self: A) => A = 
-  makeRefreshOnSignal(windowFocusSignal)
-
-// Generic signal-based refresh factory
-export const makeRefreshOnSignal = <_>(signal: Atom<_>) => 
-  <A extends Atom<any>>(self: A): A =>
-    transform(self, (get) => {
-      get.once(signal)
-      get.subscribe(signal, (_) => get.refresh(self))
-      get.subscribe(self, (value) => get.setSelf(value))
-      return get.once(self)
-    })
-```
-
-### 2. Idle TTL / Time-based Invalidation
-
-```typescript
-// Registry options
-interface RegistryOptions {
-  readonly defaultIdleTTL?: number  // Default TTL for all atoms
-}
-
-// Per-atom TTL
-export const setIdleTTL: {
-  (duration: Duration.DurationInput): <A extends Atom<any>>(self: A) => A
-}
-
-// Internal bucket-based timeout system
-setNodeTimeout(node: Node<any>): void {
-  const ttl = Math.ceil(idleTTL! / this.timeoutResolution) * this.timeoutResolution
-  const timestamp = Date.now() + ttl
-  const bucket = timestamp - (timestamp % this.timeoutResolution) + this.timeoutResolution
-  // Nodes are grouped into time buckets for efficient sweeping
-}
-```
-
-**Note**: TTL removes the atom node, not just marks it stale. On next access, atom re-initializes.
-
-## Reactivity Service Integration
-
-Effect Atom integrates with `@effect/experimental/Reactivity` for key-based invalidation:
-
-### Usage in AtomRuntime
-
-```typescript
-// Atom.ts
-factory.withReactivity = (keys) => <A extends Atom<any>>(atom: A): A =>
-  transform(atom, (get) => {
-    const reactivity = Result.getOrThrow(get(reactivityAtom))
-    get.addFinalizer(reactivity.unsafeRegister(keys, () => {
-      get.refresh(atom)
-    }))
-    get.subscribe(atom, (value) => get.setSelf(value))
-    return get.once(atom)
-  })
-```
-
-### In Mutation Functions (AtomRpc)
-
-```typescript
-// AtomRpc.ts
-const effect = client(tag, payload, { headers } as any)
-const finalEffect = reactivityKeys 
-  ? Reactivity.mutation(effect, reactivityKeys)  // Invalidates keys on success
-  : effect
-```
-
-### Mutation Pattern
-
-```typescript
-// For mutations that should invalidate related queries
-runtime.fn(
-  (arg, get) => Effect.gen(function*() {
-    const result = yield* someApiCall(arg)
-    return result
-  }),
-  { reactivityKeys: ['users', 'user-list'] }
+// Usage
+const derived = Atom.writable(
+  (get) => get(base),
+  () => {},
+  (refresh) => refresh(base)  // When derived is refreshed, refresh base instead
 )
 ```
 
-## What's NOT Built-in
+---
 
-1. **Tag-based Cache Keys**: No native `['users', userId]` query key system
-2. **Automatic Refetch on Interval**: No `refetchInterval` option (can be built with signals)
-3. **Stale-While-Revalidate**: Manual via `waiting` flag, not automatic
-4. **Dependent Query Invalidation**: Must be handled via Reactivity keys
-5. **Conditional Invalidation**: No built-in predicate-based invalidation
+## 7. Test Evidence
 
-## Comparison to TanStack Query-style Invalidation
-
-| Feature | Effect Atom | TanStack Query |
-|---------|-------------|----------------|
-| Query Keys | Atom identity / Reactivity keys | Hierarchical array keys |
-| `invalidateQueries` | `registry.refresh(atom)` | `queryClient.invalidateQueries(['key'])` |
-| Stale Time | Via `idleTTL` (removes, not stales) | `staleTime` (marks stale) |
-| Garbage Collection | `idleTTL` + `keepAlive: false` | `gcTime` |
-| Refetch on Focus | `refreshOnWindowFocus` | `refetchOnWindowFocus` |
-| Refetch on Reconnect | Build with signal | `refetchOnReconnect` |
-| Refetch Interval | Build with signal | `refetchInterval` |
-| Optimistic Updates | `optimistic()` combinator | `onMutate` + rollback |
-| Mutation Invalidation | Reactivity keys | `onSuccess` + `invalidateQueries` |
-
-## Batching
+From `Atom.test.ts`:
 
 ```typescript
-// Batch multiple mutations to minimize re-renders
-export const batch: (f: () => void) => void = internalRegistry.batch
+describe("Reactivity", () => {
+  it("rebuilds on mutation", async () => {
+    const r = Registry.make()
+    let rebuilds = 0
+    
+    // Atom subscribes to "counter" reactivity key
+    const atom = Atom.make(() => rebuilds++).pipe(
+      Atom.withReactivity(["counter"]),
+      Atom.keepAlive
+    )
+    
+    // Mutation invalidates "counter" key
+    const fn = counterRuntime.fn(
+      Effect.fn(function*() {}),
+      { reactivityKeys: ["counter"] }
+    )
+    
+    assert.strictEqual(r.get(atom), 0)
+    r.set(fn, void 0)               // Mutation runs
+    assert.strictEqual(r.get(atom), 1)  // Atom was rebuilt!
+    r.set(fn, void 0)
+    r.set(fn, void 0)
+    assert.strictEqual(r.get(atom), 3)  // Each mutation triggers rebuild
+  })
+})
 
-batch(() => {
-  registry.set(atomA, valueA)
-  registry.set(atomB, valueB)
-  // All changes propagate together
+// Signal-based refresh
+test(`refreshOnSignal`, async () => {
+  const signal = Atom.make(0)
+  const refreshOnSignal = Atom.makeRefreshOnSignal(signal)
+  const atom = Atom.make(() => rebuilds++).pipe(refreshOnSignal)
+  
+  r.mount(atom)
+  assert.strictEqual(rebuilds, 1)
+  
+  r.set(signal, 1)              // Update signal
+  assert.strictEqual(rebuilds, 2)  // Atom was rebuilt!
 })
 ```
 
-## Comparison to Our Needs
+---
 
-For effect-trpc, we need:
+## Comparison: Effect Atom vs TanStack Query
 
-1. **Mutation-based Invalidation**: Effect Atom + Reactivity provides this via `reactivityKeys`
-2. **Query Key Patterns**: Would need custom abstraction on top of atom families
-3. **Stale-While-Revalidate**: Result's `waiting` + `previousSuccess` enables this
-4. **Background Refetch**: Can build using `refreshOnWindowFocus` pattern
+| Feature | Effect Atom | TanStack Query |
+|---------|-------------|----------------|
+| **Automatic dependency tracking** | Yes (graph-based) | No (manual keys) |
+| **Reactive keys** | Yes (`withReactivity`) | Yes (`queryKey`) |
+| **Mutation invalidation** | `Reactivity.mutation` | `invalidateQueries` |
+| **Stale state** | `NodeState.stale` | `isStale` flag |
+| **Batching** | Built-in `batch()` | None built-in |
+| **Lazy recomputation** | Yes (lazy atoms) | No |
+| **Signal-based refresh** | `makeRefreshOnSignal` | Manual |
+| **Custom refresh logic** | `refresh` param | None |
 
-### Recommended Integration Pattern
+---
 
+## Implications for tRPC-Effect
+
+### 1. We Should Use `Reactivity` Service
+The `@effect/experimental/Reactivity` service is the idiomatic way to handle invalidation:
+- Mutations trigger `Reactivity.mutation(effect, keys)`
+- Queries subscribe via `withReactivity(keys)`
+
+### 2. Key Patterns
+Reactivity keys can be:
+- Simple arrays: `["users"]`
+- Structured: `{ users: [userId] }` for granular invalidation
+
+### 3. No Custom Invalidation Needed
+Effect Atom already has:
+- Graph-based automatic invalidation
+- Key-based external invalidation
+- Batching for performance
+- Lazy/eager modes
+
+### 4. Integration Pattern
 ```typescript
-// Pseudo-code for effect-trpc integration
-const trpcQuery = <TInput, TOutput>(
-  procedure: Procedure<TInput, TOutput>,
-  options?: { reactivityKeys?: unknown[] }
-) => {
-  return runtime.atom((get) => 
-    pipe(
-      procedure.query(input),
-      options?.reactivityKeys 
-        ? Reactivity.query(options.reactivityKeys)
-        : identity
-    )
-  )
-}
+// Query atom with reactivity
+const usersAtom = trpc.users.list({
+  reactivityKeys: ["users"]  // Subscribes to "users" key
+})
 
-const trpcMutation = <TInput, TOutput>(
-  procedure: Procedure<TInput, TOutput>,
-  options?: { reactivityKeys?: unknown[] }
-) => {
-  return runtime.fn(
-    (input: TInput) => procedure.mutate(input),
-    { reactivityKeys: options?.reactivityKeys }
-  )
-}
+// Mutation triggers invalidation
+const createUser = trpc.users.create({
+  reactivityKeys: ["users"]  // Invalidates "users" after success
+})
 ```
 
-## Key Findings
+---
 
-1. **Invalidation is Pull-based**: Nodes marked stale; recomputation happens on next access (or immediately if subscribed)
-2. **Graph Propagation**: Changes flow through dependency graph automatically
-3. **Reactivity Service**: Key-based invalidation delegated to `@effect/experimental/Reactivity`
-4. **No Query Cache**: Atoms ARE the cache - identity-based, not key-based
-5. **Flexible Primitives**: Lower-level than TanStack Query, more composable
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `internal/registry.ts` | Node-level invalidation, batching |
+| `Atom.ts` | `withReactivity`, `refresh`, signals |
+| `AtomRpc.ts` | `Reactivity.mutation` integration |
+| `internal/data.ts` | Key wrapping for structural equality |

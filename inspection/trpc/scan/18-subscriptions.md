@@ -1,242 +1,243 @@
-# H18: Subscriptions and Streaming in tRPC
+# H18: tRPC Subscription Architecture
 
-## Executive Summary
+## Overview
 
-tRPC supports real-time subscriptions through two transport mechanisms:
-1. **WebSocket** (`wsLink`) - Full-duplex, bidirectional communication
-2. **Server-Sent Events (SSE)** (`httpSubscriptionLink`) - HTTP-based, server-to-client streaming
+tRPC subscriptions are real-time event streams between client and server. They support two transport mechanisms:
+1. **WebSockets** - Full duplex, persistent connection
+2. **Server-Sent Events (SSE)** - HTTP-based, unidirectional
 
-Both support **async iterables** (recommended) and legacy **Observables** (deprecated in v12).
+## Server-Side Architecture
 
----
+### Procedure Definition
 
-## 1. Subscription Procedure Definition
-
-### Server-Side Definition
+Subscriptions are defined using async generators (preferred) or observables (deprecated):
 
 ```typescript
-// packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:555
+// packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:408-423
+subscription<$Output extends AsyncIterable<any, void, any>>(
+  resolver: ProcedureResolver<
+    TContext,
+    TMeta,
+    TContextOverrides,
+    TInputOut,
+    TOutputIn,
+    $Output
+  >
+): SubscriptionProcedure<{...}>
 
-subscription(resolver: ProcedureResolver<any, any, any, any, any, any>) {
-  return createResolver({ ..._def, type: 'subscription' }, resolver) as any;
+// Deprecated observable signature (to be removed in v12):
+subscription<$Output extends Observable<any, any>>(
+  resolver: ProcedureResolver<...>
+): LegacyObservableSubscriptionProcedure<{...}>
+```
+
+### Procedure Resolver
+
+The resolver receives standard options plus an `AbortSignal`:
+
+```typescript
+// packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:98-119
+interface ProcedureResolverOptions<TContext, _TMeta, TContextOverridesIn, TInputOut> {
+  ctx: Simplify<Overwrite<TContext, TContextOverridesIn>>;
+  input: TInputOut extends UnsetMarker ? undefined : TInputOut;
+  signal: AbortSignal | undefined;  // Key for cleanup
+  path: string;
+  batchIndex?: number;
 }
 ```
 
-Subscriptions must return either:
-- `AsyncIterable<T>` (recommended) - async generators
-- `Observable<T, E>` (deprecated) - converted internally to async iterable
+## Middleware and Subscription Interaction
 
-### Procedure Types
+### How It Works
+
+Middleware runs **before** the subscription resolver starts. The middleware chain executes synchronously before the async generator begins yielding values:
 
 ```typescript
-// packages/server/src/unstable-core-do-not-import/procedure.ts:5
-export const procedureTypes = ['query', 'mutation', 'subscription'] as const;
-
-// Types:
-export interface SubscriptionProcedure<TDef extends BuiltProcedureDef>
-  extends Procedure<'subscription', TDef> {}
-
-export interface LegacyObservableSubscriptionProcedure<TDef>
-  extends SubscriptionProcedure<TDef> {
-  // Marked as deprecated
+// packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:634-696
+async function callRecursive(index, _def, opts): Promise<MiddlewareResult> {
+  const middleware = _def.middlewares[index]!;
+  const result = await middleware({
+    ...opts,
+    next(_nextOpts?) {
+      return callRecursive(index + 1, _def, {
+        ...opts,
+        ctx: nextOpts?.ctx ? { ...opts.ctx, ...nextOpts.ctx } : opts.ctx,
+        input: nextOpts && 'input' in nextOpts ? nextOpts.input : opts.input,
+      });
+    },
+  });
+  return result;
 }
 ```
 
----
-
-## 2. WebSocket Transport
-
-### Message Protocol (JSON-RPC 2.0 Based)
-
-Location: `packages/server/src/unstable-core-do-not-import/rpc/envelopes.ts`
-
-#### Client Outgoing Messages
+**Key insight**: Middleware wraps the entire subscription call, not individual yielded values. The resolver middleware (added last) returns the async iterable:
 
 ```typescript
-// Request message
-interface TRPCRequestMessage {
-  id: number | string | null;
-  jsonrpc?: '2.0';
-  method: 'query' | 'mutation' | 'subscription';
-  params: {
-    path: string;
-    input: unknown;
-    lastEventId?: string;  // For resumption
-  };
-}
-
-// Stop subscription
-interface TRPCSubscriptionStopNotification {
-  method: 'subscription.stop';
-  id: number | string;
-}
+// packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:574-584
+middlewares: [
+  async function resolveMiddleware(opts) {
+    const data = await resolver(opts);  // Returns AsyncIterable
+    return {
+      marker: middlewareMarker,
+      ok: true,
+      data,  // The async iterable is returned as data
+      ctx: opts.ctx,
+    } as const;
+  },
+]
 ```
 
-#### Server Response Messages
+### Middleware Execution Timeline
 
-```typescript
-// Result message
-interface TRPCResultMessage<TData> {
-  id: number | string;
-  jsonrpc?: '2.0';
-  result: 
-    | { type: 'started'; data?: never }   // Subscription started
-    | { type: 'stopped'; data?: never }   // Subscription ended
-    | { type: 'data'; data: TData; id?: string }; // Data event
-}
-
-// Error response
-interface TRPCErrorResponse {
-  id: number | string;
-  error: TRPCErrorShape;
-}
-
-// Server-initiated reconnect request
-interface TRPCReconnectNotification {
-  id: null;
-  method: 'reconnect';
-}
+```
+Request arrives
+    |
+    v
+[Middleware 1] -> next()
+    |
+    v
+[Middleware 2] -> next()
+    |
+    v
+[Input validation middleware]
+    |
+    v
+[Output validation middleware] <-- Wraps the AsyncIterable
+    |
+    v
+[Resolver middleware] -> returns AsyncIterable
+    |
+    v
+Middleware chain completes (returns AsyncIterable wrapped in MiddlewareResult)
+    |
+    v
+Transport layer iterates over AsyncIterable
 ```
 
-### WebSocket Adapter Implementation
+### Output Validation for Subscriptions
 
-Location: `packages/server/src/adapters/ws.ts`
+Output validation wraps the async iterable through a transformer:
 
 ```typescript
-export function getWSConnectionHandler<TRouter extends AnyRouter>(
-  opts: WSSHandlerOptions<TRouter>,
-) {
-  return (client: ws.WebSocket, req: IncomingMessage) => {
-    // Track active subscriptions per client
-    const clientSubscriptions = new Map<number | string, AbortController>();
-    
-    // Handle incoming messages
-    client.on('message', (rawData, isBinary) => {
-      // Parse JSON-RPC message
-      const msgs = parseTRPCMessage(raw, transformer);
-      
-      for (const msg of msgs) {
-        if (msg.method === 'subscription.stop') {
-          // Abort the subscription
-          clientSubscriptions.get(msg.id)?.abort();
-        } else {
-          // Handle procedure call
-          handleRequest(msg);
-        }
+// From docs: zAsyncIterable pattern
+zAsyncIterable({
+  yield: z.object({ count: z.number() }),
+  tracked: true,
+}).transform(async function* (iter) {
+  const iterator = iter[Symbol.asyncIterator]();
+  try {
+    let next;
+    while ((next = await iterator.next()) && !next.done) {
+      if (opts.tracked) {
+        const [id, data] = trackedEnvelopeSchema.parse(next.value);
+        yield tracked(id, await opts.yield.parseAsync(data));
+        continue;
       }
-    });
-    
-    // On client disconnect, abort all subscriptions
-    client.once('close', () => {
-      for (const sub of clientSubscriptions.values()) {
-        sub.abort();
-      }
-    });
-  };
-}
+      yield opts.yield.parseAsync(next.value);
+    }
+  } finally {
+    await iterator.return?.();
+  }
+})
 ```
 
-#### Subscription Lifecycle (Server)
+## Transport Implementations
+
+### WebSocket Handler
 
 ```typescript
-// packages/server/src/adapters/ws.ts:276-425
+// packages/server/src/adapters/ws.ts:239-434
+// Key flow:
+if (msg.method === 'subscription.stop') {
+  clientSubscriptions.get(id)?.abort();
+  return;
+}
 
-// 1. Call procedure
-const result = await callTRPCProcedure({ router, path, ... });
+// Call the procedure
+const result = await callTRPCProcedure({
+  router, path, getRawInput, ctx, type, signal: abortController.signal, batchIndex
+});
 
-// 2. Validate it's an iterable
+// Validate result type
+if (type !== 'subscription') {
+  if (isIterableResult) throw new TRPCError({...});
+  // Send data response
+  return;
+}
+
+// Handle subscription result
 const iterable = isObservable(result)
   ? observableToAsyncIterable(result, abortController.signal)
   : result;
 
-// 3. Send 'started' notification
-respond({ id, result: { type: 'started' } });
-
-// 4. Stream values
-await using iterator = iteratorResource(iterable);
+// Iterate and send messages
 while (true) {
-  const next = await Unpromise.race([
+  next = await Unpromise.race([
     iterator.next().catch(getTRPCErrorFromUnknown),
     abortPromise,
   ]);
   
-  if (next === 'abort' || next.done) break;
-  
-  // Support tracked envelopes for resumption
-  if (isTrackedEnvelope(next.value)) {
-    const [id, data] = next.value;
-    respond({ id, result: { type: 'data', data: { id, data }, id } });
-  } else {
-    respond({ id, result: { type: 'data', data: next.value } });
+  if (next === 'abort') {
+    await iterator.return?.();
+    break;
   }
+  
+  respond({ id, jsonrpc, result: { type: 'data', data: next.value } });
 }
 
-// 5. Send 'stopped' notification
-respond({ id, result: { type: 'stopped' } });
+respond({ id, jsonrpc, result: { type: 'stopped' } });
 ```
 
-### Keep-Alive / Heartbeat
+### SSE Handler (HTTP)
 
 ```typescript
-// packages/server/src/adapters/ws.ts:574-612
-
-export function handleKeepAlive(
-  client: ws.WebSocket,
-  pingMs = 30_000,
-  pongWaitMs = 5_000,
-) {
-  const schedulePing = () => {
-    ping = setTimeout(() => {
-      client.send('PING');
-      timeout = setTimeout(() => client.terminate(), pongWaitMs);
-    }, pingMs);
-  };
-  
-  client.on('message', () => {
-    clearTimeout(ping);
-    clearTimeout(timeout);
-    schedulePing();
+// packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts:457-567
+case 'subscription': {
+  const iterable = run(() => {
+    if (error) return errorToAsyncIterable(error);
+    if (!experimentalSSE) return errorToAsyncIterable(...);
+    
+    const dataAsIterable = isObservable(result.data)
+      ? observableToAsyncIterable(result.data, opts.req.signal)
+      : result.data;
+    return dataAsIterable;
   });
+
+  const stream = sseStreamProducer({
+    data: iterable,
+    serialize: (v) => config.transformer.output.serialize(v),
+    formatError(errorOpts) {
+      // Format errors for SSE
+    },
+  });
+  
+  return new Response(stream, { headers: sseHeaders });
 }
 ```
-
----
-
-## 3. Server-Sent Events (SSE) Transport
 
 ### SSE Stream Producer
 
-Location: `packages/server/src/unstable-core-do-not-import/stream/sse.ts`
-
 ```typescript
-export function sseStreamProducer<TValue>(opts: SSEStreamProducerOptions<TValue>) {
-  async function* generator(): AsyncIterable<SSEvent, void> {
-    // 1. Send connected event with client options
-    yield {
-      event: 'connected',
-      data: JSON.stringify(clientOptions),
-    };
+// packages/server/src/unstable-core-do-not-import/stream/sse.ts:85-199
+function sseStreamProducer(opts) {
+  async function* generator() {
+    yield { event: CONNECTED_EVENT, data: JSON.stringify(client) };
     
-    // 2. Stream data with optional ping
-    for await (const value of iterable) {
+    for await (value of iterable) {
       if (value === PING_SYM) {
-        yield { event: 'ping', data: '' };
+        yield { event: PING_EVENT, data: '' };
         continue;
       }
       
-      // Support tracked envelopes (id field for resumption)
-      const chunk = isTrackedEnvelope(value)
+      chunk = isTrackedEnvelope(value)
         ? { id: value[0], data: value[1] }
         : { data: value };
       
       yield chunk;
     }
-    
-    // 3. Send return event to signal completion
-    yield { event: 'return', data: '' };
   }
   
-  // Transform to SSE wire format
+  // Convert to SSE format
   return stream.pipeThrough(new TransformStream({
     transform(chunk, controller) {
       if ('event' in chunk) controller.enqueue(`event: ${chunk.event}\n`);
@@ -244,148 +245,93 @@ export function sseStreamProducer<TValue>(opts: SSEStreamProducerOptions<TValue>
       if ('id' in chunk) controller.enqueue(`id: ${chunk.id}\n`);
       controller.enqueue('\n\n');
     },
-  }));
+  })).pipeThrough(new TextEncoderStream());
 }
 ```
 
-### SSE Event Types
-
-| Event | Purpose |
-|-------|---------|
-| `connected` | Initial handshake, sends client config |
-| `message` (default) | Data payload |
-| `ping` | Keep-alive heartbeat |
-| `serialized-error` | Error from server |
-| `return` | Stream completed normally |
-
-### SSE Headers
+## Tracked Events for Reconnection
 
 ```typescript
-export const sseHeaders = {
-  'Content-Type': 'text/event-stream',
-  'Cache-Control': 'no-cache, no-transform',
-  'X-Accel-Buffering': 'no',
-  'Connection': 'keep-alive',
-} as const;
-```
+// packages/server/src/unstable-core-do-not-import/stream/tracked.ts
+export type TrackedEnvelope<TData> = [TrackedId, TData, typeof trackedSymbol];
 
-### SSE Consumer (Client)
-
-Location: `packages/server/src/unstable-core-do-not-import/stream/sse.ts:279-447`
-
-```typescript
-export function sseStreamConsumer<TConfig>(opts: SSEStreamConsumerOptions<TConfig>)
-  : AsyncIterable<ConsumerStreamResult<TConfig>> 
-{
-  return run(async function* () {
-    const eventSource = new opts.EventSource(url, init);
-    
-    eventSource.addEventListener('connected', (msg) => {
-      // Parse client options
-      controller.enqueue({ type: 'connected', options: JSON.parse(msg.data) });
-    });
-    
-    eventSource.addEventListener('message', (msg) => {
-      // Data event
-      controller.enqueue({ type: 'data', data: deserialize(JSON.parse(msg.data)) });
-    });
-    
-    eventSource.addEventListener('serialized-error', (msg) => {
-      controller.enqueue({ type: 'serialized-error', error: JSON.parse(msg.data) });
-    });
-    
-    eventSource.addEventListener('return', () => {
-      eventSource.close();
-      controller.close();
-    });
-    
-    // Support timeout and reconnection
-    while (true) {
-      const result = await withTimeout({
-        promise: stream.read(),
-        timeoutMs: clientOptions.reconnectAfterInactivityMs,
-        onTimeout: async () => ({ type: 'timeout', ms: timeoutMs }),
-      });
-      
-      if (result.done) return;
-      yield result.value;
-    }
-  });
-}
-```
-
----
-
-## 4. Tracked Envelopes (Resumption Support)
-
-Location: `packages/server/src/unstable-core-do-not-import/stream/tracked.ts`
-
-```typescript
-// Create a tracked envelope for resumable subscriptions
 export function tracked<TData>(id: string, data: TData): TrackedEnvelope<TData> {
+  if (id === '') throw new Error('`id` must not be empty');
   return [id as TrackedId, data, trackedSymbol];
 }
 
-// Type for tracked data received by client
-export interface TrackedData<TData> {
-  id: string;    // Event ID for resumption
-  data: TData;   // Actual payload
+export function isTrackedEnvelope<TData>(value: unknown): value is TrackedEnvelope<TData> {
+  return Array.isArray(value) && value[2] === trackedSymbol;
 }
 ```
 
-### Usage Example
+## Client-Side Implementation
+
+### SSE Client (httpSubscriptionLink)
 
 ```typescript
-// Server
-t.procedure.subscription(async function* ({ input }) {
-  let cursor = input.lastEventId ?? 0;
-  while (true) {
-    const data = await getNextEvent(cursor);
-    yield tracked(String(cursor++), data);  // <-- tracked for resumption
-  }
-});
-
-// Client automatically tracks lastEventId and sends on reconnect
+// packages/client/src/links/httpSubscriptionLink.ts:65-240
+export function httpSubscriptionLink(opts) {
+  return () => ({ op }) => {
+    return observable((observer) => {
+      let lastEventId: string | undefined;
+      const ac = new AbortController();
+      
+      const eventSourceStream = sseStreamConsumer({
+        url: async () => getUrl({
+          input: inputWithTrackedEventId(input, lastEventId),
+          // ... 
+        }),
+        signal,
+        EventSource: opts.EventSource ?? globalThis.EventSource,
+      });
+      
+      for await (const chunk of eventSourceStream) {
+        switch (chunk.type) {
+          case 'data':
+            if (chunkData.id) lastEventId = chunkData.id;  // Track for reconnect
+            observer.next({ result });
+            break;
+          case 'connected':
+            observer.next({ result: { type: 'started' } });
+            break;
+          case 'serialized-error':
+            if (retryableRpcCodes.includes(chunk.error.code)) {
+              // Auto-reconnect
+              break;
+            }
+            throw TRPCClientError.from({ error: chunk.error });
+        }
+      }
+    });
+  };
+}
 ```
-
----
-
-## 5. Client Implementation
 
 ### WebSocket Client
 
-Location: `packages/client/src/links/wsLink/wsClient/wsClient.ts`
-
 ```typescript
-export class WsClient {
+// packages/client/src/links/wsLink/wsClient/wsClient.ts
+class WsClient {
   public readonly connectionState: BehaviorSubject<TRPCConnectionState>;
   
-  public request({ op, transformer, lastEventId }) {
+  request({ op, transformer, lastEventId }) {
     return observable((observer) => {
-      const abort = this.batchSend(
-        {
-          id: op.id,
-          method: op.type,
-          params: {
-            input: transformer.input.serialize(op.input),
-            path: op.path,
-            lastEventId,  // For resumption
-          },
+      const abort = this.batchSend({
+        id, method: type,
+        params: { input, path, lastEventId }
+      }, {
+        next(event) {
+          const transformed = transformResult(event, transformer.output);
+          observer.next({ result: transformed.result });
         },
-        {
-          next(event) {
-            observer.next({ result: transformResult(event) });
-          },
-          error: observer.error,
-          complete: observer.complete,
-        }
-      );
+        // ...
+      });
       
       return () => {
         abort();
-        // Send subscription.stop on unsubscribe
-        if (op.type === 'subscription') {
-          this.send({ id: op.id, method: 'subscription.stop' });
+        if (type === 'subscription' && this.activeConnection.isOpen()) {
+          this.send({ id, method: 'subscription.stop' });
         }
       };
     });
@@ -393,204 +339,84 @@ export class WsClient {
 }
 ```
 
-### HTTP Subscription Link (SSE Client)
-
-Location: `packages/client/src/links/httpSubscriptionLink.ts`
-
-```typescript
-export function httpSubscriptionLink<TInferrable>(opts) {
-  return () => ({ op }) => {
-    return observable((observer) => {
-      let lastEventId: string | undefined;
-      
-      const eventSourceStream = sseStreamConsumer({
-        url: () => getUrl({ input: inputWithTrackedEventId(input, lastEventId), ... }),
-        deserialize: transformer.output.deserialize,
-        EventSource: opts.EventSource ?? globalThis.EventSource,
-      });
-      
-      for await (const chunk of eventSourceStream) {
-        switch (chunk.type) {
-          case 'data':
-            if (chunk.data.id) lastEventId = chunk.data.id;  // Track for resumption
-            observer.next({ result: { data: chunk.data } });
-            break;
-          case 'connected':
-            observer.next({ result: { type: 'started' } });
-            break;
-          case 'serialized-error':
-            // Handle error, possibly retry
-            break;
-        }
-      }
-      
-      return () => ac.abort();
-    });
-  };
-}
-```
-
----
-
-## 6. Connection State Management
+## Connection State Management
 
 ```typescript
 // packages/client/src/links/internals/subscriptions.ts
-
 export type TRPCConnectionState<TError> =
   | { type: 'state'; state: 'idle'; error: null }
   | { type: 'state'; state: 'connecting'; error: TError | null }
   | { type: 'state'; state: 'pending'; error: null };
 ```
 
-Connection states are emitted alongside subscription data:
-- `idle` - Not connected
-- `connecting` - Establishing connection (may include error from previous attempt)
-- `pending` - Connected and ready
-
----
-
-## 7. JSON Lines Streaming (Batch Streaming)
-
-Location: `packages/server/src/unstable-core-do-not-import/stream/jsonl.ts`
-
-Used by `httpBatchStreamLink` for streaming batch responses. Handles:
-- Promises that resolve later
-- AsyncIterables within response objects
-- Nested async values
-
-Wire format: JSON Lines (newline-delimited JSON)
-
----
-
-## 8. Implementation Recommendations for effect-trpc
-
-### Transport Layer
-
-1. **Use Effect.Stream** for subscription data flow
-   - Natural fit for async iterables
-   - Built-in resource management
-   - Composable with other Effect primitives
-
-2. **WebSocket Support**
-   - Use `@effect/platform` WebSocket primitives
-   - Model connection state as Effect state machine
-   - Track subscriptions with Effect Ref/Map
-
-3. **SSE Support**
-   - Use `@effect/platform` HTTP streaming
-   - Consider `EventSource` polyfill for non-browser
-
-### Protocol Mapping
+## RPC Message Protocol
 
 ```typescript
-// Effect-native subscription type
-type Subscription<A, E> = Effect.Effect<
-  Stream.Stream<A, E>,  // The actual subscription stream
-  SubscriptionError,     // Setup errors
-  SubscriptionContext    // Dependencies
->
+// packages/server/src/unstable-core-do-not-import/rpc/envelopes.ts
+// Subscription stop request
+interface JSONRPC2.BaseRequest<'subscription.stop'> { id: JSONRPC2.RequestId }
 
-// Or using @effect/rpc patterns
-const subscription = Rpc.streamProcedure(
-  'chat.onMessage',
-  Schema.Struct({ roomId: Schema.String }),
-  Schema.Struct({ message: Schema.String, from: Schema.String }),
-)
+// Response message types
+type: 'started' | 'data' | 'stopped'
 ```
 
-### Connection State
+## Key Design Decisions
+
+### 1. Async Generators as Primary API
+- Observables deprecated (removal in v12)
+- Native JavaScript async generators are simpler to understand
+- Better TypeScript inference
+- Natural cleanup with `finally` blocks
+
+### 2. Middleware Runs Once Per Subscription
+- Context and authentication validated at subscription start
+- **Middleware does NOT wrap individual yielded values**
+- Output validation (if any) wraps the entire async iterable
+
+### 3. AbortSignal for Cleanup
+- Passed through resolver options
+- Used by adapters to cancel iteration
+- Supports `try...finally` cleanup pattern
+
+### 4. Tracked Events for Reliability
+- `tracked(id, data)` helper enables resumption
+- Client automatically reconnects with `lastEventId`
+- Server can replay missed events
+
+### 5. Transport Agnostic
+- Same subscription procedure works with WS or SSE
+- Observable-to-AsyncIterable conversion for backward compatibility
+
+## Implications for effect-trpc
+
+### Middleware + Streams Challenge
+
+The key insight is that **tRPC middleware only runs once at subscription start**. It does not:
+- Intercept each yielded value
+- Run cleanup code after each yield
+- Transform the stream inline
+
+If effect-trpc needs middleware to interact with streams:
+1. **Pre-stream execution**: Same as tRPC - run middleware before stream starts
+2. **Stream wrapping**: Output middleware can wrap the entire stream (see `zAsyncIterable`)
+3. **Per-value middleware**: Would require different approach - either:
+   - Custom stream transformer pipeline
+   - Integration with Effect's stream operators
+
+### Recommended Approach
+
+Follow tRPC's model:
+1. Middleware establishes context (auth, logging setup, etc.)
+2. Subscription resolver returns `Stream<...>`
+3. Output validation (if needed) wraps stream with Effect schema validation
+4. Transport layer (adapter) handles iteration and cleanup via AbortSignal
 
 ```typescript
-// Model as Effect discriminated union
-type ConnectionState<E> = Data.TaggedEnum<{
-  Idle: {}
-  Connecting: { error: Option.Option<E> }
-  Connected: {}
-  Disconnected: { error: E }
-}>
+// Conceptual effect-trpc approach
+subscription: (resolver) => {
+  // 1. Run middleware chain (Effect pipeline)
+  // 2. Get Stream from resolver
+  // 3. Optionally wrap with output validation
+  // 4. Adapter iterates Stream, converts to SSE/WS
+}
 ```
-
-### Tracked Events (Resumption)
-
-```typescript
-// Schema for tracked events
-const TrackedEvent = <A>(schema: Schema.Schema<A>) =>
-  Schema.Struct({
-    id: Schema.String,
-    data: schema,
-  })
-
-// Usage in subscription
-yield* Stream.fromAsyncIterable(
-  async function* () {
-    for (const event of events) {
-      yield { id: event.cursor, data: event.payload }
-    }
-  },
-  identity
-)
-```
-
-### Key Differences from Vanilla tRPC
-
-| Aspect | Vanilla tRPC | effect-trpc |
-|--------|--------------|-------------|
-| Return type | `AsyncIterable<T>` | `Stream.Stream<A, E, R>` |
-| Error handling | Try/catch | Effect error channel |
-| Cancellation | AbortSignal | Effect interruption |
-| Connection state | Observable | Effect state |
-| Resumption | Manual `lastEventId` | Could be automatic with Effect Ref |
-
----
-
-## 9. Protocol Summary
-
-### WebSocket Message Flow
-
-```
-Client                              Server
-  |                                   |
-  |-- subscription request ---------->|
-  |                                   |
-  |<--------- { type: 'started' } ----|
-  |                                   |
-  |<--------- { type: 'data', ... } --|  (multiple)
-  |<--------- { type: 'data', ... } --|
-  |                                   |
-  |-- subscription.stop ------------->|  (client unsubscribe)
-  |                                   |
-  |<--------- { type: 'stopped' } ----|
-```
-
-### SSE Event Flow
-
-```
-Client                              Server
-  |                                   |
-  |-- GET /trpc/sub?input=... ------->|
-  |                                   |
-  |<--- event: connected -------------|
-  |<--- data: {"reconnectAfter":...} -|
-  |                                   |
-  |<--- data: {"id":"1","data":...} --|  (tracked)
-  |<--- event: ping ------------------|  (keepalive)
-  |<--- data: {"id":"2","data":...} --|
-  |                                   |
-  |<--- event: return ----------------|  (normal end)
-  |   or                              |
-  |<--- event: serialized-error ------|  (error end)
-```
-
----
-
-## 10. Files Analyzed
-
-- `packages/server/src/unstable-core-do-not-import/stream/sse.ts` - SSE producer/consumer
-- `packages/server/src/unstable-core-do-not-import/stream/tracked.ts` - Event tracking
-- `packages/server/src/unstable-core-do-not-import/stream/jsonl.ts` - JSON Lines streaming
-- `packages/server/src/unstable-core-do-not-import/rpc/envelopes.ts` - Wire protocol types
-- `packages/server/src/adapters/ws.ts` - WebSocket adapter
-- `packages/client/src/links/wsLink/wsClient/wsClient.ts` - WS client
-- `packages/client/src/links/httpSubscriptionLink.ts` - SSE client link
-- `packages/server/src/unstable-core-do-not-import/procedureBuilder.ts` - Subscription builder

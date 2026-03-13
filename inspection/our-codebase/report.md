@@ -8,15 +8,12 @@
 
 ## Executive Summary
 
-The effect-trpc library is approximately **40% complete**. The core RPC mechanism (Procedure, Router, Server, Transport) works well and follows Effect patterns. However, major features advertised in documentation are either stubs or completely unimplemented:
+The effect-trpc library is approximately **65% complete** (up from previous estimate of 40%). The core RPC mechanism works, and React hooks have been implemented. However, critical issues remain:
 
-- **React integration:** 100% stubs (all hooks throw errors)
-- **Caching:** 0% implemented (invalidation exists but no cache)
-- **Request batching:** 0% implemented (config accepted but ignored)
-- **SSE streaming:** ~10% (wraps single HTTP, not real streaming)
-- **Stream middleware:** Completely bypassed (security issue)
-
-The documentation describes a library ~70% fictional. Users following the docs will encounter runtime errors for most React-related features.
+1. **React hooks use vanilla React** - `@effect-atom/atom-react` is a peer dependency but is never imported
+2. **Streams bypass all middleware** - Security issue, auth/rate-limiting don't run
+3. **Batching/SSE not implemented** - Config exists but is ignored
+4. **No payload size limits** - DoS vulnerability
 
 ---
 
@@ -26,96 +23,118 @@ The documentation describes a library ~70% fictional. Users following the docs w
 
 | Issue | Location | Impact |
 |-------|----------|--------|
-| Streams bypass middleware | `Server/index.ts:handleStream()` | Auth bypass on all stream procedures |
-| React hooks throw at runtime | `Client/index.ts:useQuery/useMutation/useStream` | App crash on hook call |
-| No payload size limits | `Transport/index.ts` | OOM attack vector |
+| Streams bypass middleware | `Server/index.ts:285-337` | Auth bypass on all stream procedures |
+| No payload size limits | `Transport/index.ts` | OOM/DoS attack vector |
+| @effect-atom/atom-react unused | `Client/react.ts` | Violates project requirements |
 
 ### HIGH (Major Functionality)
 
 | Issue | Location | Impact |
 |-------|----------|--------|
-| SSE not implemented | `Transport/index.ts:sendHttpStream` | Streaming doesn't work over HTTP |
-| Batching config ignored | `Transport/index.ts` | Performance optimization unavailable |
-| No cache exists | `Reactivity/index.ts` | Invalidation invalidates nothing |
-| Test types not checked | `tsconfig.json` | 27+ type errors in CI |
-| `invalidate()` does nothing | `Client/index.ts` | Manual cache control broken |
+| SSE not implemented | `Transport/index.ts:361` | Streaming doesn't work over HTTP |
+| Batching config ignored | `Transport/index.ts:265-276` | Performance optimization unavailable |
+| Stream cancellation broken | `Client/react.ts:432-436` | Memory leaks, zombie streams |
+| Test types not checked | `tsconfig.json` | Type errors in tests undetected |
+| Custom Reactivity incompatible | `Reactivity/index.ts` | Can't integrate with Effect Atom |
 
 ### MEDIUM (Should Fix)
 
 | Issue | Location | Impact |
 |-------|----------|--------|
-| Stream chunks not schema-encoded | `Server/index.ts` | Type safety gap |
-| Silent error encoding fallback | `Server/index.ts` | Debugging difficulty |
-| Missing type exports | `src/index.ts` | Consumer type errors |
-| `throw` statements in Effect code | `Client/index.ts` | Pattern violation |
+| Stream chunks not encoded | `Server/index.ts:309-323` | Type safety gap |
+| Silent encoding fallbacks | `Server/index.ts:252, 260` | Debugging difficulty |
+| Missing type exports | `Client/index.ts` | Consumer type errors |
+| Circular dependency | `Client/index.ts` ↔ `react.ts` | Bundling issues |
+| Duplicate Reactivity instances | `Client/react.ts` | Wasted resources |
 
 ### LOW (Polish)
 
 | Issue | Location | Impact |
 |-------|----------|--------|
-| Missing `isRouter`/`isClient` guards | Various | API inconsistency |
-| Duplicated `shouldInvalidate` logic | `Reactivity/index.ts` | Code smell |
-| Middleware after decode | `Server/index.ts` | Suboptimal error order |
-
----
-
-## Architecture Assessment
-
-### Strengths
-
-1. **Clean module DAG** - No circular dependencies, proper layering
-2. **Type utilities** - `Paths<R>`, `ProcedureAt<R, P>`, `AutoComplete<R>` are excellent
-3. **Effect idioms** - Proper use of services, contexts, layers
-4. **Middleware pattern** - Composable, type-safe, wrapping pattern
-5. **Loopback transport** - Great for testing
-6. **Schema handling** - Consistent use of `Schema.decodeUnknown`
-
-### Weaknesses
-
-1. **Stub-heavy React layer** - Listed as peer dep, completely unused
-2. **Disconnected reactivity** - Cache invalidation without cache
-3. **Feature flags without features** - Batching config, SSE config accepted but ignored
-4. **Dual client architecture** - Bound vs unbound clients is confusing
+| Per-request allocations | `Middleware/index.ts` | Minor perf impact |
+| Missing type guards | Various | API inconsistency |
+| Documentation 55-60% accurate | `docs/` | User confusion |
 
 ---
 
 ## Module Completeness
 
 ```
-Procedure    [===================  ] 95%  - Core works, minor issues
-Router       [==================   ] 90%  - Works well
-Middleware   [==================   ] 90%  - Server-side solid
-Server       [=================    ] 85%  - Streams need work
-Client       [===============      ] 75%  - Core works, hooks broken
-Transport    [============         ] 60%  - HTTP works, batching/SSE don't
-Reactivity   [==========           ] 50%  - Invalidation only
-React        [=                    ]  5%  - All stubs
-Cache        [                     ]  0%  - Does not exist
-Batching     [                     ]  0%  - Not implemented
+Procedure    [===================  ] 95%  - Solid
+Router       [==================   ] 90%  - Good
+Middleware   [==================   ] 90%  - Works (not for streams)
+Server       [==============       ] 70%  - Streams need middleware
+Client       [================     ] 80%  - Missing type exports
+Transport    [============         ] 60%  - Batching/SSE missing
+React        [==============       ] 70%  - Wrong architecture
+Reactivity   [========             ] 40%  - No cache, wrong system
 
-OVERALL      [========             ] 40%
+OVERALL      [=============        ] 65%
 ```
 
 ---
 
-## Comparison: Docs vs Reality
+## React Integration Analysis
 
-| Feature | Documented | Reality |
-|---------|------------|---------|
-| `api.users.get.query()` | Yes | Works |
-| `api.users.create.mutate()` | Yes | Works |
-| `api.posts.subscribe.stream()` | Yes | Partially works |
-| `useQuery()` hook | Yes | Throws error |
-| `useMutation()` hook | Yes | Throws error |
-| `useStream()` hook | Yes | Throws error |
-| `<api.Provider>` | Yes | Returns children only |
-| Request batching | Yes | Config ignored |
-| SSE transport | Yes | Not implemented |
-| Query caching | Implied | No cache exists |
-| Cache invalidation | Yes | No cache to invalidate |
-| Optimistic updates | Implied | Not implemented |
+### Current State
 
-**Documentation accuracy: ~25-30%**
+The React hooks (`useQuery`, `useMutation`, `useStream`) are **implemented but use vanilla React**:
+
+```typescript
+// What's actually implemented:
+const [result, setResult] = useState<Result.Result<Success, Error>>(Result.initial())
+const [isLoading, setIsLoading] = useState(false)
+const mountedRef = useRef(true)
+
+// What SHOULD be used (per CLAUDE.md requirements):
+import { useAtom, useAtomValue } from "@effect-atom/atom-react"
+const [result, setResult] = useAtom(queryAtom)
+```
+
+### Imports Analysis
+
+| Dependency | Listed In | Actually Used |
+|------------|-----------|---------------|
+| `@effect-atom/atom` | peerDependencies | `Result` type only |
+| `@effect-atom/atom-react` | peerDependencies | **NEVER IMPORTED** |
+| `react` | peerDependencies | Standard hooks |
+
+---
+
+## Stream Middleware Bypass
+
+### The Problem
+
+`handleStream()` collects middleware but never executes it:
+
+```typescript
+// Line 285-337 in Server/index.ts
+const { handler, procedure, isStream } = entry  // middlewares NOT destructured
+// ... middleware NEVER applied
+```
+
+### Security Impact
+
+```typescript
+// This LOOKS protected...
+const adminRouter = Router.withMiddleware([AuthMiddleware, AdminMiddleware], {
+  events: Procedure.stream({ success: AdminEvent }),  // NOT protected!
+  list: Procedure.query({ success: Schema.Array(Admin) }),  // Protected
+})
+```
+
+---
+
+## Configuration That Does Nothing
+
+| Config | Location | Status |
+|--------|----------|--------|
+| `batching.enabled` | `HttpOptions` | Ignored |
+| `batching.maxItems` | `HttpOptions` | Ignored |
+| `batching.maxURLLength` | `HttpOptions` | Ignored |
+| `staleTime` | `QueryOptions` | Extracted, never used |
+| `optimistic` | `MutationOptions` | Stored, never executed |
+| `HttpHandlerOptions.path` | Adapters | Prefixed with `_` |
 
 ---
 
@@ -123,31 +142,59 @@ OVERALL      [========             ] 40%
 
 ### Must Fix Before Any Release
 
-1. **`src/Client/index.ts`** (lines 620-720)
-   - Remove or implement React hooks
-   - Either use `@effect-atom/atom-react` or remove peer dep
+1. **`src/Server/index.ts`** (lines 285-337)
+   - Execute middleware for streams
+   - Encode stream chunks through schema
 
-2. **`src/Server/index.ts`** (line 380-420)
-   - `handleStream()` must run middleware array
-   - Stream chunks must be schema-encoded
+2. **`src/Client/react.ts`** (entire file)
+   - Either use `@effect-atom/atom-react` OR remove from peer deps
+   - Implement proper stream cancellation
 
-3. **`src/Transport/index.ts`** (lines 450-500)
+3. **`src/Transport/index.ts`** (lines 265-276, 361)
    - Remove batching config OR implement batching
-   - Remove SSE references OR implement SSE
+   - Implement SSE OR remove references
 
 4. **`tsconfig.json`**
-   - Remove `"exclude": ["test/"]` or fix test types
+   - Remove `"exclude": ["test"]` or create `tsconfig.test.json`
 
-### Should Fix Soon
+---
 
-5. **`src/Reactivity/index.ts`**
-   - Either implement cache or remove invalidation facade
+## Test Coverage Assessment
 
-6. **`src/index.ts`**
-   - Export missing types used by tests
+**Overall: ~60%**
 
-7. **Documentation**
-   - Rewrite to reflect actual capabilities
+| Area | Coverage | Notes |
+|------|----------|-------|
+| Reactivity | 95% | Excellent |
+| Procedure | 85% | Good |
+| Router | 80% | Good |
+| Server | 60% | Missing middleware verification |
+| Client | 40% | React hooks untested |
+| Transport | 50% | Missing loopback tests |
+
+### Critical Test Gaps
+
+- React hook functionality (only tests "throws outside context")
+- `Client.run()` / `Client.runPromise()` / `Client.prefetch()`
+- Middleware actually executes and provides context
+- Stream with middleware
+
+---
+
+## Effect Patterns Compliance
+
+**Grade: A-**
+
+| Pattern | Status |
+|---------|--------|
+| No async/await | COMPLIANT (boundary only) |
+| No try/catch | COMPLIANT (boundary only) |
+| No throw | COMPLIANT (guards only) |
+| No Schema.decodeUnknownSync | COMPLIANT |
+| No JSON.parse | COMPLIANT |
+| No @ts-ignore | COMPLIANT |
+| Context.Tag services | EXCELLENT |
+| Layer composition | EXCELLENT |
 
 ---
 
@@ -155,26 +202,23 @@ OVERALL      [========             ] 40%
 
 ### Immediate (This Sprint)
 
-1. **Fix streaming middleware bypass** - Security issue
-2. **Delete or implement React hooks** - Don't ship throwing stubs
-3. **Enable test type-checking** - Fix the 27+ errors
+1. **Fix stream middleware bypass** - Security issue
+2. **Decide on @effect-atom/atom-react** - Use it OR remove peer dep
+3. **Add payload size limits** - DoS protection
+4. **Enable test type-checking**
 
 ### Short-term (Next 2 Sprints)
 
-4. **Implement actual SSE** - Core streaming functionality
-5. **Implement request batching** - Or remove config
-6. **Build cache layer** - Before reactivity makes sense
+5. **Implement SSE OR remove** - Don't ship fake features
+6. **Implement batching OR remove config**
+7. **Break circular dependency** - Extract shared types
+8. **Fix stream cancellation**
 
 ### Medium-term
 
-7. **React integration using @effect-atom/atom-react** - As peer deps suggest
-8. **Optimistic updates** - Common React pattern
-9. **DevTools** - Query inspection, cache visualization
-
-### Long-term
-
-10. **Feature parity with tRPC** - Subscriptions, links, etc.
-11. **Feature parity with Effect RPC** - Schema integration
+9. **Refactor to use Effect Atom** - Proper reactive state
+10. **Add comprehensive React tests**
+11. **Rewrite documentation** - Only document working features
 
 ---
 
@@ -182,29 +226,8 @@ OVERALL      [========             ] 40%
 
 This report covers internal analysis. The next phase will:
 
-1. Clone and analyze Effect RPC, Effect Atom, Effect Atom React, Effect Reactivity
-2. Clone and analyze vanilla tRPC
-3. Identify features and patterns we should adopt
-4. Create final recommendations with specific implementation proposals
-
----
-
-## Appendix: All Analysis Logs
-
-| Log | Focus Area |
-|-----|------------|
-| `logs/01-react-stubs.md` | React hook implementation status |
-| `logs/02-transport-layer.md` | HTTP, batching, SSE analysis |
-| `logs/03-client-api.md` | Client API design and exports |
-| `logs/04-server-handling.md` | Request/stream handling |
-| `logs/05-type-utilities.md` | Type system and exports |
-| `logs/06-reactivity-system.md` | Cache and invalidation |
-| `logs/07-error-handling.md` | Error encoding and propagation |
-| `logs/08-api-consistency.md` | API surface consistency |
-| `logs/09-test-coverage.md` | Test completeness |
-| `logs/10-docs-vs-implementation.md` | Documentation accuracy |
-| `logs/11-performance.md` | Performance analysis |
-| `logs/12-effect-patterns.md` | Effect idiom compliance |
-| `logs/13-module-integration.md` | Module architecture |
-| `logs/14-configuration.md` | Config handling |
-| `logs/15-edge-cases.md` | Edge case handling |
+1. Analyze Effect RPC patterns (streaming, middleware, encoding)
+2. Analyze Effect Atom patterns (cache, subscriptions, services)
+3. Analyze Effect Atom React patterns (hooks, Provider, Suspense)
+4. Analyze tRPC patterns (batching, React Query, links)
+5. Create final recommendations with implementation proposals

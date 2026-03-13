@@ -1,69 +1,102 @@
-# H17: Request Batching Analysis
+# H17: tRPC Batching Implementation
 
 ## Overview
 
-tRPC implements request batching using a custom DataLoader pattern inspired by Facebook's GraphQL DataLoader. The implementation allows multiple procedure calls made in the same event loop tick to be combined into a single HTTP request.
+tRPC implements request batching using a custom DataLoader pattern with **zero-delay setTimeout** for timing. The implementation is elegantly simple and battle-tested.
 
-## Core Implementation
+---
 
-### DataLoader (`internals/dataLoader.ts`)
+## Core Architecture
 
-The batching system is built on a custom DataLoader implementation:
+### 1. DataLoader Pattern
 
-```typescript
-// Key data structures
-type BatchItem<TKey, TValue> = {
-  aborted: boolean;
-  key: TKey;
-  resolve: ((value: TValue) => void) | null;
-  reject: ((error: Error) => void) | null;
-  batch: Batch<TKey, TValue> | null;
-};
+**Location:** `packages/client/src/internals/dataLoader.ts`
 
-type Batch<TKey, TValue> = {
-  items: BatchItem<TKey, TValue>[];
-};
-
-export type BatchLoader<TKey, TValue> = {
-  validate: (keys: TKey[]) => boolean;  // Can this batch accept more items?
-  fetch: (keys: TKey[]) => Promise<TValue[] | Promise<TValue>[]>;  // Execute the batch
-};
-```
-
-### Timing Mechanism
-
-The timing uses `setTimeout(dispatch)` with no delay (0ms):
+tRPC's batching is inspired by Facebook's DataLoader but with key differences:
+- No caching
+- Supports cancellation
+- Uses validation function for batch splitting
 
 ```typescript
-function load(key: TKey): Promise<TValue> {
-  const item: BatchItem<TKey, TValue> = {
-    aborted: false,
-    key,
-    batch: null,
-    resolve: throwFatalError,
-    reject: throwFatalError,
-  };
+export function dataLoader<TKey, TValue>(
+  batchLoader: BatchLoader<TKey, TValue>,
+) {
+  let pendingItems: BatchItem<TKey, TValue>[] | null = null;
+  let dispatchTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const promise = new Promise<TValue>((resolve, reject) => {
-    item.reject = reject;
-    item.resolve = resolve;
+  function load(key: TKey): Promise<TValue> {
+    const item: BatchItem<TKey, TValue> = {
+      aborted: false,
+      key,
+      batch: null,
+      resolve: throwFatalError,
+      reject: throwFatalError,
+    };
 
-    pendingItems ??= [];
-    pendingItems.push(item);
-  });
+    const promise = new Promise<TValue>((resolve, reject) => {
+      item.reject = reject;
+      item.resolve = resolve;
 
-  // Schedule dispatch for next event loop tick
-  dispatchTimer ??= setTimeout(dispatch);
+      pendingItems ??= [];
+      pendingItems.push(item);
+    });
 
-  return promise;
+    // THE KEY TIMING MECHANISM
+    dispatchTimer ??= setTimeout(dispatch);
+
+    return promise;
+  }
+
+  return { load };
 }
 ```
 
-**Key insight**: The batching window is exactly one event loop tick. All requests made synchronously in the same tick are batched together. This is the classic DataLoader pattern.
+### 2. Timing Mechanism: Zero-Delay setTimeout
 
-### Request Aggregation Strategy
+The critical line:
+```typescript
+dispatchTimer ??= setTimeout(dispatch);
+```
 
-The `groupItems` function handles splitting items into valid batches:
+**How it works:**
+1. First call to `load()` adds item to `pendingItems` and schedules `dispatch`
+2. `setTimeout` with no delay schedules for the **next event loop tick**
+3. All synchronous `load()` calls in the same tick accumulate items
+4. When the event loop processes the timer, `dispatch()` runs with all items
+
+**Why this works:**
+- JavaScript's event loop processes all synchronous code before timers
+- A zero-delay `setTimeout` queues to the macrotask queue
+- All operations in the current synchronous execution batch together
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Synchronous Execution (Current Tick)                        │
+│                                                             │
+│  client.user.get()  ──┐                                     │
+│  client.post.list() ──┼──▶ pendingItems: [user.get, post.list, post.get]
+│  client.post.get()  ──┘                                     │
+│                                                             │
+│  setTimeout(dispatch) queued ──▶ macrotask queue            │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Next Event Loop Tick                                        │
+│                                                             │
+│  dispatch() runs                                            │
+│    └─▶ batchLoader.fetch([user.get, post.list, post.get])   │
+│          └─▶ Single HTTP request with all operations        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Batch Validation & Splitting
+
+### The Validate Function
+
+Before batching, items are validated and grouped:
 
 ```typescript
 function groupItems(items: BatchItem<TKey, TValue>[]) {
@@ -82,7 +115,7 @@ function groupItems(items: BatchItem<TKey, TValue>[]) {
       continue;
     }
 
-    // Ask the loader if adding this item would still be valid
+    // Check if adding this item keeps the batch valid
     const isValid = batchLoader.validate(
       lastGroup.concat(item).map((it) => it.key),
     );
@@ -93,7 +126,7 @@ function groupItems(items: BatchItem<TKey, TValue>[]) {
       continue;
     }
 
-    // Item doesn't fit - start a new group
+    // Item doesn't fit - start new group
     if (lastGroup.length === 0) {
       item.reject?.(new Error('Input is too big for a single dispatch'));
       index++;
@@ -105,209 +138,200 @@ function groupItems(items: BatchItem<TKey, TValue>[]) {
 }
 ```
 
-## HTTP Batch Link Implementation
+### Validation Criteria
 
-### httpBatchLink (`links/httpBatchLink.ts`)
+**httpBatchLink validation:**
 
-Creates separate DataLoaders for queries and mutations:
+```typescript
+validate(batchOps) {
+  // Fast path: no limits
+  if (maxURLLength === Infinity && maxItems === Infinity) {
+    return true;
+  }
+  
+  // Check item count limit
+  if (batchOps.length > maxItems) {
+    return false;
+  }
+  
+  // Check URL length limit
+  const path = batchOps.map((op) => op.path).join(',');
+  const inputs = batchOps.map((op) => op.input);
+  const url = getUrl({ ...resolvedOpts, type, path, inputs, signal: null });
+  
+  return url.length <= maxURLLength;
+}
+```
+
+**Limits:**
+- `maxItems` - Maximum operations per batch (default: Infinity)
+- `maxURLLength` - Maximum URL length for GET requests (default: Infinity)
+
+---
+
+## HTTP Batch Implementation
+
+### httpBatchLink
+
+**Location:** `packages/client/src/links/httpBatchLink.ts`
 
 ```typescript
 export function httpBatchLink<TRouter extends AnyRouter>(
   opts: HTTPBatchLinkOptions<TRouter['_def']['_config']['$types']>,
 ): TRPCLink<TRouter> {
-  const maxURLLength = opts.maxURLLength ?? Infinity;
-  const maxItems = opts.maxItems ?? Infinity;
-
   return () => {
-    const batchLoader = (type: ProcedureType): BatchLoader<Operation, HTTPResult> => {
-      return {
-        // Validate if batch can accept more operations
-        validate(batchOps) {
-          if (maxURLLength === Infinity && maxItems === Infinity) {
-            return true;  // Fast path
-          }
-          if (batchOps.length > maxItems) {
-            return false;
-          }
-          // Check URL length constraint (for GET requests)
-          const path = batchOps.map((op) => op.path).join(',');
-          const inputs = batchOps.map((op) => op.input);
-          const url = getUrl({ ...resolvedOpts, type, path, inputs, signal: null });
-          return url.length <= maxURLLength;
-        },
-        
-        // Execute the batched request
-        async fetch(batchOps) {
-          const path = batchOps.map((op) => op.path).join(',');
-          const inputs = batchOps.map((op) => op.input);
-          const signal = allAbortSignals(...batchOps.map((op) => op.signal));
-          
-          const res = await jsonHttpRequester({
-            ...resolvedOpts,
-            path,
-            inputs,
-            type,
-            headers() { /* ... */ },
-            signal,
-          });
-          
-          // Distribute responses back to individual callers
-          const resJSON = Array.isArray(res.json)
-            ? res.json
-            : batchOps.map(() => res.json);
-          return resJSON.map((item) => ({
-            meta: res.meta,
-            json: item,
-          }));
-        },
-      };
-    };
-
+    // Separate loaders for queries and mutations
     const query = dataLoader(batchLoader('query'));
     const mutation = dataLoader(batchLoader('mutation'));
     const loaders = { query, mutation };
-    
+
     return ({ op }) => {
-      // Use the appropriate loader
-      const loader = loaders[op.type];
-      const promise = loader.load(op);
-      // ...
+      return observable((observer) => {
+        const loader = loaders[op.type];
+        const promise = loader.load(op);
+
+        promise
+          .then((res) => {
+            const transformed = transformResult(res.json, ...);
+            if (!transformed.ok) {
+              observer.error(TRPCClientError.from(transformed.error));
+              return;
+            }
+            observer.next({ context: res.meta, result: transformed.result });
+            observer.complete();
+          })
+          .catch((err) => observer.error(TRPCClientError.from(err)));
+
+        return () => { /* noop - no cancellation support */ };
+      });
     };
   };
 }
 ```
 
-### Configuration Options
+### Batch Fetch Implementation
 
 ```typescript
-type HTTPBatchLinkOptions<TRoot extends AnyClientTypes> = {
-  url: string | URL;
-  maxURLLength?: number;   // Max URL length for GET requests
-  maxItems?: number;       // Max operations per batch (default: Infinity)
-  headers?: HTTPHeaders | ((opts: { opList: NonEmptyArray<Operation> }) => HTTPHeaders | Promise<HTTPHeaders>);
-};
-```
+async fetch(batchOps) {
+  const path = batchOps.map((op) => op.path).join(',');
+  const inputs = batchOps.map((op) => op.input);
+  const signal = allAbortSignals(...batchOps.map((op) => op.signal));
 
-## URL Construction
+  const res = await jsonHttpRequester({
+    ...resolvedOpts,
+    path,      // "user.get,post.list,post.get"
+    inputs,    // { "0": {...}, "1": {...}, "2": {...} }
+    type,
+    signal,
+  });
 
-Batched requests use a specific URL format:
-
-```typescript
-// From httpUtils.ts
-export const getUrl: GetUrl = (opts) => {
-  let url = base + '/' + opts.path;  // Paths joined by comma: "user.get,post.list"
-  const queryParts: string[] = [];
-
-  if ('inputs' in opts) {
-    queryParts.push('batch=1');  // Signal to server this is a batch
-  }
-  if (opts.type === 'query' || opts.type === 'subscription') {
-    const input = getInput(opts);  // Inputs as indexed object: {0: ..., 1: ...}
-    if (input !== undefined && opts.methodOverride !== 'POST') {
-      queryParts.push(`input=${encodeURIComponent(JSON.stringify(input))}`);
-    }
-  }
-  // ...
-};
-```
-
-**Example batched URL:**
-```
-/api/trpc/user.get,post.list?batch=1&input={"0":{"id":"123"},"1":{"limit":10}}
-```
-
-## Response Distribution
-
-When the batch response arrives, responses are distributed back to individual callers:
-
-```typescript
-// In dispatch()
-const promise = batchLoader.fetch(batch.items.map((_item) => _item.key));
-
-promise.then(async (result) => {
-  await Promise.all(
-    result.map(async (valueOrPromise, index) => {
-      const item = batch.items[index]!;
-      try {
-        const value = await Promise.resolve(valueOrPromise);
-        item.resolve?.(value);  // Resolve individual promise
-      } catch (cause) {
-        item.reject?.(cause as Error);  // Reject individual promise
-      }
-      item.batch = null;
-    }),
-  );
-});
-```
-
-## Abort Signal Handling
-
-The batching system has sophisticated abort handling:
-
-```typescript
-// allAbortSignals: Batch is only aborted when ALL items are aborted
-export function allAbortSignals(...signals: Maybe<AbortSignal>[]): AbortSignal {
-  const ac = new AbortController();
-  let abortedCount = 0;
+  // Response is an array matching the request order
+  const resJSON = Array.isArray(res.json)
+    ? res.json
+    : batchOps.map(() => res.json);
   
-  const onAbort = () => {
-    if (++abortedCount === signals.length) {
-      ac.abort();
-    }
-  };
-  
-  for (const signal of signals) {
-    signal?.addEventListener('abort', onAbort, { once: true });
-  }
-  
-  return ac.signal;
+  return resJSON.map((item) => ({
+    meta: res.meta,
+    json: item,
+  }));
 }
 ```
 
-**Key behavior**: A batched request is only aborted when ALL operations in the batch are cancelled. This prevents one cancelled operation from affecting others.
+---
 
-## httpBatchStreamLink Variant
+## HTTP Batch Stream Link
 
-The streaming variant uses JSONL (JSON Lines) format for progressive responses:
+**Location:** `packages/client/src/links/httpBatchStreamLink.ts`
+
+For responses that may stream in out-of-order (JSONL streaming):
 
 ```typescript
-// Uses jsonlStreamConsumer for parsing
-const [head] = await jsonlStreamConsumer<Record<string, Promise<any>>>({
-  from: res.body!,
-  deserialize: (data) => resolvedOpts.transformer.output.deserialize(data),
-  formatError(opts) {
-    return TRPCClientError.from({ error: opts.error });
-  },
-  abortController,
-});
+async fetch(batchOps) {
+  const responsePromise = fetchHTTPResponse({
+    ...resolvedOpts,
+    trpcAcceptHeader: 'application/jsonl',  // Request JSONL format
+    ...
+  });
 
-// Responses come as promises indexed by position
-const promises = Object.keys(batchOps).map(
-  async (key): Promise<HTTPResult> => {
-    let json: TRPCResponse = await Promise.resolve(head[key]);
-    // ...
-  },
-);
+  const res = await responsePromise;
+  const [head] = await jsonlStreamConsumer<Record<string, Promise<any>>>({
+    from: res.body!,
+    deserialize: (data) => resolvedOpts.transformer.output.deserialize(data),
+    ...
+  });
+
+  // Each result is a promise that resolves when that response arrives
+  const promises = Object.keys(batchOps).map(
+    async (key): Promise<HTTPResult> => {
+      let json: TRPCResponse = await Promise.resolve(head[key]);
+      // Unwrap nested promises for streaming data
+      if ('result' in json) {
+        const result = await Promise.resolve(json.result);
+        json = { result: { data: await Promise.resolve(result.data) } };
+      }
+      return { json, meta: { response: res } };
+    }
+  );
+  
+  return promises;
+}
 ```
+
+---
 
 ## WebSocket Batching
 
-WebSocket connections also support batching:
+### Request Manager
+
+**Location:** `packages/client/src/links/wsLink/wsClient/requestManager.ts`
+
+WebSocket uses a different pattern with explicit flush:
 
 ```typescript
-// In wsClient.ts
-private batchSend(message: TRPCClientOutgoingMessage, callbacks: TCallbacks) {
-  this.inactivityTimeout.reset();
+export class RequestManager {
+  // Requests waiting to be sent
+  private outgoingRequests = new Array<Request & { id: MessageId }>();
+  
+  // Requests sent, awaiting response
+  private pendingRequests: Record<MessageId, Request> = {};
 
+  public register(message: TRPCClientOutgoingMessage, callbacks: TCallbacks) {
+    this.outgoingRequests.push({
+      id: String(message.id),
+      message,
+      end,
+      callbacks: { ... },
+    });
+    return () => { this.delete(message.id); ... };
+  }
+
+  // Move all outgoing to pending and return them
+  public flush() {
+    const requests = this.outgoingRequests;
+    this.outgoingRequests = [];
+    for (const request of requests) {
+      this.pendingRequests[request.id] = request;
+    }
+    return requests;
+  }
+}
+```
+
+### WsClient Batch Send
+
+```typescript
+private batchSend(message: TRPCClientOutgoingMessage, callbacks: TCallbacks) {
   run(async () => {
     if (!this.activeConnection.isOpen()) {
       await this.open();
     }
-    await sleep(0);  // Wait for next tick (like setTimeout)
+    
+    // Zero-delay sleep for batching
+    await sleep(0);
 
     if (!this.requestManager.hasOutgoingRequests()) return;
 
-    // Send all pending messages as array
+    // Send all queued messages as array
     this.send(this.requestManager.flush().map(({ message }) => message));
   });
 
@@ -315,224 +339,207 @@ private batchSend(message: TRPCClientOutgoingMessage, callbacks: TCallbacks) {
 }
 ```
 
-The RequestManager tracks outgoing vs pending requests:
-- **Outgoing**: Queued, waiting to be sent
-- **Pending**: Sent, awaiting response
+**Key difference:** Uses `sleep(0)` (Promise-based) instead of `setTimeout`, but achieves the same effect.
 
-## Server-Side Handling
+---
 
-The server detects batched requests and processes them:
+## Server-Side Batch Handling
+
+### Request Parsing
+
+**Location:** `packages/server/src/unstable-core-do-not-import/http/contentType.ts`
 
 ```typescript
-// In contentType.ts
-const isBatchCall = opts.searchParams.get('batch') === '1';
-const paths = isBatchCall ? opts.path.split(',') : [opts.path];
+async parse(opts) {
+  const isBatchCall = opts.searchParams.get('batch') === '1';
+  const paths = isBatchCall ? opts.path.split(',') : [opts.path];
 
-// Parse indexed inputs
-const calls = await Promise.all(
-  paths.map(async (path, index): Promise<TRPCRequestInfo['calls'][number]> => {
-    const procedure = await getProcedureAtPath(opts.router, path);
-    return {
+  const getInputs = memo(async (): Promise<InputRecord> => {
+    // GET: parse from ?input=JSON
+    // POST: parse from body
+    const inputs = ...;
+    
+    if (!isBatchCall) {
+      return { 0: deserialize(inputs) };
+    }
+
+    // Batch: inputs is an object keyed by index
+    if (!isObject(inputs)) {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: '"input" needs to be an object when doing a batch call',
+      });
+    }
+    
+    const acc: InputRecord = {};
+    for (const index of paths.keys()) {
+      acc[index] = deserialize(inputs[index]);
+    }
+    return acc;
+  });
+
+  // Create call descriptors for each path
+  const calls = await Promise.all(
+    paths.map(async (path, index) => ({
       batchIndex: index,
       path,
-      procedure,
-      getRawInput: async () => {
-        const inputs = await getInputs.read();
-        return inputs[index];
-      },
-    };
-  }),
-);
+      procedure: await getProcedureAtPath(opts.router, path),
+      getRawInput: async () => (await getInputs.read())[index],
+    }))
+  );
+
+  return { isBatchCall, calls, ... };
+}
 ```
 
-Response format for batch:
+### Response Resolution
+
+```typescript
+// resolveResponse.ts
+const allowBatching = opts.allowBatching ?? opts.batching?.enabled ?? true;
+
+if (info.isBatchCall && !allowBatching) {
+  throw new TRPCError({
+    code: 'BAD_REQUEST',
+    message: 'Batching is not enabled on the server',
+  });
+}
+
+// Execute all calls in parallel
+const rpcCalls = info.calls.map(async (call) => {
+  const data = await proc({
+    path: call.path,
+    getRawInput: call.getRawInput,
+    ctx: ctxManager.value(),
+    batchIndex: call.batchIndex,  // Passed to middleware
+  });
+  return [undefined, { data }];
+});
+
+// Response handlers for batch vs single...
+```
+
+---
+
+## Abort Signal Handling
+
+### allAbortSignals (AND logic)
+
+Only aborts when ALL operations are aborted:
+
+```typescript
+export function allAbortSignals(...signals: Maybe<AbortSignal>[]): AbortSignal {
+  const ac = new AbortController();
+  const count = signals.length;
+  let abortedCount = 0;
+
+  const onAbort = () => {
+    if (++abortedCount === count) {
+      ac.abort();
+    }
+  };
+
+  for (const signal of signals) {
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }
+  }
+
+  return ac.signal;
+}
+```
+
+### raceAbortSignals (OR logic)
+
+Aborts when ANY operation is aborted:
+
+```typescript
+export function raceAbortSignals(...signals: Maybe<AbortSignal>[]): AbortSignal {
+  const ac = new AbortController();
+
+  for (const signal of signals) {
+    if (signal?.aborted) {
+      ac.abort();
+    } else {
+      signal?.addEventListener('abort', () => ac.abort(), { once: true });
+    }
+  }
+
+  return ac.signal;
+}
+```
+
+**httpBatchLink** uses `allAbortSignals` - batch continues until all cancelled
+**httpBatchStreamLink** uses `raceAbortSignals` - can abort stream early
+
+---
+
+## Wire Format
+
+### HTTP Batch Request
+
+```
+GET /api/trpc/user.get,post.list,post.getById?batch=1&input=%7B%220%22%3A%7B%7D%2C%221%22%3A%7B%7D%2C%222%22%3A%7B%22id%22%3A1%7D%7D
+
+Decoded input: {"0":{},"1":{},"2":{"id":1}}
+```
+
+### HTTP Batch Response
+
 ```json
 [
-  { "result": { "data": "..." } },
-  { "result": { "data": "..." } },
-  { "error": { "code": -32600, "message": "..." } }
+  {"result":{"data":{"id":1,"name":"John"}}},
+  {"result":{"data":[{"id":1,"title":"Post 1"}]}},
+  {"result":{"data":{"id":1,"title":"Post 1"}}}
 ]
 ```
 
-## Effect Implementation Strategy
+### WebSocket Batch
 
-### 1. Effect-based DataLoader
+Messages are sent as an array:
+```json
+[
+  {"id":1,"method":"query","params":{"path":"user.get","input":{}}},
+  {"id":2,"method":"query","params":{"path":"post.list","input":{}}},
+  {"id":3,"method":"query","params":{"path":"post.getById","input":{"id":1}}}
+]
+```
+
+---
+
+## Summary: Why Our Batching Might Not Work
+
+Based on this analysis, common issues with custom batching implementations:
+
+1. **Timing:** Must use `setTimeout` with zero/no delay to defer to next tick
+2. **Shared state:** Need mutable shared state (`pendingItems`) across calls
+3. **Single dispatch:** Only one `setTimeout` should be scheduled per batch window
+4. **Validation:** Need to split batches that exceed limits
+5. **Promise resolution:** Each call needs its own promise that resolves with its result
+
+### Key Pattern to Copy
 
 ```typescript
-import { Effect, Deferred, Queue, Fiber, Duration, Schedule } from "effect"
+let pending: Item[] | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 
-interface BatchItem<K, V> {
-  readonly key: K
-  readonly deferred: Deferred.Deferred<V, Error>
-  readonly signal: AbortSignal | null
+function load(item: Item): Promise<Result> {
+  return new Promise((resolve, reject) => {
+    pending ??= [];
+    pending.push({ item, resolve, reject });
+    
+    // Only schedule once per batch window
+    timer ??= setTimeout(() => {
+      const batch = pending!;
+      pending = null;
+      timer = null;
+      
+      executeBatch(batch);
+    });
+  });
 }
-
-interface BatchLoader<K, V> {
-  validate: (keys: readonly K[]) => boolean
-  fetch: (keys: readonly K[]) => Effect.Effect<readonly V[], Error>
-}
-
-const makeDataLoader = <K, V>(
-  loader: BatchLoader<K, V>
-) => Effect.gen(function* () {
-  const queue = yield* Queue.unbounded<BatchItem<K, V>>()
-  
-  // Process batches
-  const processBatch = Effect.gen(function* () {
-    // Collect all pending items
-    const items = yield* Queue.takeAll(queue)
-    if (items.length === 0) return
-    
-    // Group items by validation
-    const groups = groupByValidation(items, loader.validate)
-    
-    // Process each group
-    yield* Effect.forEach(groups, (group) => 
-      Effect.gen(function* () {
-        const keys = group.map(item => item.key)
-        const result = yield* loader.fetch(keys)
-        
-        // Resolve individual deferreds
-        yield* Effect.forEach(
-          group,
-          (item, index) => Deferred.succeed(item.deferred, result[index]),
-          { discard: true }
-        )
-      }).pipe(
-        Effect.catchAll((error) =>
-          Effect.forEach(
-            group,
-            (item) => Deferred.fail(item.deferred, error),
-            { discard: true }
-          )
-        )
-      )
-    , { discard: true })
-  })
-  
-  // Schedule batch processing on next tick
-  const scheduleLoop = processBatch.pipe(
-    Effect.delay(Duration.zero),  // Next tick
-    Effect.forever,
-    Effect.fork
-  )
-  
-  yield* scheduleLoop
-  
-  return {
-    load: (key: K, signal?: AbortSignal) => 
-      Effect.gen(function* () {
-        const deferred = yield* Deferred.make<V, Error>()
-        yield* Queue.offer(queue, { key, deferred, signal: signal ?? null })
-        return yield* Deferred.await(deferred)
-      })
-  }
-})
 ```
 
-### 2. Batch-aware HTTP Client
-
-```typescript
-const makeBatchHttpClient = (config: BatchConfig) =>
-  Effect.gen(function* () {
-    const queryLoader = yield* makeDataLoader({
-      validate: (ops) => {
-        if (ops.length > config.maxItems) return false
-        const url = buildBatchUrl(ops)
-        return url.length <= config.maxURLLength
-      },
-      fetch: (ops) => 
-        Effect.gen(function* () {
-          const path = ops.map(op => op.path).join(',')
-          const inputs = Object.fromEntries(ops.map((op, i) => [i, op.input]))
-          
-          const response = yield* HttpClient.request
-            .get(`${config.url}/${path}`)
-            .pipe(
-              HttpClient.request.setUrlParam("batch", "1"),
-              HttpClient.request.setUrlParam("input", JSON.stringify(inputs)),
-              HttpClient.client.execute,
-              HttpClient.response.json
-            )
-          
-          return response as readonly unknown[]
-        })
-    })
-    
-    return queryLoader
-  })
-```
-
-### 3. Abort Signal Integration
-
-```typescript
-// Create combined abort for batch
-const combinedAbort = (signals: readonly (AbortSignal | null)[]) =>
-  Effect.gen(function* () {
-    // Only abort when ALL signals abort
-    const scope = yield* Effect.scope
-    let abortedCount = 0
-    
-    const deferred = yield* Deferred.make<void, never>()
-    
-    for (const signal of signals) {
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          abortedCount++
-          if (abortedCount === signals.length) {
-            Effect.runSync(Deferred.succeed(deferred, undefined))
-          }
-        })
-      }
-    }
-    
-    return yield* Deferred.await(deferred)
-  })
-```
-
-### 4. Streaming Batch Support
-
-```typescript
-const batchStreamLink = Effect.gen(function* () {
-  return {
-    fetch: (ops: readonly Operation[]) =>
-      Effect.gen(function* () {
-        const response = yield* httpRequest(ops)
-        
-        // Parse JSONL stream
-        const stream = yield* Stream.fromReadableStream(
-          () => response.body!,
-          (error) => new Error(`Stream error: ${error}`)
-        )
-        
-        // Collect indexed results
-        const results = yield* stream.pipe(
-          Stream.splitLines,
-          Stream.mapEffect((line) => 
-            Effect.try(() => JSON.parse(line))
-          ),
-          Stream.runCollect
-        )
-        
-        return results
-      })
-  }
-})
-```
-
-## Key Takeaways
-
-1. **Timing**: Batching window is one event loop tick (`setTimeout(fn)` with no delay)
-2. **Validation**: Batches are split based on URL length and item count constraints
-3. **Abort handling**: Batch only aborts when ALL operations are cancelled
-4. **Response mapping**: Results are indexed and distributed to individual callers
-5. **Separate loaders**: Queries and mutations have separate batch queues
-6. **Server detection**: `batch=1` query param signals batch mode
-
-## Effect Advantages
-
-- **Queue-based batching**: Use `Queue.unbounded` for collecting items
-- **Deferred for individual results**: Clean resolution pattern
-- **Stream for JSONL**: Native streaming support
-- **Fiber for background processing**: Clean lifecycle management
-- **Duration.zero**: Equivalent to setTimeout(fn, 0) for next-tick scheduling
+The critical insight: **`setTimeout(fn)` without a delay schedules `fn` for the next event loop tick**, allowing all synchronous calls to accumulate first.

@@ -1,43 +1,39 @@
-# H2: Streaming with Middleware in Effect RPC
+# Effect RPC: Streaming with Middleware Analysis
 
-## Executive Summary
+## Summary
 
-**Finding: Effect RPC applies middleware to streams correctly.** The middleware is applied to the Effect that produces the stream, not bypassed. This is architecturally different from how our effect-trpc currently handles streams, and represents the correct pattern we should adopt.
+**Effect RPC correctly applies middleware to streams.** Our effect-trpc implementation bypasses middleware for streams, creating a security vulnerability.
 
-## Key Discovery: How Effect RPC Handles Streaming
+## Effect RPC Implementation
 
-### The Critical Code Path
+### Key Finding: `applyMiddleware` Called for Both Streams and Effects
 
-In `RpcServer.ts` (lines 244-265), the server handles both regular requests and streams through the **same middleware chain**:
+In `RpcServer.ts:218-264`, the `handleRequest` function:
 
 ```typescript
-// RpcServer.ts:244-265
-const isStream = RpcSchema.isStreamSchema(rpc.successSchema)
-const result = entry.handler(request.payload, {
-  clientId: client.id,
-  headers: request.headers
-})
-
-// Handle wrapper options (fork, uninterruptible)
-const isWrapper = Rpc.isWrapper(result)
-const isFork = isWrapper && result.fork
-const isUninterruptible = isWrapper && result.uninterruptible
-const streamOrEffect = isWrapper ? result.value : result
-
-// CRITICAL: applyMiddleware wraps BOTH streams AND effects
-const handler = applyMiddleware(
-  rpc,
-  context,
-  client.id,
-  request.payload,
-  request.headers,
-  isStream
-    ? streamEffect(client, request, streamOrEffect)  // Stream converted to Effect
-    : streamOrEffect as Effect.Effect<any>
-)
+const handleRequest = (...) => {
+  const isStream = RpcSchema.isStreamSchema(rpc.successSchema)
+  const result = entry.handler(request.payload, { clientId, headers })
+  
+  // ... wrapper handling
+  
+  const handler = applyMiddleware(
+    rpc,
+    context,
+    client.id,
+    request.payload,
+    request.headers,
+    isStream
+      ? streamEffect(client, request, streamOrEffect)  // Stream case
+      : streamOrEffect as Effect.Effect<any>            // Effect case
+  )
+  // ...
+}
 ```
 
-### The `applyMiddleware` Function (lines 423-464)
+The `applyMiddleware` function wraps **both** Effect and Stream handlers in middleware before execution.
+
+### `applyMiddleware` Implementation (Lines 423-464)
 
 ```typescript
 const applyMiddleware = <A, E, R>(
@@ -46,334 +42,201 @@ const applyMiddleware = <A, E, R>(
   clientId: number,
   payload: A,
   headers: Headers.Headers,
-  handler: Effect.Effect<A, E, R>
+  handler: Effect.Effect<A, E, R>  // <- Already Effect, even for streams
 ) => {
-  if (rpc.middlewares.size === 0) {
-    return handler
-  }
+  if (rpc.middlewares.size === 0) return handler
 
-  const options = {
-    rpc,
-    payload,
-    headers,
-    clientId
-  }
+  const options = { rpc, payload, headers, clientId }
 
   for (const tag of rpc.middlewares) {
     if (tag.wrap) {
-      // Wrapping middleware: middleware receives `next` and can control execution
+      // Wrap middleware wraps entire execution
       const middleware = Context.unsafeGet(context, tag)
       handler = middleware({ ...options, next: handler as any })
     } else if (tag.optional) {
-      // Optional middleware: if it fails, skip it
-      const middleware = Context.unsafeGet(context, tag) as RpcMiddleware<any, any>
+      // Optional middleware with graceful degradation
+      const middleware = Context.unsafeGet(context, tag)
       const previous = handler
       handler = Effect.matchEffect(middleware(options), {
         onFailure: () => previous,
         onSuccess: tag.provides !== undefined
-          ? (value) => Effect.provideService(previous, tag.provides as any, value)
+          ? (value) => Effect.provideService(previous, tag.provides, value)
           : (_) => previous
       })
     } else {
-      // Standard middleware: runs before handler, can provide context
-      const middleware = Context.unsafeGet(context, tag) as RpcMiddleware<any, any>
+      // Required middleware that provides a service
+      const middleware = Context.unsafeGet(context, tag)
       handler = tag.provides !== undefined
-        ? Effect.provideServiceEffect(handler, tag.provides as any, middleware(options))
+        ? Effect.provideServiceEffect(handler, tag.provides, middleware(options))
         : Effect.zipRight(middleware(options), handler)
     }
   }
-
   return handler
 }
 ```
 
-## Why This Works: Stream Conversion Pattern
+### Stream Handling: Converted to Effect First
 
-### The `streamEffect` Function (lines 356-403)
-
-Effect RPC converts streams to Effects before middleware application:
+The `streamEffect` function (lines 356-403) converts `Stream` to `Effect<void>` that processes chunks:
 
 ```typescript
-const streamEffect = (
-  client: Client,
-  request: Request<Rpcs>,
-  stream: Stream.Stream<any, any> | Effect.Effect<Mailbox.ReadonlyMailbox<any, any>, any, Scope.Scope>
-) => {
-  // Setup ack latch for backpressure
-  let latch = client.latches.get(request.id)
-  if (supportsAck && !latch) {
-    latch = Effect.unsafeMakeLatch(false)
-    client.latches.set(request.id, latch)
-  }
-  
-  // Handle Mailbox-based streaming
+const streamEffect = (client, request, stream) => {
+  // Converts stream consumption to an Effect
+  // This Effect is then wrapped with middleware via applyMiddleware
   if (Effect.isEffect(stream)) {
-    let done = false
     return stream.pipe(
-      Effect.flatMap((mailbox) =>
-        Effect.whileLoop({
-          while: () => !done,
-          body: constant(Effect.flatMap(mailbox.takeAll, ([chunk, done_]) => {
-            done = done_
-            if (!Chunk.isNonEmpty(chunk)) return Effect.void
-            const write = options.onFromServer({
-              _tag: "Chunk",
-              clientId: client.id,
-              requestId: request.id,
-              values: Chunk.toReadonlyArray(chunk)
-            })
-            if (!latch) return write
-            latch.unsafeClose()
-            return Effect.zipRight(write, latch.await)
-          })),
-          step: constVoid
-        })
-      ),
+      Effect.flatMap((mailbox) => /* chunk processing */),
       Effect.scoped
     )
   }
-  
-  // Handle Stream-based streaming
-  return Stream.runForEachChunk(stream, (chunk) => {
-    if (!Chunk.isNonEmpty(chunk)) return Effect.void
-    const write = options.onFromServer({
-      _tag: "Chunk",
-      clientId: client.id,
-      requestId: request.id,
-      values: Chunk.toReadonlyArray(chunk)
-    })
-    if (!latch) return write
-    latch.unsafeClose()
-    return Effect.zipRight(write, latch.await)
-  })
+  return Stream.runForEachChunk(stream, (chunk) => /* send chunk */)
 }
 ```
 
-## Architecture Diagram
+**The middleware wraps the entire stream lifecycle**, not individual chunks.
 
-```
-Request Arrives
-      |
-      v
-+---------------------+
-| Parse Request       |
-+---------------------+
-      |
-      v
-+---------------------+
-| Get RPC Handler     |
-+---------------------+
-      |
-      v
-+---------------------+
-| Call Handler        |  Returns Effect<A> or Stream<A>
-+---------------------+
-      |
-      v
-+---------------------+
-| Is Stream?          |
-+---------------------+
-      |           |
-      | No        | Yes
-      v           v
-Effect<A>    streamEffect() -> Effect<void>
-      |           |
-      +-----------+
-            |
-            v
-+------------------------+
-| applyMiddleware()      |  <-- MIDDLEWARE RUNS HERE
-| - wrap middlewares     |
-| - optional middlewares |
-| - standard middlewares |
-+------------------------+
-            |
-            v
-+------------------------+
-| Execute wrapped Effect |
-+------------------------+
-            |
-            v
-+------------------------+
-| Send Response/Chunks   |
-+------------------------+
-```
+## Our Implementation Problem
 
-## Middleware Types in Effect RPC
-
-### 1. Standard Middleware (`tag.wrap === false && tag.optional === false`)
+In `src/Server/index.ts:285-337`:
 
 ```typescript
-// Runs before handler, can provide service to handler
-handler = tag.provides !== undefined
-  ? Effect.provideServiceEffect(handler, tag.provides as any, middleware(options))
-  : Effect.zipRight(middleware(options), handler)
+const handleStream = (request) => {
+  const { handler, procedure, isStream } = entry
+  
+  if (!isStream) {
+    return Stream.succeed(/* error */)
+  }
+  
+  const makeStream = (payload) => {
+    const stream = handler(payload) as Stream.Stream<...>
+    return stream.pipe(
+      Stream.map((value) => /* chunk */),
+      Stream.catchAll(/* error handling */),
+      Stream.concat(/* end */)
+    )
+  }
+  
+  // NO MIDDLEWARE EXECUTION HERE!
+  // Compare to handle() which calls Middleware.execute()
+  return Stream.unwrap(
+    Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
+      Effect.map(makeStream),
+      Effect.orElseSucceed(() => failureStream)
+    )
+  )
+}
 ```
 
-Example: Authentication middleware that provides a `User` service.
-
-### 2. Optional Middleware (`tag.optional === true`)
-
-```typescript
-// If middleware fails, continue without it
-handler = Effect.matchEffect(middleware(options), {
-  onFailure: () => previous,
-  onSuccess: tag.provides !== undefined
-    ? (value) => Effect.provideService(previous, tag.provides as any, value)
-    : (_) => previous
-})
-```
-
-Example: Caching middleware that's nice to have but not required.
-
-### 3. Wrapping Middleware (`tag.wrap === true`)
-
-```typescript
-// Middleware receives `next` and controls execution flow
-handler = middleware({ ...options, next: handler as any })
-```
-
-Example: Timing/logging middleware that needs to wrap the entire execution.
+**Security Issue:** `handleStream` never calls `Middleware.execute()`, unlike `handle()` which does (line 270-276).
 
 ## Security Implications
 
-### Effect RPC is Secure for Streams
+| Scenario | Effect RPC | Our Implementation |
+|----------|------------|-------------------|
+| Auth middleware on subscription | Runs before stream starts | **BYPASSED** |
+| Rate limiting | Applied to stream | **BYPASSED** |
+| Logging/audit | Wraps stream execution | **BYPASSED** |
+| Service injection | Provided to handler | **BYPASSED** |
 
-1. **Middleware runs on connection setup**: Before any stream data flows, all middleware has executed
-2. **Context is propagated**: Services provided by middleware are available throughout stream lifetime
-3. **No bypass possible**: The `streamEffect()` function returns an Effect, which is then wrapped by middleware
-
-### Our Current effect-trpc Issue
-
-In our implementation, streams bypass middleware because:
-
-1. We return the Stream directly to tRPC
-2. tRPC handles stream iteration outside our middleware chain
-3. Middleware only runs for the initial subscription setup, not data flow
-
-## The Fix Pattern for effect-trpc
-
-Following Effect RPC's pattern, we should:
-
-1. **Convert streams to Effects before middleware**
-2. **Run middleware on the Effect that manages the stream lifecycle**
-3. **Handle stream iteration inside the middleware-wrapped Effect**
-
-### Code Pattern to Adopt
+### Attack Vector
 
 ```typescript
-// CURRENT (BROKEN): middleware only wraps subscription setup
-const handler = applyMiddleware(procedure, () => {
-  return Stream.make(1, 2, 3)  // Stream returned directly, bypasses middleware
-})
+// Attacker can bypass auth by calling stream procedures directly
+const protectedStream = Procedure.stream({...}).middleware(AuthMiddleware)
 
-// FIXED (Effect RPC pattern): middleware wraps entire stream lifecycle
-const handler = applyMiddleware(procedure, () => {
-  const stream = makeStream()
-  return Stream.runForEach(stream, (value) => {
-    // Each chunk is processed inside the middleware-wrapped Effect
-    return sendToClient(value)
-  })
-})
+// This should require auth, but doesn't in our implementation
+client.protectedStream.subscribe()  // No middleware runs!
 ```
 
-## RpcMiddleware Interface Details
+## Fix Recommendations
 
-From `RpcMiddleware.ts`:
+### Option 1: Wrap Stream in Effect (Effect RPC Pattern)
+
+Convert stream consumption to an Effect that can be wrapped with middleware:
 
 ```typescript
-interface RpcMiddleware<Provides, E> {
-  (options: {
-    readonly clientId: number
-    readonly rpc: Rpc.AnyWithProps
-    readonly payload: unknown
-    readonly headers: Headers
-  }): Effect.Effect<Provides, E>
-}
-
-interface RpcMiddlewareWrap<Provides, E> {
-  (options: {
-    readonly clientId: number
-    readonly rpc: Rpc.AnyWithProps
-    readonly payload: unknown
-    readonly headers: Headers
-    readonly next: Effect.Effect<SuccessValue, E, Provides>  // <-- KEY: receives next
-  }): Effect.Effect<SuccessValue, E>
+const handleStream = (request) => {
+  const middlewareRequest = toMiddlewareRequest(request)
+  
+  // Convert stream to Effect-wrapped stream
+  const makeProtectedStream = (payload) => {
+    const stream = handler(payload) as Stream.Stream<...>
+    
+    // Wrap stream start in middleware-protected Effect
+    const streamEffect = Effect.gen(function* () {
+      // Middleware runs HERE, before stream starts
+      yield* Stream.runForEach(stream, (chunk) => {
+        // Send chunk to client
+      })
+    })
+    
+    // Execute middleware chain around stream lifecycle
+    return Middleware.execute(middlewares, middlewareRequest, streamEffect)
+  }
+  
+  return Stream.unwrap(
+    Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
+      Effect.flatMap(makeProtectedStream)
+    )
+  )
 }
 ```
 
-### Creating Middleware Tags
+### Option 2: Execute Middleware Before Stream
+
+Run middleware as a gate before stream consumption:
 
 ```typescript
-// Standard middleware that provides a service
-class AuthMiddleware extends RpcMiddleware.Tag<AuthMiddleware>()(
-  "AuthMiddleware",
-  {
-    provides: UserContext,
-    failure: AuthError
-  }
-) {}
-
-// Wrapping middleware for cross-cutting concerns
-class LoggingMiddleware extends RpcMiddleware.Tag<LoggingMiddleware>()(
-  "LoggingMiddleware",
-  {
-    wrap: true  // <-- Gets `next` to wrap execution
-  }
-) {}
+const handleStream = (request) => {
+  const middlewareRequest = toMiddlewareRequest(request)
+  
+  // Create middleware gate Effect
+  const middlewareGate = middlewares.length > 0
+    ? Middleware.execute(middlewares, middlewareRequest, Effect.void)
+    : Effect.void
+  
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      // Run middleware first (auth, rate limit, etc.)
+      yield* middlewareGate
+      
+      // Only after middleware passes, create stream
+      const payload = yield* Schema.decodeUnknown(procedure.payloadSchema)(request.payload)
+      return makeStream(payload)
+    }).pipe(
+      Effect.orElseSucceed(() => failureStream)
+    )
+  )
+}
 ```
 
-## Attaching Middleware to RPCs
+### Option 3: Full Effect RPC Pattern
 
-Middleware can be attached at multiple levels:
-
-### Per-RPC
+Match Effect RPC exactly by returning Effect from handlers:
 
 ```typescript
-const getUserRpc = Rpc.make("getUser", {
-  payload: { id: Schema.String },
-  success: UserSchema
-}).middleware(AuthMiddleware)
+// Handler returns Effect<Mailbox> instead of Stream
+type StreamHandler = (payload) => Effect.Effect<
+  Mailbox.ReadonlyMailbox<Chunk, Error>,
+  Error,
+  R
+>
+
+// Then applyMiddleware wraps the entire Effect
 ```
 
-### Per-Group
+## Recommendation
 
-```typescript
-const group = RpcGroup.make(
-  Rpc.make("public"),
-  Rpc.make("private")
-).middleware(AuthMiddleware)  // All RPCs get middleware
-```
+**Option 2** (Execute Middleware Before Stream) is the simplest fix:
+- Minimal refactoring
+- Clear security boundary
+- Matches user expectations (auth runs before any data flows)
 
-## Stream Definition in Effect RPC
+However, **Option 1** provides more complete middleware support (e.g., timing entire stream lifecycle).
 
-Streams are declared at the RPC level:
+## References
 
-```typescript
-const streamRpc = Rpc.make("events", {
-  stream: true,  // <-- Marks this as a streaming RPC
-  success: EventSchema,
-  error: StreamError
-})
-```
-
-This creates an `RpcSchema.Stream<EventSchema, StreamError>` which:
-1. Can be detected by `RpcSchema.isStreamSchema()`
-2. Has separate success and failure schemas for proper encoding
-3. Integrates with Effect's Stream type
-
-## Summary
-
-| Aspect | Effect RPC | Our effect-trpc |
-|--------|------------|-----------------|
-| Middleware on streams | Applied to lifecycle Effect | Bypassed |
-| Stream handling | `streamEffect()` wraps stream | Direct return |
-| Context propagation | Full lifecycle | Setup only |
-| Security | Correct | Vulnerable |
-
-## Recommendations
-
-1. **Adopt Effect RPC's pattern**: Convert streams to Effects before middleware
-2. **Use `runForEach` or Mailbox pattern**: Control stream iteration inside Effect
-3. **Propagate middleware context**: Ensure services are available throughout stream
-4. **Consider Effect RPC directly**: For new projects, use Effect RPC instead of tRPC wrapper
+- Effect RPC: `packages/rpc/src/RpcServer.ts:256-264` (middleware application)
+- Effect RPC: `packages/rpc/src/RpcServer.ts:423-464` (applyMiddleware function)
+- Effect RPC: `packages/rpc/src/RpcServer.ts:356-403` (streamEffect conversion)
+- Our code: `src/Server/index.ts:285-337` (vulnerable handleStream)

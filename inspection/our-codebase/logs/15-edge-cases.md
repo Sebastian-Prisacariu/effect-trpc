@@ -1,597 +1,618 @@
-# Edge Cases and Robustness Analysis
+# Edge Cases and Error Paths Analysis
 
 ## Overview
 
-This document analyzes edge cases in the effect-trpc codebase and identifies potential crash scenarios, missing handling, and recommendations for hardening.
+This document provides a deep analysis of edge case handling, error paths, security considerations, and robustness gaps across the effect-trpc codebase. The analysis focuses on the Server, Client, and Transport modules.
 
 ---
 
-## 1. Empty Payloads/Responses
+## 1. Edge Cases Currently Handled
 
-### Current Handling
+### Server (`Server/index.ts`)
 
-**Empty Payloads:**
-- Procedures with `Schema.Void` payload: The system defaults to `Schema.Void` when no payload schema is provided
-- `Server/index.ts:240`: Payload decoding uses `Schema.decodeUnknown(procedure.payloadSchema)(request.payload)`
-- `undefined` is valid for void payloads
+| Edge Case | Location | How It's Handled |
+|-----------|----------|------------------|
+| Unknown procedure | Line 220-227 | Returns `Transport.Failure` with "Unknown procedure: {tag}" message |
+| Invalid payload | Line 240-245 | Returns `Transport.Failure` with "Invalid payload" and cause |
+| Handler error | Line 249-256 | Encodes error via schema, returns `Transport.Failure` |
+| Stream called with `handle()` | Line 230-236 | Returns `Transport.Failure` with "Use handleStream for streaming procedures" |
+| Non-stream called with `handleStream()` | Line 298-304 | Returns `Stream.succeed(Failure)` with "Use handle for non-streaming procedures" |
+| Middleware applied to handlers | Line 269-278 | Executes middleware chain before handler |
 
-**Empty Responses:**
-- `Schema.Void` for success schema works correctly
-- Server encodes responses with `Schema.encode(procedure.successSchema)(value)`
+### Client (`Client/index.ts`)
 
-### Issues Found
+| Edge Case | Location | How It's Handled |
+|-----------|----------|------------------|
+| Success response decoding failure | Line 118-125 | Returns `TransportError("Protocol", "Failed to decode success response")` |
+| Error response decoding failure | Line 127-134 | Returns `TransportError("Protocol", "Failed to decode error response")` |
+| Unexpected stream response type | Line 177-181 | Returns `TransportError("Protocol", "Unexpected stream response type")` |
+| `runPromise` without runtime | Line 637-638, 673 | Throws error "runPromise requires a bound runtime" |
+| Unknown procedure type | Line 686 | Throws error (should be unreachable) |
+| React hooks outside Provider | Line 53-61 (react.ts) | Throws clear error message |
+| React not available | Line 720-726 | Returns stub provider |
 
-1. **Missing `undefined` handling in HTTP transport** (`Transport/index.ts:303-306`):
-   ```typescript
-   body: JSON.stringify({
-     id: request.id,
-     tag: request.tag,
-     payload: request.payload,  // Could be undefined
-   })
-   ```
-   - `JSON.stringify` converts `undefined` to no key at all, which is fine
-   - But server expects payload to be present in request
+### Transport (`Transport/index.ts`)
 
-2. **No validation of empty string payloads**:
-   - An empty string `""` is different from `undefined` but might slip through
+| Edge Case | Location | How It's Handled |
+|-----------|----------|------------------|
+| HTTP request timeout | Line 290-293 | Uses AbortController, returns `TransportError("Timeout")` |
+| Network failure | Line 295-318 | Catches fetch error, returns `TransportError("Network")` |
+| Non-OK HTTP status | Line 322-329 | Returns `TransportError("Protocol", "HTTP {status}: {statusText}")` |
+| JSON parse failure | Line 331-339 | Returns `TransportError("Protocol", "Failed to parse response JSON")` |
+| Invalid response envelope | Line 342-350 | Returns `TransportError("Protocol", "Invalid response envelope")` |
+| Mock handler missing | Line 438-446 | Returns `TransportError("Protocol", "No mock handler for: {tag}")` |
+| Transient error identification | Line 532-538 | `isTransientError()` helper for retry logic |
 
-### Recommendations
+### React Hooks (`Client/react.ts`)
 
-- Add explicit `undefined` → `null` conversion for JSON serialization consistency
-- Consider validating that void procedures don't receive non-void payloads
-
----
-
-## 2. Very Large Payloads
-
-### Current Handling
-
-- **No payload size limits anywhere in the codebase**
-- HTTP transport (`Transport/index.ts:295-318`) sends entire payload via `JSON.stringify`
-- Server processes payloads without size validation
-
-### Issues Found
-
-1. **No memory protection**:
-   ```typescript
-   // Transport/index.ts:303
-   body: JSON.stringify({...payload})  // Unbounded
-   ```
-
-2. **No streaming for large payloads**:
-   - Client buffers entire response in memory
-   - `Schema.decodeUnknown` operates on full object
-
-3. **No request body size limit in HTTP handler**:
-   ```typescript
-   // Server/index.ts:382-384
-   Effect.tryPromise({
-     try: () => request.json(),  // No size limit
-     catch: () => ({ id: "", tag: "", payload: undefined }),
-   })
-   ```
-
-### Potential Crash Scenarios
-
-- **OOM on server**: Malicious client sends multi-GB payload
-- **OOM on client**: Server returns huge response
-- **JSON.stringify stack overflow**: Extremely nested objects
-
-### Recommendations
-
-1. Add `maxPayloadSize` option to transport configuration
-2. Implement streaming JSON parsing for large responses
-3. Add depth limit for nested structures
-4. Server middleware for request size validation
+| Edge Case | Location | How It's Handled |
+|-----------|----------|------------------|
+| Component unmounts during fetch | Line 153, 171-173 | `mountedRef` prevents state updates |
+| Fetch superseded by newer fetch | Line 154, 173 | `fetchIdRef` ensures only latest fetch updates state |
+| Mutation error | Line 298-306 | Sets error state, calls `onError`, re-throws |
+| Stream error | Line 425-430 | Sets `error` state, stops streaming |
+| Reactivity subscription cleanup | Line 196-201 | Returns unsubscribe function from useEffect |
+| Refetch interval cleanup | Line 204-209 | Clears interval on unmount/dependency change |
 
 ---
 
-## 3. Concurrent Requests
+## 2. Edge Cases NOT Handled
 
-### Current Handling
+### HIGH PRIORITY - Security/Robustness Issues
 
-- **Request IDs**: `Transport.generateRequestId()` uses `Date.now()` + random string
-- **No request deduplication** or queuing
-- **Independent handling**: Each request processed separately
+#### 2.1 No Payload Size Limits
 
-### Issues Found
+**Location:** `Server/index.ts`, `Transport/index.ts`
 
-1. **Potential ID collision** (unlikely but possible):
-   ```typescript
-   // Transport/index.ts:546-547
-   export const generateRequestId = (): string =>
-     `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-   ```
-   - `Math.random()` could theoretically produce duplicates
-
-2. **No concurrency control for streams**:
-   - Multiple streams could exhaust resources
-   - No limit on concurrent SSE connections
-
-3. **Race conditions in Reactivity**:
-   ```typescript
-   // Reactivity/index.ts:162-199
-   const invalidate = (tags: ReadonlyArray<string>): void => {
-     // Callbacks invoked synchronously
-     // Could cause issues if callback modifies subscriptions
-   }
-   ```
-
-4. **Database state not synchronized in tests**:
-   - E2E test fixtures use separate database instances per request
-   - This hides real concurrency bugs
-
-### Recommendations
-
-1. Use UUID v4 or Effect's random for request IDs
-2. Add `maxConcurrentRequests` option
-3. Add `maxConcurrentStreams` option
-4. Consider mutex/semaphore for Reactivity invalidation
-5. Add concurrency tests
-
----
-
-## 4. Middleware Throws
-
-### Current Handling
+**Issue:** No validation of payload size before processing. A malicious client could send extremely large payloads:
 
 ```typescript
-// Middleware/index.ts:346-365
-const executeOne = <A, E, R, Provides, Failure>(
-  middleware: MiddlewareTag<any, Provides, Failure>,
-  request: MiddlewareRequest,
-  next: Effect.Effect<A, E, R>
-): Effect.Effect<A, E | Failure, R> =>
-  Effect.gen(function* () {
-    const impl = yield* middleware as any // Could throw if not provided
-    if ("wrap" in impl) {
-      return yield* (impl as WrapMiddlewareImpl<Failure>).wrap(request, next)
-    } else {
-      const provided = yield* (impl as MiddlewareImpl<Provides, Failure>).run(request)
-      return yield* next.pipe(Effect.provideService(middleware.provides, provided))
-    }
-  })
+// Current code (Server/index.ts:240)
+Schema.decodeUnknown(procedure.payloadSchema)(request.payload)
+// No size check before decoding
 ```
 
-### Issues Found
+**Risk:**
+- Memory exhaustion attacks
+- CPU exhaustion during schema validation
+- DoS vulnerability
 
-1. **Missing middleware in context causes unclear error**:
-   - If middleware tag is not in context, Effect.gen yields generic service missing error
-   - No custom error message indicating which middleware failed
+**Recommendation:**
+```typescript
+const MAX_PAYLOAD_SIZE = 1_048_576 // 1MB default
 
-2. **No timeout for middleware execution**:
-   - A slow auth check could hang the request indefinitely
+const validatePayloadSize = (payload: unknown): Effect.Effect<void, Transport.Failure> => {
+  const size = JSON.stringify(payload).length
+  if (size > MAX_PAYLOAD_SIZE) {
+    return Effect.fail(new Transport.Failure({
+      id: request.id,
+      error: { 
+        _tag: "PayloadTooLarge",
+        maxSize: MAX_PAYLOAD_SIZE,
+        actualSize: size,
+      },
+    }))
+  }
+  return Effect.void
+}
+```
 
-3. **Middleware errors not encoded properly**:
-   - Server wraps handler errors but not middleware failures
-   - Middleware failures bypass the encoding path
+#### 2.2 No Request Rate Limiting
 
-4. **No middleware error isolation**:
-   - If one middleware in a chain fails, the whole chain fails
-   - No fallback mechanism
+**Location:** `Server/index.ts`
 
-### Potential Crash Scenarios
+**Issue:** No built-in rate limiting mechanism. Each request is processed immediately.
 
-- **Unhandled rejection**: Middleware `run()` throws synchronously
-- **Infinite loop**: Middleware with circular dependency
-- **Missing tag**: `Effect.gen` yields missing service
+**Risk:**
+- DoS attacks from flooding
+- Resource exhaustion
 
-### Recommendations
+**Recommendation:** Add optional rate limiting middleware or configuration:
+```typescript
+export interface ServerOptions {
+  readonly rateLimit?: {
+    readonly maxRequests: number
+    readonly windowMs: number
+  }
+}
+```
 
-1. Add timeout option per middleware
-2. Wrap middleware execution in `Effect.try` for sync errors
-3. Add clear error messages for missing middleware
-4. Consider `Effect.catchAll` for middleware-specific error handling in server
+#### 2.3 No Stream Chunk Limits
 
----
+**Location:** `Server/index.ts:306-324`
 
-## 5. Network Disconnection During Stream
-
-### Current Handling
+**Issue:** Streaming handlers can emit unlimited chunks without any backpressure or limits:
 
 ```typescript
-// Transport/index.ts:355-371
+// Current code - no limits
+return stream.pipe(
+  Stream.map((value): Transport.StreamResponse => 
+    new Transport.StreamChunk({ id: request.id, chunk: value })
+  ),
+  // No limit on chunks
+)
+```
+
+**Risk:**
+- Memory exhaustion on client
+- Connection resource exhaustion
+- Potential DoS vector
+
+**Recommendation:**
+```typescript
+export interface StreamOptions {
+  readonly maxChunks?: number
+  readonly chunkTimeout?: Duration.DurationInput
+}
+```
+
+#### 2.4 No Connection Timeout for Streams
+
+**Location:** `Transport/index.ts:355-371`
+
+**Issue:** HTTP streaming (`sendHttpStream`) has no timeout handling:
+
+```typescript
+// Current code - no timeout
 const sendHttpStream = (
   url: string,
   request: TransportRequest,
   fetchFn: typeof globalThis.fetch,
   headers?: HttpOptions["headers"]
 ): Stream.Stream<StreamResponse, TransportError> =>
-  // TODO: Implement proper SSE/streaming - for now just convert single response
+  // No timeout parameter passed
   Stream.fromEffect(
-    sendHttp(url, request, fetchFn, headers, undefined).pipe(...)
+    sendHttp(url, request, fetchFn, headers, undefined)  // <-- undefined timeout
   )
 ```
 
-### Issues Found
+**Risk:**
+- Connection hangs indefinitely
+- Resource leaks
 
-1. **Streaming not actually implemented**:
-   - The `sendHttpStream` is a stub that doesn't do real SSE
-   - No actual streaming protocol
+### MEDIUM PRIORITY - Robustness Gaps
 
-2. **No reconnection logic**:
-   - If connection drops, stream fails permanently
+#### 2.5 No Reconnection Logic
 
-3. **No heartbeat/keepalive**:
-   - No detection of silent failures
+**Location:** `Transport/index.ts`
 
-4. **Client-side stream not cleaned up on disconnect**:
-   ```typescript
-   // Client/index.ts:150-184
-   // Stream.takeWhile but no timeout or cleanup
-   ```
-
-5. **Server stream not cancelled on client disconnect**:
-   ```typescript
-   // Server/index.ts:306-323
-   const makeStream = (payload: unknown): Stream.Stream<...> => {
-     const stream = handler(payload) as Stream.Stream<...>
-     return stream.pipe(...)  // No cancellation token
-   }
-   ```
-
-### Potential Issues
-
-- **Memory leak**: Server continues streaming to disconnected client
-- **Resource exhaustion**: Zombie streams accumulate
-- **No backpressure**: Client can't slow down server
-
-### Recommendations
-
-1. Implement proper SSE transport with EventSource
-2. Add reconnection with exponential backoff
-3. Implement heartbeat (ping/pong every N seconds)
-4. Add `Stream.interruptible` for cancellation
-5. Implement backpressure signaling
-
----
-
-## 6. Malformed Responses
-
-### Current Handling
+**Issue:** HTTP transport has no automatic reconnection or retry logic:
 
 ```typescript
-// Transport/index.ts:342-350
-const decoded = yield* Schema.decodeUnknown(TransportResponse)(json).pipe(
-  Effect.mapError((cause) =>
-    new TransportError({
-      reason: "Protocol",
-      message: "Invalid response envelope",
-      cause,
-    })
-  )
-)
+// Current code - single attempt
+const response = yield* Effect.tryPromise({
+  try: () => fetchFn(url, { ... }),
+  catch: (cause) => new TransportError({ reason: "Network", ... }),
+})
+// No retry
 ```
 
-### Issues Found
+**Note:** The codebase provides `isTransientError()` helper (Line 532-538) but doesn't use it for automatic retries.
 
-1. **JSON parse errors handled but generic**:
-   ```typescript
-   // Transport/index.ts:331-339
-   const json = yield* Effect.tryPromise({
-     try: () => response.json(),
-     catch: (cause) => new TransportError({...})
-   })
-   ```
-
-2. **No validation of response.id matching request.id**:
-   - Server could return wrong ID
-   - No request/response correlation check
-
-3. **Schema decode errors lose context**:
-   - Original response is not preserved in error
-   - Hard to debug what was actually received
-
-4. **Client doesn't validate success/error schema match**:
-   ```typescript
-   // Client/index.ts:118-135
-   if (Schema.is(Transport.Success)(response)) {
-     return yield* Schema.decodeUnknown(successSchema)(response.value)
-   } else {
-     const error = yield* Schema.decodeUnknown(errorSchema)(response.error)
-     return yield* Effect.fail(error)
-   }
-   ```
-   - If server sends wrong error shape, decode fails with generic error
-
-### Potential Issues
-
-- **Silent data corruption**: Schema allows `unknown`, might pass invalid shapes
-- **Confusing errors**: User sees "Protocol error" without details
-- **Type unsafety**: Runtime types might not match TypeScript types
-
-### Recommendations
-
-1. Add request/response ID correlation check
-2. Preserve original response in decode errors
-3. Add verbose logging mode for debugging
-4. Consider `Schema.Strict` variants where appropriate
-
----
-
-## 7. Invalid Tags
-
-### Current Handling
-
+**Recommendation:**
 ```typescript
-// Server/index.ts:220-228
-const handle = (request: TransportRequest): Effect.Effect<...> => {
-  const entry = handlerMap.get(request.tag)
-  
-  if (!entry) {
-    return Effect.succeed(new Transport.Failure({
-      id: request.id,
-      error: { message: `Unknown procedure: ${request.tag}` },
-    }))
+export interface HttpOptions {
+  readonly retry?: {
+    readonly times: number
+    readonly delay: Duration.DurationInput
+    readonly exponentialBackoff?: boolean
   }
-  // ...
 }
 ```
 
-### Issues Found
+#### 2.6 No Request ID Collision Handling
 
-1. **Unknown procedure returns Failure, not TransportError**:
-   - Client might try to decode as user error schema
-   - Inconsistent with other protocol errors
+**Location:** `Transport/index.ts:546-547`
 
-2. **No tag format validation**:
-   - Malformed tags like `"@api//users"` or `"@api"` not checked
-   - Could cause Map lookup issues
-
-3. **Tag injection not prevented**:
-   - Tag comes from client, could contain malicious content
-   - Not sanitized before logging
-
-4. **Stream vs non-stream mismatch not well handled**:
-   ```typescript
-   // Server/index.ts:229-236
-   if (isStream) {
-     return Effect.succeed(new Transport.Failure({
-       id: request.id,
-       error: { message: `Use handleStream for streaming procedures: ${request.tag}` },
-     }))
-   }
-   ```
-   - Returns Failure instead of proper protocol error
-
-5. **Mock transport tag conversion could fail**:
-   ```typescript
-   // Transport/index.ts:488-493
-   const tagToPath = (tag: string): string => {
-     const parts = tag.split("/")
-     return parts.slice(1).join(".")  // Assumes format, could fail
-   }
-   ```
-
-### Recommendations
-
-1. Create distinct `ProcedureNotFoundError` type
-2. Validate tag format with regex
-3. Sanitize tags in error messages (prevent XSS in logs)
-4. Add type hints for stream vs non-stream mismatch
-
----
-
-## 8. Circular References in Payloads
-
-### Current Handling
-
-**None** - The codebase does not handle circular references.
-
-### Issues Found
-
-1. **JSON.stringify throws on circular refs**:
-   ```typescript
-   // Transport/index.ts:303-306
-   body: JSON.stringify({
-     id: request.id,
-     tag: request.tag,
-     payload: request.payload,  // If circular, throws
-   })
-   ```
-   - `TypeError: Converting circular structure to JSON`
-
-2. **No detection before serialization**:
-   - Error occurs at serialization time, not validation time
-
-3. **Schema doesn't prevent circular structures**:
-   - `Schema.Unknown` allows anything including circular refs
-
-### Potential Crash Scenarios
-
-- **Uncaught TypeError**: Transport throws without Effect wrapping in some paths
-- **Stack overflow**: Deep recursion before hitting circular detection
-
-### Recommendations
-
-1. Add `safeStringify` utility with circular reference detection
-2. Return proper TransportError for serialization failures
-3. Document that circular references are not supported
-4. Consider adding `maxDepth` check for nested structures
-
----
-
-## 9. Very Deep Nesting in Routers
-
-### Current Handling
+**Issue:** Request IDs are generated with `Date.now()` + random suffix:
 
 ```typescript
-// Router/index.ts:179-205
-const walk = (def: Definition, pathPrefix: string, tagPrefix: string): void => {
-  for (const key of Object.keys(def)) {
-    const value = def[key]
-    const path = pathPrefix ? `${pathPrefix}.${key}` : key
-    const procedureTag = `${tagPrefix}/${key}`
-    
-    if (Procedure.isProcedure(value)) {
-      // ...
-    } else {
-      walk(value, path, procedureTag)  // Recursive!
+export const generateRequestId = (): string =>
+  `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
+```
+
+**Risk:**
+- High request rates could cause collisions
+- `Date.now()` has millisecond precision
+- `Math.random()` is not cryptographically secure
+
+**Recommendation:** Use UUIDv4 or a more robust ID generator:
+```typescript
+export const generateRequestId = (): string =>
+  crypto.randomUUID() // or use @effect/platform's RandomId
+```
+
+#### 2.7 No Header Validation
+
+**Location:** `Server/index.ts:400-418`
+
+**Issue:** Headers are extracted without validation or sanitization:
+
+```typescript
+// Current code - no validation
+const headers: Record<string, string> = {}
+if (request.headers) {
+  // Headers directly used without sanitization
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (typeof value === "string") {
+      headers[key.toLowerCase()] = value
     }
   }
 }
 ```
 
-### Issues Found
+**Risk:**
+- Header injection attacks
+- Prototype pollution (if headers object is user-controlled)
 
-1. **No depth limit on router nesting**:
-   - Recursive `walk` could stack overflow
-   - Very long tags could cause issues
+#### 2.8 No Graceful Shutdown
 
-2. **Path string concatenation unbounded**:
-   - `"${pathPrefix}.${key}"` grows without limit
-   - Long paths could cause memory issues
+**Location:** `Client/index.ts:593`
 
-3. **Client proxy recursion unbounded**:
-   ```typescript
-   // Client/index.ts:544-556
-   const buildProxy = <Def extends Definition>(
-     def: Def,
-     pathParts: readonly string[]
-   ): ClientProxy<Def> =>
-     Record.map(def, (value, key) => {
-       // ... recursive
-       return buildProxy(value as Router.Definition, newPath)
-     })
-   ```
+**Issue:** `BoundClient.shutdown()` immediately disposes runtime without waiting for in-flight requests:
 
-4. **Server handler map building unbounded**:
-   ```typescript
-   // Server/index.ts:160-200
-   const buildHandlerMap = (def, handlerDef, pathParts, inheritedMiddlewares) => {
-     // ... recursive walk
-   }
-   ```
+```typescript
+shutdown: () => runtime.dispose(),  // Immediate shutdown
+```
 
-### Potential Crash Scenarios
+**Risk:**
+- Requests in progress are aborted
+- Data loss potential
 
-- **Stack overflow**: Router with 1000+ levels of nesting
-- **String length overflow**: Extremely long path strings
-- **Map size limits**: Router with millions of procedures
+**Recommendation:**
+```typescript
+shutdown: async (options?: { graceful?: boolean; timeout?: number }) => {
+  if (options?.graceful) {
+    // Wait for pending requests with timeout
+  }
+  return runtime.dispose()
+}
+```
 
-### Recommendations
+### LOW PRIORITY - Potential Issues
 
-1. Add `maxDepth` constant (e.g., 100 levels)
-2. Validate depth at router creation time
-3. Use iterative tree walking instead of recursion
-4. Add path/tag length limits
+#### 2.9 No Memory Leak Protection for Subscriptions
 
----
+**Location:** `Reactivity/index.ts:138-159`
 
-## 10. Undefined vs Null Handling
+**Issue:** Subscriptions are stored in a `Map` without limits:
 
-### Current Handling
+```typescript
+const subscriptions = new Map<string, Set<InvalidationCallback>>()
+```
 
-Schema.js and Effect generally distinguish `undefined` from `null`:
-- `Schema.Void` represents `undefined`/void
-- `Schema.Null` represents `null`
-- `Schema.Unknown` accepts both
+**Risk:**
+- If unsubscribe is never called, callbacks accumulate
+- Memory grows unbounded
 
-### Issues Found
+#### 2.10 No Request Deduplication
 
-1. **Inconsistent void handling**:
-   ```typescript
-   // Procedure/index.ts:268
-   self.payloadSchema = options.payload ?? Schema.Void
-   
-   // But void payloads get passed as `undefined`
-   ```
+**Location:** `Client/index.ts`
 
-2. **JSON serialization converts undefined to null (mostly)**:
-   ```typescript
-   // undefined in object values → omitted
-   // undefined as standalone value → "null" in JSON
-   JSON.stringify(undefined)  // → "undefined" (invalid JSON!)
-   JSON.stringify({ a: undefined })  // → "{}" (key omitted)
-   ```
+**Issue:** Multiple identical queries are sent separately. No deduplication:
 
-3. **Schema.Void decoding strictness**:
-   - `Schema.Void` expects exactly `undefined`
-   - `null` from JSON won't decode properly
+```typescript
+// Each call creates a new request
+const createRunEffect = (payload: unknown) =>
+  Effect.gen(function* () {
+    const service = yield* ClientServiceTag
+    return yield* service.send(tag, payload, successSchema, errorSchema)
+  })
+```
 
-4. **Response value could be null vs undefined**:
-   ```typescript
-   // Transport/index.ts:84-87
-   export class Success extends Schema.TaggedClass<Success>()("Success", {
-     id: Schema.String,
-     value: Schema.Unknown,  // Could be null
-   }) {}
-   ```
+**Note:** This is partially mitigated by Effect's general design, but explicit deduplication could help.
 
-5. **Optional fields inconsistent**:
-   ```typescript
-   // Transport/index.ts:153
-   headers: Schema.optionalWith(Schema.Record(...), { default: () => ({}) })
-   // This handles undefined but what about null?
-   ```
+#### 2.11 No Payload Validation Timeout
 
-### Potential Issues
+**Location:** `Server/index.ts:240`
 
-- **Type mismatch at runtime**: TypeScript says `void`, runtime sees `null`
-- **Decode failures for null payloads**: Server sends null, client expects undefined
-- **Inconsistent behavior across transports**: HTTP vs WebSocket might handle differently
+**Issue:** Complex schemas with recursive structures could cause long validation times:
 
-### Recommendations
+```typescript
+Schema.decodeUnknown(procedure.payloadSchema)(request.payload)
+// No timeout around validation
+```
 
-1. Normalize `undefined`/`null` at transport boundary
-2. Use `Schema.NullOr(Schema.Void)` for nullable void
-3. Document null vs undefined semantics clearly
-4. Add integration tests for null/undefined round-trips
+**Risk:**
+- ReDoS-style attacks via complex payloads
+- Server thread blocking
 
 ---
 
-## Summary of Potential Crash Scenarios
+## 3. Error Path Analysis
 
-| Scenario | Likelihood | Impact | Location |
-|----------|------------|--------|----------|
-| Large payload OOM | Medium | High | Transport, Server |
-| Circular reference TypeError | Low | Medium | Transport |
-| Deep nesting stack overflow | Low | High | Router, Server, Client |
-| Middleware missing in context | Medium | Medium | Middleware |
-| Request ID collision | Very Low | Low | Transport |
-| Stream resource leak | Medium | High | Server, Client |
-| JSON parse failure | Low | Low | Transport (handled) |
-| Unknown procedure | Medium | Low | Server (handled) |
-| Schema decode failure | Medium | Low | Client (handled) |
+### 3.1 Error Encoding Silent Fallback (CRITICAL)
+
+**Location:** `Server/index.ts:251-252, 259-260`
+
+**Issue:** If schema encoding fails, raw values are silently used:
+
+```typescript
+// Error encoding
+Schema.encode(procedure.errorSchema)(error).pipe(
+  Effect.orElseSucceed(() => error),  // <-- SILENT: raw error sent
+  Effect.map((encodedError) => new Transport.Failure({ ... }))
+)
+
+// Success encoding
+Schema.encode(procedure.successSchema)(value).pipe(
+  Effect.orElseSucceed(() => value),  // <-- SILENT: raw value sent
+  ...
+)
+```
+
+**Consequence:**
+1. Client may receive malformed data
+2. Client decoding may fail with confusing error
+3. Internal data structures may leak (security issue)
+4. No indication that encoding failed
+
+**Recommendation:** Log encoding failures and wrap in structured error:
+
+```typescript
+Schema.encode(procedure.errorSchema)(error).pipe(
+  Effect.tapError((encodingError) =>
+    Effect.logError("Failed to encode error response", { 
+      tag: request.tag, 
+      errorType: error?._tag,
+      encodingError 
+    })
+  ),
+  Effect.orElse(() =>
+    Effect.succeed({
+      _tag: "ServerError",
+      message: "An internal error occurred",
+      code: "ENCODING_FAILED",
+    })
+  ),
+)
+```
+
+### 3.2 HTTP Adapter Catch-All (MEDIUM)
+
+**Location:** `Server/index.ts:434-438`
+
+**Issue:** All errors caught at HTTP boundary become generic:
+
+```typescript
+Effect.catchAll(() => Effect.succeed({
+  status: 400,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ error: "Invalid request" }),
+}))
+```
+
+**Consequence:**
+- Any unexpected error returns 400 "Invalid request"
+- Differentiation between client errors (4xx) and server errors (5xx) lost
+- Debugging difficult
+
+**Recommendation:**
+```typescript
+Effect.catchAll((error) => {
+  const isClientError = isPayloadError(error) || isValidationError(error)
+  return Effect.succeed({
+    status: isClientError ? 400 : 500,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      error: isClientError ? "Invalid request" : "Internal server error",
+      code: error?._tag ?? "UNKNOWN",
+    }),
+  })
+})
+```
+
+### 3.3 Stream Error in `handleStream` (LOW)
+
+**Location:** `Server/index.ts:316-321`
+
+**Issue:** Stream errors are caught and converted but lose context:
+
+```typescript
+Stream.catchAll((error): Stream.Stream<Transport.StreamResponse, never, R> =>
+  Stream.succeed(new Transport.Failure({
+    id: request.id,
+    error,  // Raw error passed, no encoding attempted
+  }))
+),
+```
+
+**Consequence:**
+- Stream errors are not schema-encoded like regular errors
+- Inconsistent error handling between `handle` and `handleStream`
 
 ---
 
-## Priority Recommendations
+## 4. Security Considerations
 
-### High Priority (Security/Stability)
+### 4.1 Payload Size Limits (NOT IMPLEMENTED)
 
-1. **Add payload size limits** - Prevent OOM attacks
-2. **Implement proper SSE streaming** - Current stub is not production-ready
-3. **Add circular reference detection** - Prevent uncaught TypeError
-4. **Add router depth limits** - Prevent stack overflow
+| Component | Max Size | Enforcement |
+|-----------|----------|-------------|
+| Server payload | None | None |
+| Client payload | None | None |
+| Stream chunks | None | None |
+| HTTP body | Server-dependent | External |
 
-### Medium Priority (Robustness)
+**Recommendation:** Add configurable limits:
 
-5. **Improve error context** - Preserve original data in decode errors
-6. **Add middleware timeout** - Prevent hanging requests
-7. **Validate tag format** - Prevent injection/malformed tags
-8. **Normalize null/undefined** - Consistent behavior
+```typescript
+export interface ServerOptions {
+  readonly limits?: {
+    readonly maxPayloadSize?: number  // bytes
+    readonly maxChunks?: number       // for streams
+    readonly maxConcurrentRequests?: number
+  }
+}
+```
 
-### Lower Priority (Polish)
+### 4.2 Input Sanitization (PARTIAL)
 
-9. **UUID for request IDs** - Better uniqueness guarantee
-10. **Concurrency limits** - Resource protection
-11. **Request/response correlation** - Verify IDs match
-12. **Iterative tree walking** - Avoid recursion limits
+| Input | Sanitized? | Notes |
+|-------|------------|-------|
+| Payload | Via Schema | Schema validates structure but not content |
+| Headers | Lowercase only | No other sanitization |
+| Tag/Path | No | Used directly in handler lookup |
+
+**Recommendation:** Validate tags against known procedures before processing:
+
+```typescript
+const handle = (request: TransportRequest) => {
+  // Validate tag format
+  if (!isValidTag(request.tag)) {
+    return Effect.succeed(new Transport.Failure({
+      id: request.id,
+      error: { message: "Invalid tag format" },
+    }))
+  }
+  // ... continue
+}
+```
+
+### 4.3 Error Information Disclosure (PARTIAL)
+
+| Error Type | Disclosed Information |
+|------------|----------------------|
+| ParseError (payload) | Full parse error with cause |
+| Handler errors | Full error object if encoding fails |
+| Transport errors | Reason + message + optional cause |
+
+**Risk:** Stack traces and internal structure could leak in production.
+
+**Recommendation:** Add production mode that sanitizes errors:
+
+```typescript
+export interface ServerOptions {
+  readonly production?: boolean  // Strips detailed error info
+}
+```
+
+### 4.4 Request Forgery Protection (NOT IMPLEMENTED)
+
+No CSRF protection is built into the transport layer. This is expected to be handled at the HTTP server level (e.g., Express, Hono), but could be documented.
 
 ---
 
-## Test Coverage Gaps
+## 5. Timeout Handling Analysis
 
-The following edge cases lack test coverage:
+| Operation | Timeout? | Default | Configurable? |
+|-----------|----------|---------|---------------|
+| HTTP request | YES | 30s | YES (Transport.http options) |
+| HTTP streaming | NO | - | NO |
+| Payload validation | NO | - | NO |
+| Handler execution | NO | - | NO |
+| Schema encoding | NO | - | NO |
 
-1. Empty payload round-trip
-2. Very large payloads (boundary testing)
-3. Concurrent request handling
-4. Middleware timeout scenarios
-5. Network disconnection during stream
-6. Malformed JSON responses
-7. Invalid/malformed tags
-8. Circular reference in payload
-9. Deeply nested routers (>10 levels)
-10. Null vs undefined in various positions
+**Gaps:**
+1. No handler execution timeout - a slow handler blocks indefinitely
+2. No streaming timeout - streams can run forever
+3. No validation timeout - complex schemas could block
+
+**Recommendation:**
+```typescript
+export interface ServerOptions {
+  readonly timeouts?: {
+    readonly handler?: Duration.DurationInput   // Max handler execution time
+    readonly validation?: Duration.DurationInput // Max payload validation time
+    readonly stream?: Duration.DurationInput    // Max stream duration
+  }
+}
+```
+
+---
+
+## 6. Reconnection Logic Analysis
+
+### Current State
+
+| Scenario | Handled? | Notes |
+|----------|----------|-------|
+| Network failure | NO | Single attempt, then TransportError |
+| Timeout | NO | Single attempt, then TransportError |
+| Server unavailable | NO | Single attempt, then TransportError |
+| Connection closed | NO | For streams, error emitted |
+
+### `isTransientError` Helper
+
+The codebase provides `Transport.isTransientError()` which correctly identifies retryable errors:
+
+```typescript
+export const isTransientError = (error: unknown): boolean => {
+  if (error instanceof TransportError) {
+    return error.reason === "Network" || error.reason === "Timeout"
+  }
+  return false
+}
+```
+
+However, this is not used internally for automatic retries.
+
+### Recommended Retry Implementation
+
+```typescript
+export interface RetryOptions {
+  readonly times: number
+  readonly delay: Duration.DurationInput
+  readonly backoff?: "linear" | "exponential"
+  readonly jitter?: boolean
+  readonly onRetry?: (attempt: number, error: TransportError) => Effect.Effect<void>
+}
+
+const retryTransient = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options: RetryOptions
+): Effect.Effect<A, E, R> =>
+  effect.pipe(
+    Effect.retry({
+      times: options.times,
+      schedule: Schedule.exponential(options.delay),
+      while: (error) => isTransientError(error),
+    })
+  )
+```
+
+---
+
+## 7. Robustness Recommendations
+
+### Immediate (Security Critical)
+
+1. **Add payload size limits** - Prevent DoS via large payloads
+2. **Fix silent encoding fallbacks** - Log failures, return structured errors
+3. **Validate request ID format** - Prevent injection via IDs
+
+### Short-term (Stability)
+
+4. **Add handler execution timeouts** - Prevent indefinite blocking
+5. **Implement retry logic for transient errors** - Use existing `isTransientError`
+6. **Add graceful shutdown** - Wait for in-flight requests
+7. **Improve request ID generation** - Use crypto.randomUUID()
+
+### Medium-term (Production Readiness)
+
+8. **Add configurable rate limiting** - Per-client or global
+9. **Add stream chunk limits** - Prevent memory exhaustion
+10. **Add production error sanitization** - Hide internal details
+11. **Add metrics/observability hooks** - Track error rates, latencies
+
+### Long-term (Enterprise Features)
+
+12. **Add request deduplication** - For identical concurrent queries
+13. **Add circuit breaker pattern** - For failing services
+14. **Add request prioritization** - For QoS
+15. **Add distributed tracing integration** - OpenTelemetry
+
+---
+
+## 8. Summary
+
+| Category | Handled | Not Handled | Critical Gaps |
+|----------|---------|-------------|---------------|
+| Error responses | 10+ cases | 3 silent fallbacks | Encoding failures |
+| Timeouts | HTTP only | Handlers, streams, validation | Handler timeout |
+| Size limits | None | All payloads | DoS vulnerability |
+| Reconnection | Helper exists | Auto-retry | Network resilience |
+| Security | Schema validation | Size, rate, injection | DoS, info leak |
+| Cleanup | Basic | Graceful shutdown | In-flight requests |
+
+**Overall Assessment:** The codebase handles many common edge cases well, particularly around response typing, unknown procedures, and basic error wrapping. However, it lacks critical production hardening features: payload size limits, handler timeouts, retry logic, and proper error encoding fallbacks. The silent encoding fallbacks are the most critical issue as they can cause hard-to-debug client-side failures and potential information leakage.

@@ -1,61 +1,159 @@
-# H15: SSR Support in Effect Atom React
+# H15: SSR Support Analysis
 
 ## Summary
 
-Effect Atom React has **comprehensive SSR support** with a well-designed hydration system. All client-side files use the `"use client"` directive, making them compatible with React Server Components and Next.js App Router.
+**Effect Atom React has first-class SSR support** with a complete dehydration/hydration architecture designed for React 18+ streaming and transitions.
 
-## Key SSR Capabilities
+## SSR Architecture
 
-### 1. "use client" Directive
-
-All React-specific files include the `"use client"` directive at the top:
-
-```typescript
-// Hooks.ts, RegistryContext.ts, ScopedAtom.ts, ReactHydration.ts
-"use client"
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         SERVER RENDER                                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. Create Registry                                                  │
+│     └── Registry.make({ scheduleTask, initialValues })              │
+│                                                                      │
+│  2. Render with RegistryProvider                                     │
+│     └── Components read atoms via getServerValue()                   │
+│                                                                      │
+│  3. Dehydrate State                                                  │
+│     └── Hydration.dehydrate(registry) → DehydratedAtom[]            │
+│         Options:                                                     │
+│         - encodeInitialAs: "ignore" | "promise" | "value-only"      │
+│                                                                      │
+│  4. Serialize to HTML                                                │
+│     └── JSON.stringify(dehydratedState)                             │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         CLIENT HYDRATE                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. Parse serialized state                                           │
+│     └── JSON.parse(window.__ATOM_STATE__)                           │
+│                                                                      │
+│  2. Wrap app in HydrationBoundary                                    │
+│     └── <HydrationBoundary state={dehydratedState}>                 │
+│           <App />                                                    │
+│         </HydrationBoundary>                                         │
+│                                                                      │
+│  3. Hydration timing (transition-aware)                              │
+│     ├── New atoms: hydrate immediately in render                    │
+│     └── Existing atoms: queue for useEffect (post-commit)           │
+│                                                                      │
+│  4. useSyncExternalStore with getServerSnapshot                      │
+│     └── Provides consistent SSR value during hydration              │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-This ensures proper bundler splitting and RSC compatibility.
+## "use client" Directives
 
-### 2. Server Snapshot Support
+All React files include the `"use client"` directive:
 
-The `useStore` function leverages React 18's `useSyncExternalStore` with proper server snapshot handling:
+| File | Has "use client" | Purpose |
+|------|-----------------|---------|
+| `Hooks.ts` | Yes (line 4) | React hooks with useSyncExternalStore |
+| `RegistryContext.ts` | Yes (line 4) | React.createContext + Provider |
+| `ReactHydration.ts` | Yes (line 4) | HydrationBoundary component |
+| `ScopedAtom.ts` | Yes (line 4) | Scoped atom pattern |
+
+This is correct for Next.js App Router - all interactive React features require "use client".
+
+## Key SSR Components
+
+### 1. `useSyncExternalStore` with Server Snapshot
 
 ```typescript
-// Hooks.ts:53-56
+// Hooks.ts:38-47
+const newStore: AtomStore<A> = {
+  subscribe(f) {
+    return registry.subscribe(atom, f)
+  },
+  snapshot() {
+    return registry.get(atom)
+  },
+  getServerSnapshot() {
+    return Atom.getServerValue(atom, registry)  // <-- SSR-specific
+  }
+}
+
+// Hooks.ts:53-57
 function useStore<A>(registry: Registry.Registry, atom: Atom.Atom<A>): A {
   const store = makeStore(registry, atom)
   return React.useSyncExternalStore(
-    store.subscribe,
-    store.snapshot,
-    store.getServerSnapshot  // <-- SSR support
+    store.subscribe, 
+    store.snapshot, 
+    store.getServerSnapshot  // <-- Used during SSR
   )
 }
 ```
 
-The `getServerSnapshot` delegates to `Atom.getServerValue()` which respects server-specific atom configurations.
-
-### 3. Server Value Override
-
-Atoms can define different values for server rendering:
+### 2. Server Value Override
 
 ```typescript
-// Atom.ts:2071-2081
+// Atom.ts:2071-2080
 export const withServerValue: {
   <A extends Atom<any>>(read: (get: <A>(atom: Atom<A>) => A) => Type<A>): (self: A) => A
   <A extends Atom<any>>(self: A, read: (get: <A>(atom: Atom<A>) => A) => Type<A>): A
 }
 
-// Atom.ts:2089-2090 - Convenience for Result atoms
+// Atom.ts:2089-2090 - Convenience for async atoms
 export const withServerValueInitial = <A extends Atom<Result.Result<any, any>>>(self: A): A =>
   withServerValue(self, constant(Result.initial(true)) as any)
 ```
 
-This allows Effect-based atoms (which run async operations) to render as `Initial` during SSR, avoiding waterfall requests.
+### 3. HydrationBoundary Component
 
-### 4. Hydration System
+```typescript
+// ReactHydration.ts:22-84
+export const HydrationBoundary: React.FC<HydrationBoundaryProps> = ({
+  children,
+  state
+}) => {
+  const registry = React.useContext(RegistryContext)
 
-#### Dehydration (Server → Client)
+  // Render-phase hydration for NEW atoms (immediate)
+  // Queue hydration for EXISTING atoms (post-commit via useEffect)
+  const hydrationQueue = React.useMemo(() => {
+    if (state) {
+      const nodes = registry.getNodes()
+      const newDehydratedAtoms: Array<DehydratedAtomValue> = []
+      const existingDehydratedAtoms: Array<DehydratedAtomValue> = []
+
+      for (const dehydratedAtom of dehydratedAtoms) {
+        const existingNode = nodes.get(dehydratedAtom.key)
+        if (!existingNode) {
+          newDehydratedAtoms.push(dehydratedAtom)  // Hydrate now
+        } else {
+          existingDehydratedAtoms.push(dehydratedAtom)  // Queue for later
+        }
+      }
+
+      if (newDehydratedAtoms.length > 0) {
+        Hydration.hydrate(registry, newDehydratedAtoms)
+      }
+
+      return existingDehydratedAtoms.length > 0 ? existingDehydratedAtoms : undefined
+    }
+    return undefined
+  }, [registry, state])
+
+  // Post-commit hydration for existing atoms (transition-safe)
+  React.useEffect(() => {
+    if (hydrationQueue) {
+      Hydration.hydrate(registry, hydrationQueue)
+    }
+  }, [registry, hydrationQueue])
+
+  return React.createElement(React.Fragment, {}, children)
+}
+```
+
+### 4. Dehydration with Async Support
 
 ```typescript
 // Hydration.ts:32-74
@@ -64,146 +162,95 @@ export const dehydrate = (
   options?: {
     readonly encodeInitialAs?: "ignore" | "promise" | "value-only" | undefined
   }
-): Array<DehydratedAtom>
-```
-
-The `encodeInitialAs: "promise"` option enables **streaming hydration** - atoms still resolving on the server can complete and stream their results to the client.
-
-#### Hydration (Client)
-
-```typescript
-// ReactHydration.ts:22-84
-export const HydrationBoundary: React.FC<HydrationBoundaryProps> = ({
-  children,
-  state
-}) => {
-  // Hydrates new atoms during render (safe for SSR)
-  // Queues existing atoms for useEffect (safe for transitions)
+): Array<DehydratedAtom> => {
+  // For atoms in Initial state, can create a promise that resolves
+  // when the atom moves out of Initial state (streaming support)
+  if (encodeInitialResultMode === "promise" && isInitial) {
+    resultPromise = new Promise((resolve) => {
+      const unsubscribe = registry.subscribe(atom, (newValue) => {
+        if (Result.isResult(newValue) && !Result.isInitial(newValue)) {
+          resolve(atom[SerializableTypeId].encode(newValue))
+          unsubscribe()
+        }
+      })
+    })
+  }
 }
 ```
 
-The HydrationBoundary component:
-1. **Separates new vs existing atoms** - New atoms hydrate immediately during render; existing atoms queue for `useEffect`
-2. **Supports React transitions** - Existing atoms don't update until transition commits (prevents UI flicker)
-3. **Handles streaming data** - Promise-based dehydrated atoms resolve and update after hydration
+## React 18+ Transition Support
 
-### 5. Streaming SSR Support
+The HydrationBoundary is explicitly designed for React 18 transitions:
 
 ```typescript
-// Test showing streaming pattern
-const dehydratedState = Hydration.dehydrate(registry, {
-  encodeInitialAs: "promise"  // Creates promises for pending atoms
-})
-
-// Client receives Initial state, then promise resolves with data
+// ReactHydration.ts:35-42 (comments from source)
+// For any Atom values that already exist in the registry, we want to hold back on
+// hydrating until _after_ the render phase. The reason for this is that during
+// transitions, we don't want the existing Atom values and subscribers to update to
+// the new data on the current page, only _after_ the transition is committed.
+// If the transition is aborted, we will have hydrated any _new_ Atom values, but
+// we throw away the fresh data for any existing ones to avoid unexpectedly
+// updating the UI.
 ```
 
-The `resultPromise` field on `DehydratedAtomValue` enables server-to-client streaming:
-- Server sends `Initial` state immediately
-- Server resolves promise when data ready
-- Client receives resolved value and updates
-
-## Server Component Compatibility
-
-### Works Well
-
-1. **Client boundary is clear** - All hooks are `"use client"`
-2. **Data fetching on server** - Use `withServerValueInitial` to skip client-side fetch on initial render
-3. **Hydration component** - `HydrationBoundary` works in client components
-
-### Pattern for effect-trpc
-
-For a tRPC query atom:
+## DehydratedAtom Structure
 
 ```typescript
-// Create query atom that defers to Initial during SSR
-const userQuery = trpc.user.byId.query({ id: 1 }).pipe(
-  Atom.withServerValueInitial  // Returns Initial during SSR
-)
-
-// Or provide server-fetched data
-const userQuery = trpc.user.byId.query({ id: 1 }).pipe(
-  Atom.withServerValue(() => {
-    // Called during SSR to get the value
-    return Result.success(prefetchedUser)
-  })
-)
+interface DehydratedAtomValue {
+  readonly "~@effect-atom/atom/DehydratedAtom": true
+  readonly key: string              // Atom serialization key
+  readonly value: unknown           // Encoded atom value
+  readonly dehydratedAt: number     // Timestamp
+  readonly resultPromise?: Promise<unknown>  // For streaming async results
+}
 ```
 
-## What effect-trpc Needs for SSR
+## Implications for effect-trpc
 
-### 1. Mark Client Modules
+### What atom-react provides:
+1. Full SSR/hydration architecture
+2. `"use client"` directives for App Router
+3. `useSyncExternalStore` with `getServerSnapshot` for hydration
+4. Transition-aware hydration (React 18+)
+5. Streaming support via `resultPromise`
 
-All React hooks must include `"use client"` directive:
+### What effect-trpc needs to do:
+1. Make tRPC query atoms serializable (`withSerializable`)
+2. Use `withServerValueInitial` for async atoms to avoid hydration mismatch
+3. Provide integration guidance for Next.js/Remix
+
+### Recommended Pattern:
 
 ```typescript
-// packages/effect-trpc-react/src/hooks.ts
-"use client"
+// Server Component (RSC)
+async function Page() {
+  const registry = Registry.make()
+  // Pre-populate atoms if needed
+  const state = Hydration.dehydrate(registry, { encodeInitialAs: "promise" })
+  
+  return (
+    <RegistryProvider>
+      <HydrationBoundary state={state}>
+        <ClientComponent />
+      </HydrationBoundary>
+    </RegistryProvider>
+  )
+}
 
-export const useQuery = ...
-```
-
-### 2. Server Value Support for Query Atoms
-
-Query atoms should support server-side initial values:
-
-```typescript
-// Option A: Defer to Initial (skip server fetch)
-const query = trpc.user.get.query({ id }).pipe(
-  Atom.withServerValueInitial
-)
-
-// Option B: Prefetch and hydrate
-const query = trpc.user.get.query({ id }).pipe(
-  Atom.withServerValue((get) => {
-    // Access prefetched data from a parent atom
-    return get(prefetchedDataAtom)
-  })
+// tRPC query atom with SSR support
+const userQuery = pipe(
+  trpc.user.get.atom({ id: "1" }),
+  Atom.withSerializable("user-1", Result.encode, Result.decode),
+  Atom.withServerValueInitial  // Prevents hydration mismatch
 )
 ```
 
-### 3. Hydration Integration
+## Verdict
 
-The tRPC client should integrate with Atom's hydration system:
+**atom-react is SSR-ready.** The architecture handles:
+- Initial render consistency via `getServerSnapshot`
+- State transfer via dehydration/hydration
+- React 18 transitions and streaming
+- Next.js App Router via `"use client"`
 
-```typescript
-// Server: Dehydrate query results
-const dehydratedQueries = Hydration.dehydrate(registry, {
-  encodeInitialAs: "promise"  // Enable streaming
-})
-
-// Client: Hydrate in HydrationBoundary
-<HydrationBoundary state={dehydratedQueries}>
-  <App />
-</HydrationBoundary>
-```
-
-### 4. useSyncExternalStore Pattern
-
-The hooks already use this pattern, which is SSR-compatible:
-
-```typescript
-// From Hooks.ts - this pattern is correct
-React.useSyncExternalStore(
-  store.subscribe,
-  store.snapshot,
-  store.getServerSnapshot  // Critical for SSR
-)
-```
-
-## Recommended Implementation
-
-1. **All client code uses `"use client"`** - Already planned based on Atom React
-2. **Query atoms auto-serialize** - Use `Atom.serializable()` with Schema for query results
-3. **Streaming support** - Use `encodeInitialAs: "promise"` for pending queries
-4. **Prefetch support** - Enable `trpc.prefetch()` that populates registry before render
-
-## File References
-
-| File | SSR Feature |
-|------|-------------|
-| `Hooks.ts:45-47` | `getServerSnapshot` for `useSyncExternalStore` |
-| `ReactHydration.ts:22-84` | `HydrationBoundary` component |
-| `Atom.ts:2071-2105` | `withServerValue`, `withServerValueInitial`, `getServerValue` |
-| `Hydration.ts:32-113` | `dehydrate`, `hydrate` with streaming support |
-| `RegistryContext.ts:22-25` | Default registry with scheduler |
+effect-trpc can rely on this infrastructure without implementing custom SSR support.
