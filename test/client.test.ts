@@ -267,12 +267,13 @@ describe("Hook stubs", () => {
     expect(typeof bound.users.create.useMutation).toBe("function")
   })
 
-  it("useQuery throws outside React", () => {
-    expect(() => bound.users.list.useQuery()).toThrow(/React/)
+  it("useQuery throws outside React context", () => {
+    // Now throws because React hooks can't be used outside of component/Provider
+    expect(() => bound.users.list.useQuery()).toThrow()
   })
 
-  it("useMutation throws outside React", () => {
-    expect(() => bound.users.create.useMutation()).toThrow(/React/)
+  it("useMutation throws outside React context", () => {
+    expect(() => bound.users.create.useMutation()).toThrow()
   })
 })
 

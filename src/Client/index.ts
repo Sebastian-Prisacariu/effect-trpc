@@ -702,18 +702,25 @@ const buildBoundProxy = <D extends Router.Definition>(
   }) as ClientProxy<D>
 
 // =============================================================================
-// React Hooks (stubs - to be implemented with actual React)
+// React Hooks (imported from react.ts)
 // =============================================================================
+
+// Import React hooks - these will throw helpful errors if React isn't available
+import {
+  createProvider as createProviderImpl,
+  createUseQuery as createUseQueryImpl,
+  createUseMutation as createUseMutationImpl,
+  createUseStream as createUseStreamImpl,
+} from "./react.js"
 
 const createProvider = <D extends Router.Definition>(
   router: Router.Router<D>
 ): React.FC<ProviderProps> => {
-  // This would be implemented with actual React
-  // For now, return a stub
-  return ({ layer, children }) => {
-    // TODO: Create ManagedRuntime from layer
-    // TODO: Provide via React context
-    return children as any
+  try {
+    return createProviderImpl(router)
+  } catch {
+    // React not available - return stub
+    return ({ children }) => children as any
   }
 }
 
@@ -721,30 +728,39 @@ const createUseQuery = <P extends Procedure.Query<any, any, any>>(
   tag: string,
   procedure: P
 ): UseQueryFn<any, any, any> => {
-  // TODO: Implement with actual React hooks
-  return (() => {
-    throw new Error("useQuery requires React. Use inside a component wrapped by <api.Provider>")
-  }) as any
+  try {
+    return createUseQueryImpl(tag, procedure) as UseQueryFn<any, any, any>
+  } catch {
+    return (() => {
+      throw new Error("useQuery requires React. Use inside a component wrapped by <api.Provider>")
+    }) as any
+  }
 }
 
 const createUseMutation = <P extends Procedure.Mutation<any, any, any, any>>(
   tag: string,
   procedure: P
 ): UseMutationFn<any, any, any> => {
-  // TODO: Implement with actual React hooks
-  return (() => {
-    throw new Error("useMutation requires React. Use inside a component wrapped by <api.Provider>")
-  }) as any
+  try {
+    return createUseMutationImpl(tag, procedure) as UseMutationFn<any, any, any>
+  } catch {
+    return (() => {
+      throw new Error("useMutation requires React. Use inside a component wrapped by <api.Provider>")
+    }) as any
+  }
 }
 
 const createUseStream = <P extends Procedure.Stream<any, any, any>>(
   tag: string,
   procedure: P
 ): UseStreamFn<any, any, any> => {
-  // TODO: Implement with actual React hooks
-  return (() => {
-    throw new Error("useStream requires React. Use inside a component wrapped by <api.Provider>")
-  }) as any
+  try {
+    return createUseStreamImpl(tag, procedure) as UseStreamFn<any, any, any>
+  } catch {
+    return (() => {
+      throw new Error("useStream requires React. Use inside a component wrapped by <api.Provider>")
+    }) as any
+  }
 }
 
 // =============================================================================
