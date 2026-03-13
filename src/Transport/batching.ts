@@ -323,10 +323,13 @@ export const layer = (
       
       return {
         send: (request) => {
-          // Determine if this request should be batched
-          // For now, batch all queries, skip mutations
-          // TODO: Add procedure type detection
-          const shouldBatch = batchQueries // Simplified for now
+          // Determine if this request should be batched based on procedure type
+          const isQuery = request.type === "query" || request.type === undefined
+          const isMutation = request.type === "mutation"
+          
+          const shouldBatch = 
+            (isQuery && batchQueries) || 
+            (isMutation && batchMutations)
           
           if (shouldBatch) {
             return batcher.submit(request)

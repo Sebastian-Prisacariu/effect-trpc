@@ -107,33 +107,105 @@ export const dehydrate = (
 })
 
 /**
- * Create a prefetch helper for a router
+ * Prefetch context passed to the prefetch function.
+ * Contains the typed API client for fetching data.
+ * 
+ * @since 1.0.0
+ * @category server
+ */
+export interface PrefetchContext<API> {
+  /** The typed API client for making queries */
+  readonly api: API
+  /** Add a query result to the dehydrated state */
+  readonly collect: (path: string, data: unknown) => void
+}
+
+/**
+ * Options for createPrefetch
+ * 
+ * @since 1.0.0
+ * @category server
+ */
+export interface PrefetchOptions {
+  /** Whether to include errors in dehydrated state (default: false) */
+  readonly includeErrors?: boolean
+}
+
+/**
+ * Create a prefetch helper for server-side rendering.
+ * 
+ * Use this to prefetch data on the server and pass it to the client
+ * for hydration.
  * 
  * @since 1.0.0
  * @category server
  * @example
  * ```ts
- * const prefetch = SSR.createPrefetch(appRouter)
+ * import { SSR, Server, Transport } from "effect-trpc"
+ * import { Effect, Layer } from "effect"
  * 
- * // In getServerSideProps
- * const state = await prefetch(async (api) => ({
- *   users: await api.users.list(),
- *   config: await api.config.get(),
- * }))
+ * // In getServerSideProps (Next.js)
+ * export async function getServerSideProps() {
+ *   const { data, dehydratedState } = await SSR.prefetch(async (collect) => {
+ *     // Run your Effects with Effect.runPromise
+ *     const users = await Effect.runPromise(
+ *       api.users.list.run().pipe(Effect.provide(layer))
+ *     )
+ *     collect("users.list", users)
+ *     
+ *     return { users }
+ *   })
+ *   
+ *   return { props: { dehydratedState, ...data } }
+ * }
  * ```
  */
-export const createPrefetch = <R>(
-  _router: R
-): (<T>(
-  fn: (api: any) => Promise<T>
-) => Promise<{ data: T; dehydratedState: DehydratedState }>) => {
-  return async (fn) => {
-    // TODO: Implement proper prefetch with client
-    const data = await fn({})
-    return {
-      data,
-      dehydratedState: dehydrate(data as Record<string, unknown>),
-    }
+export const prefetch = async <T>(
+  fn: (collect: (path: string, data: unknown) => void) => Promise<T>
+): Promise<{ data: T; dehydratedState: DehydratedState }> => {
+  const collected: Record<string, unknown> = {}
+  
+  const collect = (path: string, data: unknown) => {
+    collected[path] = data
+  }
+  
+  const data = await fn(collect)
+  
+  return {
+    data,
+    dehydratedState: dehydrate(collected),
+  }
+}
+
+/**
+ * Prefetch by running an Effect directly.
+ * The Effect should return a record of path → data.
+ * 
+ * @since 1.0.0
+ * @category server
+ * @example
+ * ```ts
+ * import { SSR } from "effect-trpc"
+ * import { Effect } from "effect"
+ * 
+ * const { dehydratedState } = await SSR.prefetchEffect(
+ *   Effect.all({
+ *     "users.list": api.users.list.run(),
+ *     "config.get": api.config.get.run(),
+ *   }).pipe(Effect.provide(fullLayer))
+ * )
+ * ```
+ */
+export const prefetchEffect = async <A extends Record<string, unknown>>(
+  effect: import("effect/Effect").Effect<A, unknown, never>
+): Promise<{ data: A; dehydratedState: DehydratedState }> => {
+  const { Effect } = await import("effect")
+  
+  const data = await Effect.runPromise(effect)
+  
+  return {
+    data,
+    dehydratedState: dehydrate(data),
   }
 }
 

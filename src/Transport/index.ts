@@ -143,11 +143,22 @@ export type StreamResponse = typeof StreamResponse.Type
  * @since 1.0.0
  * @category models
  */
+/**
+ * Procedure type for transport requests
+ * Used for batching decisions and routing
+ */
+export type ProcedureType = "query" | "mutation" | "stream"
+
 export class TransportRequest extends Schema.Class<TransportRequest>("TransportRequest")({
   id: Schema.String,
   tag: Schema.String,
   payload: Schema.Unknown,
   headers: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), { default: () => ({}) }),
+  /** Procedure type - used for batching decisions */
+  type: Schema.optionalWith(
+    Schema.Literal("query", "mutation", "stream"),
+    { default: () => "query" as const }
+  ),
 }) {}
 
 /**

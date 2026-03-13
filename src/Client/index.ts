@@ -68,7 +68,8 @@ export interface ClientService {
     tag: string,
     payload: unknown,
     successSchema: Schema.Schema<S, unknown>,
-    errorSchema: Schema.Schema<E, unknown>
+    errorSchema: Schema.Schema<E, unknown>,
+    type?: Transport.ProcedureType
   ) => Effect.Effect<S, E | Transport.TransportError>
   
   readonly sendStream: <S, E>(
@@ -105,12 +106,13 @@ export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.T
       const transport = yield* Transport.Transport
       
       return {
-        send: (tag, payload, successSchema, errorSchema) =>
+        send: (tag, payload, successSchema, errorSchema, type) =>
           Effect.gen(function* () {
             const request = new Transport.TransportRequest({
               id: Transport.generateRequestId(),
               tag,
               payload,
+              type: type ?? "query",
             })
             
             const response = yield* transport.send(request)
@@ -145,6 +147,7 @@ export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.T
             id: Transport.generateRequestId(),
             tag,
             payload,
+            type: "stream",
           })
           
           return transport.sendStream(request).pipe(
@@ -616,7 +619,7 @@ const createProcedureClient = <P extends Procedure.Any>(
   const createRunEffect = (payload: unknown) =>
     Effect.gen(function* () {
       const service = yield* ClientServiceTag
-      return yield* service.send(tag, payload, successSchema, errorSchema)
+      return yield* service.send(tag, payload, successSchema, errorSchema, "query")
     })
   
   const createStreamEffect = (payload: unknown) =>
@@ -653,7 +656,7 @@ const createProcedureClient = <P extends Procedure.Any>(
     const createMutationEffect = (payload: unknown) =>
       Effect.gen(function* () {
         const service = yield* ClientServiceTag
-        const result = yield* service.send(tag, payload, successSchema, errorSchema)
+        const result = yield* service.send(tag, payload, successSchema, errorSchema, "mutation")
         
         // Invalidate on success
         // PathReactivity handles normalization internally ("users.list" → "users/list")
