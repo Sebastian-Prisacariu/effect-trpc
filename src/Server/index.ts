@@ -482,7 +482,7 @@ export const toHttpHandler = <D extends Router.Definition, R>(
         if (request.headers) {
           if (typeof request.headers.get === "function") {
             // Headers object with get method (fetch API)
-            const commonHeaders = ["authorization", "content-type", "x-request-id"]
+            const commonHeaders = ["authorization", "content-type", "x-request-id", "x-batch"]
             for (const name of commonHeaders) {
               const value = (request.headers as any).get(name)
               if (value) headers[name] = value
@@ -497,6 +497,19 @@ export const toHttpHandler = <D extends Router.Definition, R>(
           }
         }
         
+        // Check if this is a batch request
+        if (Transport.Batching.isBatchRequest(body)) {
+          return Transport.Batching.handleBatch(server.handle)(
+            body as Transport.Batching.BatchRequest
+          ).pipe(
+            Effect.map((batchResponse): HttpResponse => ({
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(batchResponse),
+            }))
+          )
+        }
+        
         const transportRequest = new Transport.TransportRequest({
           id: (body as any).id ?? Transport.generateRequestId(),
           tag: (body as any).tag ?? "",
@@ -504,13 +517,14 @@ export const toHttpHandler = <D extends Router.Definition, R>(
           headers,
         })
         
-        return server.handle(transportRequest)
+        return server.handle(transportRequest).pipe(
+          Effect.map((response): HttpResponse => ({
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(response),
+          }))
+        )
       }),
-      Effect.map((response) => ({
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(response),
-      })),
       Effect.catchAll((error) =>
         // JSON parsing errors should return 400 Bad Request
         // Other errors return 500 Internal Server Error

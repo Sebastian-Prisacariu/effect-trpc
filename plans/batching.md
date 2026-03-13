@@ -1,76 +1,41 @@
-# Batching Implementation Plan
+# Batching Implementation
 
-## Overview
+## Status: ✅ IMPLEMENTED
 
-Batching combines multiple RPC requests into a single HTTP request, reducing network overhead and improving performance for applications with many concurrent queries.
+Batching is now implemented using Effect Queue + Stream.groupedWithin pattern.
 
-## Status: NOT IMPLEMENTED
+## Usage
 
-The batching configuration was removed from the API because it had no implementation. This plan outlines how to implement it properly.
-
-## Proposed API
+### Client-side (Transport)
 
 ```typescript
-const layer = Transport.http("/api/trpc", {
-  batching: {
-    /**
-     * Enable batching (default: false)
-     */
-    enabled: true,
-    
-    /**
-     * Time window to collect requests before sending batch.
-     * Default: 0 (send immediately after microtask)
-     */
-    window: Duration.millis(10),
-    
-    /**
-     * Maximum requests per batch.
-     * Default: 50
-     */
-    maxSize: 50,
-    
-    /**
-     * Batch queries (default: true when batching enabled)
-     */
-    queries: true,
-    
-    /**
-     * Batch mutations (default: false - mutations usually need ordering)
-     */
-    mutations: false,
-  },
+import { Transport } from "effect-trpc"
+import { Duration } from "effect"
+
+// Use batching transport instead of regular http
+const layer = Transport.Batching.layer("/api/trpc", {
+  maxSize: 25,                    // Max requests per batch
+  window: Duration.millis(10),    // Time window to collect
+  queries: true,                  // Batch queries (default)
+  mutations: false,               // Don't batch mutations (default)
 })
 ```
 
-## Implementation Approach
+### Server-side (automatic)
 
-### 1. Request Collection
-
-Use Effect's `Queue` or `Mailbox` to collect requests during the batch window:
+Server.toHttpHandler automatically detects and handles batch requests:
 
 ```typescript
-interface PendingRequest {
-  readonly request: TransportRequest
-  readonly resolve: (response: TransportResponse) => void
-  readonly reject: (error: TransportError) => void
-}
+// Server automatically handles both:
+// - Single requests: { id, tag, payload }
+// - Batch requests: { batch: [{ id, tag, payload }, ...] }
 
-// Collect requests
-const pendingQueue: Queue.Queue<PendingRequest>
-
-// Flush on window expiry or max size
-Effect.gen(function*() {
-  const pending = yield* Queue.takeBetween(pendingQueue, 1, maxSize)
-  const batchRequest = createBatchRequest(pending)
-  const responses = yield* sendBatch(batchRequest)
-  // Route responses back to individual resolvers
-})
+const handler = Server.toHttpHandler(server)
 ```
 
-### 2. Wire Protocol
+## Wire Protocol
 
-Batch request format (JSON):
+### Batch Request
 ```json
 {
   "batch": [
@@ -80,7 +45,7 @@ Batch request format (JSON):
 }
 ```
 
-Batch response format:
+### Batch Response
 ```json
 {
   "batch": [
@@ -90,64 +55,56 @@ Batch response format:
 }
 ```
 
-### 3. Server Support
+## Implementation Details
 
-Server needs a batch endpoint handler:
+### Key Components
+
+1. **Queue** (`Queue.unbounded<PendingRequest>`)
+   - Collects requests as they come in
+   - Each request includes a Deferred for response routing
+
+2. **Stream.groupedWithin(maxSize, window)**
+   - Batches requests by count OR time window
+   - Whichever comes first
+
+3. **Latch** (`Effect.makeLatch`)
+   - Gates batch processing
+   - Can pause/resume (e.g., when offline)
+
+4. **Deferred**
+   - Routes responses back to individual callers
+   - Each request waits on its own Deferred
+
+### Pattern (from react-interview-test-queues-and-streams)
 
 ```typescript
-// Server.toHttpHandler already handles single requests
-// Add Server.toBatchHttpHandler for batch requests
-const batchHandler = Server.toBatchHttpHandler(server)
+// Collect requests
+const queue = yield* Queue.unbounded<PendingRequest>()
 
-// Or auto-detect in toHttpHandler:
-// if body has "batch" array, handle as batch
+// Process in batches
+Stream.fromQueue(queue).pipe(
+  Stream.groupedWithin(maxSize, window),
+  Stream.mapEffect(processBatch),
+  Stream.runDrain,
+  Effect.forkScoped
+)
+
+// Latch for pause/resume
+const latch = yield* Effect.makeLatch(true)
+// ...
+latch.whenOpen  // Wait for latch before processing
 ```
 
-### 4. Stream Exclusion
+## Exclusions
 
-Streams cannot be batched (they have their own lifecycle). The transport should automatically exclude stream requests from batching:
+- **Streams** are never batched (have their own lifecycle)
+- **Mutations** are not batched by default (need ordering guarantees)
 
-```typescript
-if (procedure.isStream) {
-  return sendDirect(request)  // Skip batching
-}
-```
+## Testing
 
-### 5. Error Handling
-
-If batch request fails:
-- Network error: Reject all pending requests
-- Partial failure: Route individual errors to their requests
-
-### 6. Cancellation
-
-Use Effect's interruption:
-- If a request is cancelled, remove from pending queue
-- If batch is in-flight, the cancelled request's response is ignored
-
-## Dependencies
-
-- Effect `Queue` or `Mailbox` for request collection
-- Effect `Schedule` for window timing
-- Schema for batch request/response encoding
-
-## Testing Strategy
-
-1. Unit tests for batching logic
-2. E2E tests with mock server
-3. Timing tests to verify window behavior
-4. Stress tests with many concurrent requests
-
-## Priority
-
-LOW - Batching is an optimization. Focus on core functionality first:
-1. ✅ Stream middleware (security)
-2. 🔄 React hooks refactor
-3. 🔄 Cache integration with Effect Atom
-4. ⏳ Batching (this)
-
-## References
-
-- tRPC batching: https://trpc.io/docs/client/links/httpBatchLink
-- Effect Queue: https://effect.website/docs/data-types/queue
-- Effect Mailbox: https://effect.website/docs/data-types/mailbox
+See `test/batching.test.ts`:
+- BatchRequest/BatchResponse encoding
+- isBatchRequest detection
+- Server batch handling
+- Order preservation
+- Parallel processing

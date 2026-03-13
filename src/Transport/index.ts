@@ -568,3 +568,9 @@ export const loopback = <D extends Router.Definition, R>(
       }
     })
   )
+
+// =============================================================================
+// Batching (re-export)
+// =============================================================================
+
+export * as Batching from "./batching.js"
