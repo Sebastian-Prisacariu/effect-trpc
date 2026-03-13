@@ -540,6 +540,113 @@ export const toHttpHandler = <D extends Router.Definition, R>(
 }
 
 /**
+ * Create an SSE (Server-Sent Events) handler for streaming responses.
+ * 
+ * @since 1.0.0
+ * @category http
+ * @example
+ * ```ts
+ * // Express
+ * app.post('/api/trpc/stream', async (req, res) => {
+ *   res.setHeader('Content-Type', 'text/event-stream')
+ *   res.setHeader('Cache-Control', 'no-cache')
+ *   res.setHeader('Connection', 'keep-alive')
+ *   
+ *   const stream = Server.toSSEHandler(server)
+ *   await Effect.runPromise(
+ *     stream(req.body).pipe(
+ *       Stream.runForEach((chunk) => 
+ *         Effect.sync(() => res.write(`data: ${JSON.stringify(chunk)}\n\n`))
+ *       ),
+ *       Effect.provide(AppLive)
+ *     )
+ *   )
+ *   res.write('data: [DONE]\n\n')
+ *   res.end()
+ * })
+ * ```
+ */
+export const toSSEHandler = <D extends Router.Definition, R>(
+  server: Server<D, R>
+): (body: unknown) => Stream.Stream<Transport.StreamResponse, never, R> => {
+  return (body: unknown) => {
+    const request = new Transport.TransportRequest({
+      id: (body as any).id ?? Transport.generateRequestId(),
+      tag: (body as any).tag ?? "",
+      payload: (body as any).payload,
+      headers: {},
+    })
+    
+    return server.handleStream(request)
+  }
+}
+
+/**
+ * Create a fetch-compatible SSE handler for streaming responses.
+ * Returns a Response with a ReadableStream body.
+ * 
+ * @since 1.0.0
+ * @category http
+ * @example
+ * ```ts
+ * // Next.js App Router
+ * export async function POST(request: Request) {
+ *   return Server.toFetchSSEHandler(server, AppLive)(request)
+ * }
+ * ```
+ */
+export const toFetchSSEHandler = <D extends Router.Definition, R>(
+  server: Server<D, R>,
+  layer: Layer.Layer<R>
+): (request: Request) => Promise<Response> => {
+  const sseHandler = toSSEHandler(server)
+  
+  return async (request: Request): Promise<Response> => {
+    const body = await request.json()
+    const stream = sseHandler(body)
+    
+    // Create a TransformStream to convert our stream to SSE format
+    const { readable, writable } = new TransformStream()
+    const writer = writable.getWriter()
+    const encoder = new TextEncoder()
+    
+    // Run the stream in the background
+    Effect.runPromise(
+      stream.pipe(
+        Stream.runForEach((chunk) =>
+          Effect.promise(async () => {
+            await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+          })
+        ),
+        Effect.tap(() =>
+          Effect.promise(async () => {
+            await writer.write(encoder.encode(`data: [DONE]\n\n`))
+            await writer.close()
+          })
+        ),
+        Effect.catchAll(() =>
+          Effect.promise(async () => {
+            await writer.write(encoder.encode(`data: {"_tag":"Failure","error":"Stream error"}\n\n`))
+            await writer.close()
+          })
+        ),
+        Effect.provide(layer)
+      )
+    ).catch(() => {
+      writer.close().catch(() => {})
+    })
+    
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
+    })
+  }
+}
+
+/**
  * Create a fetch-compatible handler (for Next.js App Router, Cloudflare Workers, etc.)
  * 
  * @since 1.0.0

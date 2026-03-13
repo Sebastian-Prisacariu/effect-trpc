@@ -327,16 +327,136 @@ const sendHttpStream = (
   fetchFn: typeof globalThis.fetch,
   headers?: HttpOptions["headers"]
 ): Stream.Stream<StreamResponse, TransportError> =>
-  // TODO: Implement proper SSE/streaming - for now just convert single response
-  Stream.fromEffect(
-    sendHttp(url, request, fetchFn, headers, undefined).pipe(
-      Effect.map((response): StreamResponse => {
-        if (Schema.is(Success)(response)) {
-          return new StreamChunk({ id: response.id, chunk: response.value })
-        }
-        return response // Failure passes through
+  Stream.unwrap(
+    Effect.gen(function* () {
+      // Resolve headers
+      const resolvedHeaders = typeof headers === "function"
+        ? yield* Effect.promise(() => Promise.resolve(headers()))
+        : headers ?? {}
+      
+      // Make SSE request
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetchFn(`${url}/stream`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "text/event-stream",
+              ...(resolvedHeaders as Record<string, string>),
+            },
+            body: JSON.stringify({
+              id: request.id,
+              tag: request.tag,
+              payload: request.payload,
+            }),
+          }),
+        catch: (cause) =>
+          new TransportError({
+            reason: "Network",
+            message: "Failed to connect to stream",
+            cause,
+          }),
       })
-    )
+      
+      if (!response.ok) {
+        return yield* Effect.fail(
+          new TransportError({
+            reason: "Protocol",
+            message: `HTTP ${response.status}: ${response.statusText}`,
+          })
+        )
+      }
+      
+      if (!response.body) {
+        return yield* Effect.fail(
+          new TransportError({
+            reason: "Protocol",
+            message: "Response body is empty",
+          })
+        )
+      }
+      
+      // Create stream from SSE response
+      return Stream.async<StreamResponse, TransportError>((emit) => {
+        const reader = response.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ""
+        
+        const processLine = (line: string) => {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6)
+            if (data === "[DONE]") {
+              emit.end()
+              return
+            }
+            
+            try {
+              const parsed = JSON.parse(data)
+              
+              // Handle different message types
+              if (parsed._tag === "StreamChunk") {
+                emit.single(new StreamChunk({ 
+                  id: parsed.id, 
+                  chunk: parsed.chunk 
+                }))
+              } else if (parsed._tag === "StreamEnd") {
+                emit.end()
+              } else if (parsed._tag === "Failure") {
+                emit.single(new Failure({
+                  id: parsed.id,
+                  error: parsed.error,
+                }))
+                emit.end()
+              }
+            } catch {
+              // Skip invalid JSON lines
+            }
+          }
+        }
+        
+        const read = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              
+              if (done) {
+                // Process remaining buffer
+                if (buffer.trim()) {
+                  processLine(buffer.trim())
+                }
+                emit.end()
+                break
+              }
+              
+              buffer += decoder.decode(value, { stream: true })
+              
+              // Process complete lines
+              const lines = buffer.split("\n")
+              buffer = lines.pop() ?? ""
+              
+              for (const line of lines) {
+                if (line.trim()) {
+                  processLine(line.trim())
+                }
+              }
+            }
+          } catch (error) {
+            emit.fail(new TransportError({
+              reason: "Network",
+              message: "Stream read error",
+              cause: error,
+            }))
+          }
+        }
+        
+        read()
+        
+        // Return cleanup function
+        return Effect.sync(() => {
+          reader.cancel().catch(() => {})
+        })
+      })
+    })
   )
 
 // =============================================================================
