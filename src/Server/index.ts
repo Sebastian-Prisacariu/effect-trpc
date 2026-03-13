@@ -257,11 +257,10 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    // TODO: Add meta support to procedures
     const middlewareRequest = toMiddlewareRequest(
       request, 
       getProcedureType(procedure),
-      {} // procedure.meta when implemented
+      procedure.meta ?? {}
     )
     
     return Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
@@ -345,11 +344,10 @@ export const make = <D extends Router.Definition, R = never>(
       }))
     }
     
-    // TODO: Add meta support to procedures
     const middlewareRequest = toMiddlewareRequest(
       request,
       "stream",
-      {} // procedure.meta when implemented
+      procedure.meta ?? {}
     )
     
     const makeStream = (payload: unknown): Stream.Stream<Transport.StreamResponse, never, R> => {

@@ -89,6 +89,12 @@ export interface ProcedureBase<
   readonly middlewares: ReadonlyArray<unknown>
   
   /**
+   * Custom metadata for this procedure.
+   * Accessible in middleware via request.meta.
+   */
+  readonly meta: Record<string, unknown>
+  
+  /**
    * Add middleware to this procedure
    * 
    * @example
@@ -98,6 +104,17 @@ export interface ProcedureBase<
    * ```
    */
   readonly middleware: <M>(middleware: M) => this
+  
+  /**
+   * Set metadata on this procedure
+   * 
+   * @example
+   * ```ts
+   * const adminQuery = Procedure.query({ success: Data })
+   *   .meta({ role: "admin", rateLimit: 100 })
+   * ```
+   */
+  readonly setMeta: (meta: Record<string, unknown>) => this
 }
 
 /**
@@ -194,6 +211,7 @@ export type Any = Query<any, any, any> | Mutation<any, any, any, any> | Stream<a
 const ProcedureProto = {
   [ProcedureTypeId]: ProcedureTypeId,
   middlewares: [] as ReadonlyArray<unknown>,
+  meta: {} as Record<string, unknown>,
   pipe() {
     return pipeArguments(this, arguments)
   },
@@ -201,6 +219,12 @@ const ProcedureProto = {
     const clone = Object.create(Object.getPrototypeOf(this))
     Object.assign(clone, this)
     clone.middlewares = [...this.middlewares, m]
+    return clone
+  },
+  setMeta(this: Any, meta: Record<string, unknown>): Any {
+    const clone = Object.create(Object.getPrototypeOf(this))
+    Object.assign(clone, this)
+    clone.meta = { ...this.meta, ...meta }
     return clone
   },
 }
