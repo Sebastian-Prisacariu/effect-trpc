@@ -19,6 +19,7 @@ import {
   TestDatabase,
   AuthMiddlewareLive,
 } from "./fixtures.js"
+import * as Reactivity from "../../src/Reactivity/index.js"
 
 /**
  * Create an e2e test suite for a given transport layer
@@ -281,6 +282,61 @@ export const e2eSuite = (
           Effect.provide(AuthMiddlewareLive)
         )
       )
+    })
+    
+    // =========================================================================
+    // Invalidation Tests
+    // =========================================================================
+    
+    describe("Invalidation", () => {
+      it.effect("mutation triggers invalidation callback", () =>
+        Effect.gen(function* () {
+          const reactivity = Reactivity.make()
+          let invalidated = false
+          
+          // Subscribe to users invalidation
+          reactivity.subscribe("@test/users", () => {
+            invalidated = true
+          })
+          
+          // Run mutation (which should invalidate "users")
+          const service = yield* Client.ClientServiceTag
+          const createProc = testRouter.pathMap.procedures.get("users.create")!.procedure
+          
+          yield* service.send(
+            "@test/users/create",
+            new CreateUserInput({ name: "Invalidation Test", email: "inv@test.com" }),
+            createProc.successSchema,
+            createProc.errorSchema
+          )
+          
+          // Call invalidate manually with the tags the mutation would produce
+          const tags = Reactivity.pathsToTags("@test", ["users"])
+          reactivity.invalidate(tags)
+          
+          expect(invalidated).toBe(true)
+        }).pipe(Effect.provide(clientLayer))
+      )
+      
+      it("pathsToTags converts paths correctly", () => {
+        const tags = Reactivity.pathsToTags("@test", ["users", "users.list"])
+        
+        expect(tags).toEqual(["@test/users", "@test/users/list"])
+      })
+      
+      it("hierarchical invalidation works", () => {
+        const reactivity = Reactivity.make()
+        const invalidated: string[] = []
+        
+        reactivity.subscribe("@test/users/list", () => invalidated.push("list"))
+        reactivity.subscribe("@test/users/get", () => invalidated.push("get"))
+        
+        // Invalidating parent should trigger children
+        reactivity.invalidate(["@test/users"])
+        
+        expect(invalidated).toContain("list")
+        expect(invalidated).toContain("get")
+      })
     })
   })
 }

@@ -41,6 +41,7 @@ import type * as Scope from "effect/Scope"
 import * as Router from "../Router/index.js"
 import * as Procedure from "../Procedure/index.js"
 import * as Transport from "../Transport/index.js"
+import * as Reactivity from "../Reactivity/index.js"
 
 // =============================================================================
 // Type IDs
@@ -183,8 +184,12 @@ export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.T
         },
         
         invalidate: (tags) =>
-          // TODO: integrate with Reactivity
-          Effect.void,
+          Effect.gen(function* () {
+            const reactivity = yield* Effect.serviceOption(Reactivity.Reactivity)
+            if (reactivity._tag === "Some") {
+              reactivity.value.invalidate(tags)
+            }
+          }),
       }
     })
   )
@@ -561,8 +566,9 @@ export const make = <D extends Router.Definition>(
     invalidate: (paths: readonly string[]) => {
       // Get tags from paths
       const tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
-      // TODO: integrate with Reactivity
-      console.warn("invalidate() not yet implemented:", tags)
+      // Note: This only works if a ReactivityService is available globally
+      // For proper usage, use the BoundClient's invalidate method
+      console.warn("invalidate() on unbound client requires ReactivityService in scope. Use api.provide(layer) first.")
     },
     
     provide: (layer: Layer.Layer<Transport.Transport>): BoundClient<Router.Router<D>> => {
@@ -636,11 +642,33 @@ const createProcedureClient = <P extends Procedure.Any>(
   }
   
   if (Procedure.isMutation(procedure)) {
+    const mutation = procedure as Procedure.Mutation<any, any, any, any>
+    const invalidatePaths = mutation.invalidates
+    
+    // Extract root tag (e.g., "@api" from "@api/users/create")
+    const rootTag = tag.split("/")[0]
+    
+    // Create mutation effect that also invalidates after success
+    const createMutationEffect = (payload: unknown) =>
+      Effect.gen(function* () {
+        const service = yield* ClientServiceTag
+        const result = yield* service.send(tag, payload, successSchema, errorSchema)
+        
+        // Invalidate on success
+        if (invalidatePaths.length > 0) {
+          // Convert paths to tags (e.g., "users" → "@api/users", "users.list" → "@api/users/list")
+          const tags = Reactivity.pathsToTags(rootTag, invalidatePaths)
+          yield* service.invalidate(tags)
+        }
+        
+        return result
+      })
+    
     return {
       useMutation: createUseMutation(tag, procedure),
-      run: (payload: unknown) => createRunEffect(payload),
+      run: (payload: unknown) => createMutationEffect(payload),
       runPromise: runtime
-        ? (payload: unknown) => runtime.runPromise(createRunEffect(payload))
+        ? (payload: unknown) => runtime.runPromise(createMutationEffect(payload))
         : () => { throw new Error("runPromise requires a bound runtime. Use api.provide(layer) first.") },
     } as ProcedureClient<P>
   }
