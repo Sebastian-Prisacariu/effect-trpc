@@ -446,6 +446,7 @@ export interface MutationOptions<Success, Error> {
  * @category hooks
  */
 export interface MutationResult<Payload, Success, Error> {
+  readonly result: import("@effect-atom/atom/Result").Result<Success, Error>
   readonly mutate: (payload: Payload) => void
   readonly mutateAsync: (payload: Payload) => Promise<Success>
   readonly isLoading: boolean

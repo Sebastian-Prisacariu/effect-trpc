@@ -334,6 +334,7 @@ export const createUseMutation = <
     const error = isError ? (result as any).error : undefined
     
     return {
+      result,
       mutate,
       mutateAsync,
       isLoading,
