@@ -11,6 +11,7 @@
 import * as React from "react"
 import { useContext, useMemo, useCallback, useState, useEffect, useRef } from "react"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
 import * as Stream from "effect/Stream"
 import * as Scope from "effect/Scope"
@@ -51,6 +52,7 @@ export interface ProviderProps {
  */
 interface TrpcContextValue {
   readonly atomRuntime: Atom.AtomRuntime<ClientServiceTag | Reactivity.Reactivity>
+  readonly layer: Layer.Layer<ClientServiceTag | Reactivity.Reactivity>
   readonly rootTag: string
 }
 
@@ -94,6 +96,7 @@ export const createProvider = <D extends Router.Definition>(
       
       return {
         atomRuntime,
+        layer: fullLayer,
         rootTag: router.tag,
       }
     }, [layer])
@@ -298,41 +301,44 @@ export const createUseMutation = <Payload, Success, Error>(
     // Get the refresh/call function from the mutation atom
     const registry = useContext(RegistryContext)
     
-    const mutateAsync = useCallback(async (payload: Payload): Promise<Success> => {
+    const mutateAsync = useCallback((payload: Payload): Promise<Success> => {
       setResult(Result.initial(true)) // waiting = true
       
-      try {
-        // Call the mutation fn atom
-        registry.set(mutationFn, payload)
+      // Build the mutation effect
+      const mutationEffect = Effect.gen(function* () {
+        const service = yield* ClientServiceTag
+        const data = yield* service.send(
+          tag,
+          payload,
+          procedure.successSchema,
+          procedure.errorSchema,
+          "mutation"
+        )
         
-        // Wait for result - this is a simplification
-        // In practice, we'd use the atom's value
-        const resultAtom = mutationFn
-        const mutationResult = registry.get(resultAtom)
-        
-        if (Result.isSuccess(mutationResult)) {
-          const data = mutationResult.value as Success
-          setResult(Result.success(data))
-          onSuccess?.(data)
-          onSettled?.()
-          return data
-        } else if (Result.isFailure(mutationResult)) {
-          const error = mutationResult.cause as unknown as Error
-          setResult(Result.fail(error))
-          onError?.(error)
-          onSettled?.()
-          throw error
+        // Invalidate on success
+        if (invalidatePaths.length > 0) {
+          yield* service.invalidate(invalidatePaths)
         }
         
-        throw new Error("Mutation did not complete")
-      } catch (err) {
-        const error = err as Error
-        setResult(Result.fail(error))
-        onError?.(error)
-        onSettled?.()
-        throw error
-      }
-    }, [registry, mutationFn, onSuccess, onError, onSettled])
+        return data as Success
+      })
+      
+      // Run the effect with proper handling
+      return Effect.runPromise(
+        mutationEffect.pipe(
+          Effect.tap((data) => Effect.sync(() => {
+            setResult(Result.success(data))
+            onSuccess?.(data)
+          })),
+          Effect.tapError((error) => Effect.sync(() => {
+            setResult(Result.fail(error as Error))
+            onError?.(error as Error)
+          })),
+          Effect.ensuring(Effect.sync(() => onSettled?.())),
+          Effect.provide(ctx.layer)
+        )
+      )
+    }, [ctx.layer, tag, procedure.successSchema, procedure.errorSchema, invalidatePaths, onSuccess, onError, onSettled])
     
     const mutate = useCallback((payload: Payload) => {
       mutateAsync(payload).catch(() => {
@@ -401,22 +407,7 @@ export const createUseStream = <Payload, Success, Error>(
     const [data, setData] = useState<readonly Success[]>([])
     const [isConnected, setIsConnected] = useState(false)
     const [error, setError] = useState<Error | undefined>()
-    const abortRef = useRef<(() => void) | null>(null)
-    
-    // Create stream atom using runtime.pull for streams
-    const streamAtom = useMemo(() => {
-      const streamEffect = Effect.gen(function* () {
-        const service = yield* ClientServiceTag
-        return service.sendStream(
-          tag,
-          payload,
-          procedure.successSchema,
-          procedure.errorSchema
-        )
-      })
-      
-      return ctx.atomRuntime.atom(Stream.unwrap(streamEffect))
-    }, [ctx.atomRuntime, tag, payload])
+    const fiberRef = useRef<Fiber.RuntimeFiber<void, unknown> | null>(null)
     
     // Subscribe to stream updates
     useEffect(() => {
@@ -426,24 +417,59 @@ export const createUseStream = <Payload, Success, Error>(
       setData([])
       setError(undefined)
       
-      // Use the atom to get stream values
-      // This is simplified - proper implementation would use useAtomValue
+      // Build the stream effect
+      const streamEffect = Effect.gen(function* () {
+        const service = yield* ClientServiceTag
+        const stream = service.sendStream(
+          tag,
+          payload,
+          procedure.successSchema,
+          procedure.errorSchema
+        )
+        
+        // Run the stream, collecting values
+        yield* stream.pipe(
+          Stream.tap((value) => Effect.sync(() => {
+            setData((prev) => [...prev, value as Success])
+          })),
+          Stream.runDrain
+        )
+      }).pipe(
+        Effect.tapError((err) => Effect.sync(() => {
+          setError(err as Error)
+          setIsConnected(false)
+        })),
+        Effect.ensuring(Effect.sync(() => setIsConnected(false))),
+        Effect.provide(ctx.layer)
+      )
+      
+      // Fork the stream as a fiber so we can interrupt it
+      const fiber = Effect.runFork(streamEffect)
+      fiberRef.current = fiber
       
       return () => {
+        // Interrupt the fiber on cleanup
+        if (fiberRef.current) {
+          Effect.runPromise(Fiber.interrupt(fiberRef.current)).catch(() => {})
+        }
         setIsConnected(false)
-        abortRef.current?.()
       }
-    }, [enabled, streamAtom])
+    }, [enabled, ctx.layer, tag, payload, procedure.successSchema, procedure.errorSchema])
     
     const stop = useCallback(() => {
-      abortRef.current?.()
+      if (fiberRef.current) {
+        Effect.runPromise(Fiber.interrupt(fiberRef.current)).catch(() => {})
+      }
       setIsConnected(false)
     }, [])
     
     const restart = useCallback(() => {
+      // Stop existing stream
+      stop()
+      // Reset state - useEffect will restart
       setData([])
       setError(undefined)
-    }, [])
+    }, [stop])
     
     return {
       data,
