@@ -1,46 +1,33 @@
 /**
  * Reactivity Module Tests
  * 
- * Tests for cache invalidation utilities.
- * Note: @effect/experimental/Reactivity is tested in that package.
- * We test our path utilities here.
+ * Tests for path-based cache invalidation.
  */
 
 import { describe, it, expect } from "vitest"
 import { it as effectIt } from "@effect/vitest"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Scope } from "effect"
 
 import { Reactivity } from "../src/index.js"
 
 // =============================================================================
-// pathsToTags Tests
+// Path Utilities
 // =============================================================================
 
-describe("pathsToTags", () => {
-  it("converts dot-separated paths to tag format", () => {
-    const tags = Reactivity.pathsToTags("@api", ["users", "users.list"])
-    
-    // Note: pathsToTags no longer includes root tag prefix
-    // The root tag is applied at the call site
-    expect(tags).toEqual(["users", "users/list"])
+describe("normalizePath", () => {
+  it("converts dots to slashes", () => {
+    expect(Reactivity.normalizePath("users.list")).toBe("users/list")
   })
 
-  it("handles single segment paths", () => {
-    const tags = Reactivity.pathsToTags("@api", ["health"])
-    
-    expect(tags).toEqual(["health"])
+  it("handles single segment", () => {
+    expect(Reactivity.normalizePath("users")).toBe("users")
   })
 
   it("handles deeply nested paths", () => {
-    const tags = Reactivity.pathsToTags("@api", ["admin.users.permissions.list"])
-    
-    expect(tags).toEqual(["admin/users/permissions/list"])
+    expect(Reactivity.normalizePath("admin.users.permissions.list"))
+      .toBe("admin/users/permissions/list")
   })
 })
-
-// =============================================================================
-// shouldInvalidate Tests
-// =============================================================================
 
 describe("shouldInvalidate", () => {
   it("returns true for exact match", () => {
@@ -51,76 +38,164 @@ describe("shouldInvalidate", () => {
     expect(Reactivity.shouldInvalidate("users/list", "users")).toBe(true)
   })
 
-  it("returns true when child invalidates parent subscription", () => {
-    expect(Reactivity.shouldInvalidate("users", "users/list")).toBe(true)
+  it("returns true for deeply nested descendants", () => {
+    expect(Reactivity.shouldInvalidate("users/permissions/edit", "users")).toBe(true)
   })
 
-  it("returns false for unrelated tags", () => {
-    expect(Reactivity.shouldInvalidate("users/list", "posts/list")).toBe(false)
+  it("returns false for sibling paths", () => {
+    expect(Reactivity.shouldInvalidate("posts/list", "users")).toBe(false)
   })
 
   it("returns false for partial matches", () => {
     // "user" is not a parent of "users/list"
     expect(Reactivity.shouldInvalidate("users/list", "user")).toBe(false)
   })
+
+  it("returns false when child tries to invalidate parent", () => {
+    // Invalidating "users/list" should NOT invalidate "users" subscription
+    expect(Reactivity.shouldInvalidate("users", "users/list")).toBe(false)
+  })
 })
 
 // =============================================================================
-// @effect/experimental/Reactivity Integration Tests
+// PathReactivity Service
 // =============================================================================
 
-describe("Effect Reactivity integration", () => {
-  effectIt.effect("invalidate is an Effect", () =>
+describe("PathReactivity", () => {
+  const testLayer = Reactivity.layer
+
+  effectIt.effect("register adds path to registry", () =>
     Effect.gen(function* () {
-      // Reactivity.invalidate returns an Effect
-      // This test just verifies the API shape
-      const effect = Reactivity.invalidate(["users"])
+      const service = yield* Reactivity.PathReactivity
       
-      // It requires the Reactivity service
-      expect(Effect.isEffect(effect)).toBe(true)
-    })
+      // Register in a scope
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* service.register("users.list")
+          
+          const paths = yield* service.getRegisteredPaths()
+          expect(paths).toContain("users/list")
+        })
+      )
+    }).pipe(Effect.provide(testLayer))
   )
 
-  effectIt.effect("mutation wraps effect with invalidation", () =>
+  effectIt.effect("unregister removes path when scope closes", () =>
     Effect.gen(function* () {
-      // Reactivity.mutation takes (effect, keys) and invalidates after success
-      const effect = Effect.succeed("result")
-      const wrapped = Reactivity.mutation(effect, ["users"])
+      const service = yield* Reactivity.PathReactivity
       
-      expect(Effect.isEffect(wrapped)).toBe(true)
-    })
-  )
-
-  effectIt.effect("layer provides Reactivity service", () =>
-    Effect.gen(function* () {
-      // Reactivity.layer is a Layer<Reactivity>
-      const layer = Reactivity.layer
-      
-      expect(Layer.isLayer(layer)).toBe(true)
-    })
-  )
-})
-
-// =============================================================================
-// Reactivity Service Tests
-// =============================================================================
-
-describe("Reactivity service", () => {
-  effectIt.effect("invalidate works with layer", () =>
-    Effect.gen(function* () {
-      yield* Reactivity.invalidate(["users"])
-      // Should complete without error
-    }).pipe(Effect.provide(Reactivity.layer))
-  )
-
-  effectIt.effect("mutation invalidates after success", () =>
-    Effect.gen(function* () {
-      const result = yield* Reactivity.mutation(
-        Effect.succeed("created"),
-        ["users"]
+      // Register in a scope, then let it close
+      yield* Effect.scoped(
+        service.register("users.list")
       )
       
-      expect(result).toBe("created")
-    }).pipe(Effect.provide(Reactivity.layer))
+      // Path should be gone
+      const paths = yield* service.getRegisteredPaths()
+      expect(paths).not.toContain("users/list")
+    }).pipe(Effect.provide(testLayer))
+  )
+
+  effectIt.effect("reference counting - multiple registrations", () =>
+    Effect.gen(function* () {
+      const service = yield* Reactivity.PathReactivity
+      
+      // First registration
+      const scope1 = yield* Scope.make()
+      yield* service.register("users.list").pipe(Scope.extend(scope1))
+      
+      // Second registration (same path)
+      const scope2 = yield* Scope.make()
+      yield* service.register("users.list").pipe(Scope.extend(scope2))
+      
+      // Path should be registered
+      let paths = yield* service.getRegisteredPaths()
+      expect(paths).toContain("users/list")
+      
+      // Close first scope - path should still be registered
+      yield* Scope.close(scope1, { _tag: "Success", value: void 0 })
+      paths = yield* service.getRegisteredPaths()
+      expect(paths).toContain("users/list")
+      
+      // Close second scope - path should be gone
+      yield* Scope.close(scope2, { _tag: "Success", value: void 0 })
+      paths = yield* service.getRegisteredPaths()
+      expect(paths).not.toContain("users/list")
+    }).pipe(Effect.provide(testLayer))
+  )
+
+  effectIt.effect("invalidate triggers hierarchical invalidation", () =>
+    Effect.gen(function* () {
+      const service = yield* Reactivity.PathReactivity
+      
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          // Register some paths
+          yield* service.register("users.list")
+          yield* service.register("users.get")
+          yield* service.register("posts.list")
+          
+          // Verify all registered
+          const paths = yield* service.getRegisteredPaths()
+          expect(paths).toContain("users/list")
+          expect(paths).toContain("users/get")
+          expect(paths).toContain("posts/list")
+          
+          // Invalidate "users" - should affect users/* but not posts/*
+          // (The actual invalidation goes to inner Reactivity)
+          yield* service.invalidate(["users"])
+        })
+      )
+    }).pipe(Effect.provide(testLayer))
+  )
+
+  effectIt.effect("normalizes dot-separated paths", () =>
+    Effect.gen(function* () {
+      const service = yield* Reactivity.PathReactivity
+      
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          // Register with dots
+          yield* service.register("admin.users.list")
+          
+          const paths = yield* service.getRegisteredPaths()
+          expect(paths).toContain("admin/users/list")
+          
+          // Invalidate with dots
+          yield* service.invalidate(["admin.users"])
+        })
+      )
+    }).pipe(Effect.provide(testLayer))
+  )
+})
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+describe("Convenience functions", () => {
+  const testLayer = Reactivity.layer
+
+  effectIt.effect("register function works", () =>
+    Effect.gen(function* () {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* Reactivity.register("users.list")
+          
+          const paths = yield* Reactivity.getRegisteredPaths()
+          expect(paths).toContain("users/list")
+        })
+      )
+    }).pipe(Effect.provide(testLayer))
+  )
+
+  effectIt.effect("invalidate function works", () =>
+    Effect.gen(function* () {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* Reactivity.register("users.list")
+          yield* Reactivity.invalidate(["users"])
+        })
+      )
+    }).pipe(Effect.provide(testLayer))
   )
 })

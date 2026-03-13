@@ -360,26 +360,25 @@ export const e2eSuite = (
         }).pipe(Effect.provide(clientLayer))
       )
       
-      it("pathsToTags converts paths correctly", () => {
-        // pathsToTags now returns just the path without root tag prefix
-        // The root tag is applied at the call site when needed
-        const tags = Reactivity.pathsToTags("@test", ["users", "users.list"])
-        
-        expect(tags).toEqual(["users", "users/list"])
+      it("normalizePath converts dots to slashes", () => {
+        expect(Reactivity.normalizePath("users")).toBe("users")
+        expect(Reactivity.normalizePath("users.list")).toBe("users/list")
+        expect(Reactivity.normalizePath("admin.users.list")).toBe("admin/users/list")
       })
       
       it("shouldInvalidate detects hierarchical matches", () => {
-        // Parent invalidates children
+        // Parent invalidates children (downward)
         expect(Reactivity.shouldInvalidate("users/list", "users")).toBe(true)
         expect(Reactivity.shouldInvalidate("users/get", "users")).toBe(true)
+        expect(Reactivity.shouldInvalidate("users/permissions/edit", "users")).toBe(true)
         
-        // Child invalidates parent listener
-        expect(Reactivity.shouldInvalidate("users", "users/list")).toBe(true)
+        // Child does NOT invalidate parent (no upward propagation)
+        expect(Reactivity.shouldInvalidate("users", "users/list")).toBe(false)
         
         // Exact match
         expect(Reactivity.shouldInvalidate("users/list", "users/list")).toBe(true)
         
-        // No match
+        // No match (different trees)
         expect(Reactivity.shouldInvalidate("posts/list", "users")).toBe(false)
       })
     })

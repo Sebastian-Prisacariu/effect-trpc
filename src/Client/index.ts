@@ -183,11 +183,11 @@ export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.T
           )
         },
         
-        invalidate: (tags) =>
+        invalidate: (paths) =>
           Effect.gen(function* () {
-            const reactivity = yield* Effect.serviceOption(Reactivity.Reactivity)
-            if (reactivity._tag === "Some") {
-              reactivity.value.invalidate(tags)
+            const pathReactivity = yield* Effect.serviceOption(Reactivity.PathReactivity)
+            if (pathReactivity._tag === "Some") {
+              yield* pathReactivity.value.invalidate(paths)
             }
           }),
       }
@@ -656,10 +656,9 @@ const createProcedureClient = <P extends Procedure.Any>(
         const result = yield* service.send(tag, payload, successSchema, errorSchema)
         
         // Invalidate on success
+        // PathReactivity handles normalization internally ("users.list" → "users/list")
         if (invalidatePaths.length > 0) {
-          // Convert paths to tags (e.g., "users" → "@api/users", "users.list" → "@api/users/list")
-          const tags = Reactivity.pathsToTags(rootTag, invalidatePaths)
-          yield* service.invalidate(tags)
+          yield* service.invalidate(invalidatePaths)
         }
         
         return result
