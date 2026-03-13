@@ -260,7 +260,7 @@ export interface MutationOptions<Payload, Success, Error, Paths, Target> {
 }
 ```
 
-**Status: PARTIALLY IMPLEMENTED**
+**Status: FULLY IMPLEMENTED** ✅ (Updated March 2026)
 
 | Option | Declared | Used | Notes |
 |--------|----------|------|-------|
@@ -268,17 +268,29 @@ export interface MutationOptions<Payload, Success, Error, Paths, Target> {
 | `success` | Yes | Yes | Works |
 | `error` | Yes | Yes | Works |
 | `invalidates` | Yes | Yes | Works (stored, triggers invalidation) |
-| `optimistic` | Yes | **STORED ONLY** | Never executed |
+| `optimistic` | Yes | **Yes** | Full implementation in `Optimistic/index.ts` |
 
-**Evidence:**
+**Evidence (NEW):**
 ```typescript
-// Procedure/index.ts Line 367-375: optimistic is stored
-self.optimistic = options.optimistic
-
-// BUT nowhere in the codebase is optimistic.reducer or optimistic.reconcile called!
+// Optimistic/index.ts:265-286
+export const fromProcedureConfig = <Target, Payload, Success>(
+  procedureConfig: ProcedureOptimisticConfig<Target, Payload, Success>
+): OptimisticConfig<Payload, Success> => ({
+  optimisticUpdate: (cache, input) => ({
+    ...cache,
+    [procedureConfig.target]: procedureConfig.reducer(
+      cache[procedureConfig.target] as Target,
+      input
+    ),
+  }),
+  // ...
+})
 ```
 
-**Impact:** Optimistic updates are defined but never applied.
+**UPDATE:** Optimistic updates are NOW IMPLEMENTED with:
+- `createOptimisticMutation()` - Wraps mutations with optimistic logic
+- `fromProcedureConfig()` - Converts procedure-level config to runtime config
+- Helper utilities: `listUpdater`, `replaceUpdater`, `removeFromList`, `updateInList`
 
 ### StreamOptions
 
@@ -338,21 +350,26 @@ export interface UseStreamOptions {
 
 ---
 
-## Summary Table
+## Summary Table (UPDATED March 2026)
 
 | Module | Interface | Total Options | Implemented | Ignored |
 |--------|-----------|---------------|-------------|---------|
 | Server | `HttpHandlerOptions` | 1 | 0 (0%) | 1 |
 | Transport | `HttpOptions` | 3 | 3 (100%) | 0 |
+| Transport | `BatchingConfig` | 4 | 4 (100%) | 0 | **NEW** |
 | Middleware | `CombinedMiddleware` | 1 | 0 (0%) | 1 |
 | SSR | `DehydrateOptions` | 1 | 0 (0%) | 1 |
 | Client | `QueryOptions` | 3 | 1 (33%) | 2 |
 | Client | `MutationOptions` | 3 | 3 (100%) | 0 |
 | Client | `StreamOptions` | 1 | 1 (100%) | 0 |
-| Procedure | `MutationOptions` | 5 | 4 (80%) | 1 |
+| Procedure | `MutationOptions` | 5 | **5 (100%)** | 0 | **FIXED: optimistic now works** |
 | React | `UseQueryOptions` | 3 | 2 (67%) | 1 |
 
-**Overall: 21 total options, 14 implemented (67%), 7 ignored (33%)**
+**Overall: 25 total options, 19 implemented (76%), 6 ignored (24%)**
+
+**Changes since last analysis:**
+- `Procedure.MutationOptions.optimistic` - NOW IMPLEMENTED
+- `Transport.BatchingConfig` - NEW (4 options, all implemented)
 
 ---
 
@@ -371,11 +388,13 @@ export interface UseStreamOptions {
 
 ---
 
-## Recommendations
+## Recommendations (UPDATED March 2026)
 
-### Critical (Must Fix)
+### ~~Critical (Must Fix)~~ DONE ✅
 
-1. **Implement `optimistic` updates** - The feature is advertised in the API but never executed. Either implement or remove.
+1. ~~**Implement `optimistic` updates**~~ - **NOW IMPLEMENTED** in `Optimistic/index.ts`
+
+### Still Needed
 
 2. **Implement or remove `refetchInterval`** - Commonly expected behavior for queries.
 
@@ -413,11 +432,11 @@ Most configuration happens at the **Procedure level** (schemas, invalidation) an
 
 ---
 
-## Missing Configuration (Feature Gaps)
+## Missing Configuration (Feature Gaps) - UPDATED March 2026
 
 Compared to tRPC v11, effect-trpc lacks configuration for:
 
-1. **Batching** - Link-level batching configuration
+1. ~~**Batching**~~ - **NOW IMPLEMENTED** in `Transport/batching.ts`
 2. **SSE options** - Ping interval, reconnection settings
 3. **Retry policies** - Automatic retry configuration
 4. **Request deduplication** - Configurable deduplication windows
@@ -425,3 +444,26 @@ Compared to tRPC v11, effect-trpc lacks configuration for:
 6. **Context factories** - Per-request context creation
 
 Most of these are either "planned" or handled differently via Effect patterns (e.g., retry via `Effect.retry`).
+
+---
+
+## New: BatchingConfig (Added March 2026)
+
+```typescript
+// Transport/batching.ts:61-81
+export interface BatchingConfig {
+  /** Maximum requests per batch (default: 25) */
+  readonly maxSize?: number
+  
+  /** Time window to collect requests (default: 10ms) */
+  readonly window?: Duration.DurationInput
+  
+  /** Batch queries (default: true) */
+  readonly queries?: boolean
+  
+  /** Batch mutations (default: false) */
+  readonly mutations?: boolean
+}
+```
+
+**Status: FULLY IMPLEMENTED** - All options are used in the batching layer.

@@ -1,24 +1,24 @@
 # Transport Layer Deep Analysis
 
-**Module:** `/src/Transport/index.ts`
-**Date:** 2024
+**Module:** `/src/Transport/index.ts`, `/src/Transport/batching.ts`
+**Date:** 2024 (Updated March 2026)
 **Scope:** HTTP transport, batching, SSE/streaming
 
 ---
 
 ## Executive Summary
 
-The Transport module provides a clean abstraction for RPC request/response handling, but **SSE/streaming is stubbed** and **batching is not implemented**. The core HTTP transport works for simple request/response patterns.
+**UPDATE (March 2026):** This analysis has been UPDATED. SSE streaming and batching are NOW FULLY IMPLEMENTED.
 
-| Feature | Status | Severity |
-|---------|--------|----------|
-| HTTP Transport (basic) | Working | - |
-| Timeout handling | Working | - |
-| Custom headers | Working | - |
-| Mock transport | Working | - |
-| Loopback transport | Working | - |
-| **SSE/Streaming** | **STUBBED** | **HIGH** |
-| **Batching** | **NOT IMPLEMENTED** | **MEDIUM** |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| HTTP Transport (basic) | **Working** | - |
+| Timeout handling | **Working** | - |
+| Custom headers | **Working** | - |
+| Mock transport | **Working** | - |
+| Loopback transport | **Working** | - |
+| SSE/Streaming | **NOW IMPLEMENTED** | Full EventSource-like parsing |
+| Batching | **NOW IMPLEMENTED** | 392-line batching.ts module |
 
 ---
 
@@ -83,118 +83,129 @@ const response = yield* Effect.tryPromise({
 
 ---
 
-## 2. SSE/Streaming Implementation - STUBBED
+## 2. SSE/Streaming Implementation - NOW IMPLEMENTED ✅
 
-### Severity: HIGH
+**UPDATE (March 2026):** Full SSE implementation exists at `Transport/index.ts:335-471`
 
-The streaming implementation is explicitly marked as TODO and does not implement actual SSE:
+### Implementation Details
 
 ```typescript
-// src/Transport/index.ts:324-340
-const sendHttpStream = (
-  url: string,
-  request: TransportRequest,
-  fetchFn: typeof globalThis.fetch,
-  headers?: HttpOptions["headers"]
-): Stream.Stream<StreamResponse, TransportError> =>
-  // TODO: Implement proper SSE/streaming - for now just convert single response
-  Stream.fromEffect(
-    sendHttp(url, request, fetchFn, headers, undefined).pipe(
-      Effect.map((response): StreamResponse => {
-        if (Schema.is(Success)(response)) {
-          return new StreamChunk({ id: response.id, chunk: response.value })
+// src/Transport/index.ts:391-426
+return Stream.async<StreamResponse, TransportError>((emit) => {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  
+  const processLine = (line: string) => {
+    if (line.startsWith("data: ")) {
+      const data = line.slice(6)
+      if (data === "[DONE]") {
+        emit.end()
+        return
+      }
+      
+      try {
+        const parsed = JSON.parse(data)
+        
+        // Handle different message types
+        if (parsed._tag === "StreamChunk") {
+          emit.single(new StreamChunk({ 
+            id: parsed.id, 
+            chunk: parsed.chunk 
+          }))
+        } else if (parsed._tag === "StreamEnd") {
+          emit.end()
+        } else if (parsed._tag === "Failure") {
+          emit.single(new Failure({
+            id: parsed.id,
+            error: parsed.error,
+          }))
+          emit.end()
         }
-        return response // Failure passes through
-      })
-    )
-  )
-```
-
-### What's Missing
-
-1. **No EventSource/SSE client** - The implementation just wraps a single HTTP request
-2. **No streaming response parsing** - No `ReadableStream` handling
-3. **No reconnection logic** - SSE typically auto-reconnects
-4. **No server-side SSE endpoint** - `Server.toHttpHandler` doesn't handle streams
-
-### Impact
-
-- `Procedure.stream()` works **only via loopback** transport (in-memory)
-- Real HTTP streaming is **non-functional**
-- React `useStream` hook will not work with HTTP transport
-
-### Evidence of Issue
-
-The e2e tests only pass because they use loopback transport:
-
-```typescript
-// test/e2e/suite.ts:167-177 - Uses loopback, not HTTP
-yield* service.sendStream(
-  "@test/users/watch",
-  undefined,
-  proc.successSchema,
-  proc.errorSchema
-).pipe(
-  Stream.take(1),
-  Stream.runForEach((user) => 
-    Effect.sync(() => { chunks.push(user as User) })
-  )
-)
-```
-
----
-
-## 3. Batching - NOT IMPLEMENTED
-
-### Severity: MEDIUM
-
-Batching was **explicitly removed** from the API because it had no implementation:
-
-```typescript
-// src/Transport/index.ts:213-214
-// Note: Batching is planned but not yet implemented.
-// See /plans/batching.md for the implementation roadmap.
-```
-
-### HttpOptions Interface
-
-```typescript
-// src/Transport/index.ts:196-211
-export interface HttpOptions {
-  readonly headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>)
-  readonly timeout?: Duration.DurationInput
-  readonly fetch?: typeof globalThis.fetch
-  // NOTE: No batching option exists
-}
-```
-
-### Implementation Plan
-
-A detailed plan exists at `/plans/batching.md`:
-
-```markdown
-## Status: NOT IMPLEMENTED
-
-The batching configuration was removed from the API because it had no implementation.
-
-## Proposed API
-const layer = Transport.http("/api/trpc", {
-  batching: {
-    enabled: true,
-    window: Duration.millis(10),
-    maxSize: 50,
-    queries: true,
-    mutations: false,
-  },
+      } catch {
+        // Skip invalid JSON lines
+      }
+    }
+  }
+  // ...
 })
 ```
 
-### Impact
+### What's Implemented
 
-- Each RPC call is a separate HTTP request
-- No request deduplication
-- No network optimization for concurrent calls
-- Performance penalty for apps with many parallel queries
+1. **Full EventSource-like parsing** - Handles `data:` prefixed lines
+2. **Buffer management** - Properly handles partial lines across chunks
+3. **Message type handling** - StreamChunk, StreamEnd, Failure
+4. **Cleanup** - Returns `reader.cancel()` for abort
+
+### Remaining Minor Issues
+
+- No reconnection logic (SSE auto-reconnect)
+- React `useStream` hook is "simplified" (see react.ts:430)
+
+---
+
+## 3. Batching - NOW IMPLEMENTED ✅
+
+**UPDATE (March 2026):** Full batching implementation exists at `Transport/batching.ts` (392 lines)
+
+### Implementation Details
+
+```typescript
+// batching.ts:125-252
+export const make = (
+  url: string,
+  fetchFn: typeof globalThis.fetch,
+  headers: Record<string, string>,
+  config: BatchingConfig = {}
+): Effect.Effect<Batcher, never, Scope.Scope> => {
+  const maxSize = config.maxSize ?? 25
+  const window = config.window ?? Duration.millis(10)
+  
+  return Effect.gen(function* () {
+    // Queue to collect pending requests
+    const queue = yield* Queue.unbounded<PendingRequest>()
+    
+    // Latch to pause/resume batching
+    const latch = yield* Effect.makeLatch(true)
+    
+    // Start the batching stream
+    yield* Stream.fromQueue(queue).pipe(
+      Stream.groupedWithin(maxSize, window),
+      Stream.mapEffect(processBatch, { concurrency: 1 }),
+      Stream.runDrain,
+      Effect.forkScoped
+    )
+    
+    return {
+      submit: (request) => /* ... */,
+      pause: latch.close,
+      resume: latch.open,
+    }
+  })
+}
+```
+
+### Features
+
+1. **Queue-based collection** - Uses `Queue.unbounded` for pending requests
+2. **Stream.groupedWithin** - Batches by size AND time window
+3. **Deferred-based routing** - Each request gets its response
+4. **Pause/Resume** - Via Effect.makeLatch for offline handling
+5. **Server-side handling** - `handleBatch()` processes in parallel
+
+### Usage
+
+```typescript
+import { Batching } from "effect-trpc/Transport"
+
+const layer = Batching.layer("/api/rpc", {
+  maxSize: 25,
+  window: Duration.millis(10),
+  queries: true,
+  mutations: false,
+})
+```
 
 ---
 
@@ -327,49 +338,37 @@ useEffect(() => {
 
 ---
 
-## Summary Table
+## Summary Table (UPDATED March 2026)
 
 | Component | Implementation | Notes |
 |-----------|---------------|-------|
-| `Transport.http().send` | Complete | Handles timeout, headers, errors |
-| `Transport.http().sendStream` | **STUBBED** | Returns single response as stream |
-| `Transport.mock()` | Complete | Works for testing |
-| `Transport.loopback()` | Complete | In-memory, no network |
-| Batching | **NOT STARTED** | Plan exists in `/plans/batching.md` |
-| Server stream handling | Complete | `Server.handleStream` works |
-| Server SSE endpoint | **MISSING** | `toHttpHandler` doesn't expose streams |
-| Client stream handling | Complete | Works with proper transport |
-| React useStream | **INCOMPLETE** | State never updates |
+| `Transport.http().send` | **Complete** | Handles timeout, headers, errors |
+| `Transport.http().sendStream` | **Complete** | Full SSE implementation |
+| `Transport.mock()` | **Complete** | Works for testing |
+| `Transport.loopback()` | **Complete** | In-memory, no network |
+| Batching | **Complete** | `Transport/batching.ts` (392 lines) |
+| Server stream handling | **Complete** | `Server.handleStream` works |
+| Server SSE endpoint | **Working** | Via `/stream` POST endpoint |
+| Client stream handling | **Complete** | Works with proper transport |
+| React useStream | **Simplified** | Comment says needs work |
 
 ---
 
-## Recommendations
+## Remaining Recommendations
 
-### Priority 1: SSE Implementation (HIGH)
+### Priority 1: Fix useStream Hook (MEDIUM)
 
-1. Implement `sendHttpStream` with proper SSE:
-   ```typescript
-   const sendHttpStream = (url, request, ...) =>
-     Stream.async((emit) => {
-       const es = new EventSource(`${url}?...`)
-       es.onmessage = (e) => emit.single(parseChunk(e.data))
-       es.onerror = () => emit.fail(new TransportError(...))
-       return () => es.close()
-     })
-   ```
+The React hook comment says "This is simplified - proper implementation would use useAtomValue"
 
-2. Add `Server.toSseHandler()` for SSE endpoints
+```typescript
+// react.ts:429-431
+// Use the atom to get stream values
+// This is simplified - proper implementation would use useAtomValue
+```
 
-### Priority 2: Fix useStream Hook (HIGH)
+### Priority 2: Add Reconnection (LOW)
 
-The React hook needs actual stream subscription logic.
-
-### Priority 3: Batching (MEDIUM)
-
-Follow the plan in `/plans/batching.md`:
-- Use Effect `Queue` for request collection
-- Implement batch window with `Schedule`
-- Add batch endpoint to Server
+SSE implementation doesn't auto-reconnect on failure.
 
 ---
 
@@ -377,7 +376,7 @@ Follow the plan in `/plans/batching.md`:
 
 ```
 test/transport.test.ts - Basic protocol types, mock transport
-test/e2e/suite.ts - Stream tests pass only with loopback
+test/e2e/suite.ts - Stream tests with loopback
 ```
 
-No HTTP integration tests for streaming exist because the feature is stubbed.
+HTTP SSE tests should be added now that the feature is implemented.
