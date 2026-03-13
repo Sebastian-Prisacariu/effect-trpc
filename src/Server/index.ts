@@ -119,16 +119,22 @@ export interface Server<D extends Router.Definition, R = never> extends Pipeable
   
   /**
    * Handle a single request (query/mutation)
+   * @param request - The transport request
+   * @param signal - Optional AbortSignal for request cancellation
    */
   readonly handle: (
-    request: Transport.TransportRequest
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
   ) => Effect.Effect<Transport.TransportResponse, never, R>
   
   /**
    * Handle a streaming request
+   * @param request - The transport request
+   * @param signal - Optional AbortSignal for stream cancellation
    */
   readonly handleStream: (
-    request: Transport.TransportRequest
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
   ) => Stream.Stream<Transport.StreamResponse, never, R>
 }
 
@@ -237,8 +243,17 @@ export const make = <D extends Router.Definition, R = never>(
   
   // Handle a single request
   const handle = (
-    request: Transport.TransportRequest
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
   ): Effect.Effect<Transport.TransportResponse, never, R> => {
+    // Check if already aborted
+    if (signal?.aborted) {
+      return Effect.succeed(new Transport.Failure({
+        id: request.id,
+        error: { message: "Request aborted" },
+      }))
+    }
+    
     const entry = handlerMap.get(request.tag)
     
     if (!entry) {
@@ -260,7 +275,8 @@ export const make = <D extends Router.Definition, R = never>(
     const middlewareRequest = toMiddlewareRequest(
       request, 
       getProcedureType(procedure),
-      procedure.meta ?? {}
+      procedure.meta ?? {},
+      signal
     )
     
     return Schema.decodeUnknown(procedure.payloadSchema)(request.payload).pipe(
@@ -324,8 +340,17 @@ export const make = <D extends Router.Definition, R = never>(
   // Following Effect RPC's pattern - middleware runs once on connection setup,
   // and if it fails, no stream data flows.
   const handleStream = (
-    request: Transport.TransportRequest
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
   ): Stream.Stream<Transport.StreamResponse, never, R> => {
+    // Check if already aborted
+    if (signal?.aborted) {
+      return Stream.succeed(new Transport.Failure({
+        id: request.id,
+        error: { message: "Request aborted" },
+      }))
+    }
+    
     const entry = handlerMap.get(request.tag)
     
     if (!entry) {
@@ -347,7 +372,8 @@ export const make = <D extends Router.Definition, R = never>(
     const middlewareRequest = toMiddlewareRequest(
       request,
       "stream",
-      procedure.meta ?? {}
+      procedure.meta ?? {},
+      signal
     )
     
     const makeStream = (payload: unknown): Stream.Stream<Transport.StreamResponse, never, R> => {
@@ -383,8 +409,8 @@ export const make = <D extends Router.Definition, R = never>(
               Stream.concat(Stream.succeed(new Transport.StreamEnd({ id: request.id })))
             ))
       
-      // If middleware fails, return failure response
-      return Stream.unwrap(
+      // Build the final stream
+      let resultStream = Stream.unwrap(
         streamWithMiddleware.pipe(
           Effect.catchAll((error) => 
             Effect.succeed(
@@ -394,6 +420,23 @@ export const make = <D extends Router.Definition, R = never>(
           )
         )
       ) as Stream.Stream<Transport.StreamResponse, never, R>
+      
+      // Add cancellation via AbortSignal if provided
+      if (signal) {
+        resultStream = resultStream.pipe(
+          Stream.interruptWhen(
+            Effect.async<never, never>((resume) => {
+              if (signal.aborted) {
+                resume(Effect.interrupt)
+              } else {
+                signal.addEventListener("abort", () => resume(Effect.interrupt), { once: true })
+              }
+            })
+          )
+        )
+      }
+      
+      return resultStream
     }
     
     const failureStream = Stream.succeed(new Transport.Failure({
@@ -441,6 +484,12 @@ export interface HttpHandlerOptions {
    * Base path for the RPC endpoint (default: "/rpc")
    */
   readonly path?: string
+  
+  /**
+   * Maximum payload size in bytes (optional, no limit by default)
+   * Requests exceeding this limit will receive a 413 response.
+   */
+  readonly maxPayloadSize?: number
 }
 
 /**
@@ -467,14 +516,28 @@ export interface HttpHandlerOptions {
  */
 export const toHttpHandler = <D extends Router.Definition, R>(
   server: Server<D, R>,
-  _options?: HttpHandlerOptions
+  options?: HttpHandlerOptions
 ): (request: HttpRequest) => Effect.Effect<HttpResponse, never, R> => {
+  const maxPayloadSize = options?.maxPayloadSize
+  
   return (request: HttpRequest) =>
     Effect.tryPromise({
       try: () => request.json(),
       catch: () => ({ id: "", tag: "", payload: undefined }),
     }).pipe(
       Effect.flatMap((body) => {
+        // Check payload size if limit is configured
+        if (maxPayloadSize !== undefined) {
+          const size = JSON.stringify(body).length
+          if (size > maxPayloadSize) {
+            return Effect.succeed<HttpResponse>({
+              status: 413,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ error: "Payload too large" }),
+            })
+          }
+        }
+        
         // Extract headers from request if available
         const headers: Record<string, string> = {}
         if (request.headers) {
@@ -515,7 +578,7 @@ export const toHttpHandler = <D extends Router.Definition, R>(
           headers,
         })
         
-        return server.handle(transportRequest).pipe(
+        return server.handle(transportRequest, request.signal).pipe(
           Effect.map((response): HttpResponse => ({
             status: 200,
             headers: { "Content-Type": "application/json" },
@@ -724,6 +787,8 @@ interface HttpRequest {
   readonly headers?: 
     | Record<string, string | string[] | undefined>
     | { get: (name: string) => string | null }
+  /** Optional AbortSignal for request cancellation */
+  readonly signal?: AbortSignal
 }
 
 interface HttpResponse {
