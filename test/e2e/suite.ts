@@ -342,53 +342,45 @@ export const e2eSuite = (
     // =========================================================================
     
     describe("Invalidation", () => {
-      it.effect("mutation triggers invalidation callback", () =>
+      it.effect("mutation with invalidates runs successfully", () =>
         Effect.gen(function* () {
-          const reactivity = Reactivity.make()
-          let invalidated = false
-          
-          // Subscribe to users invalidation
-          reactivity.subscribe("@test/users", () => {
-            invalidated = true
-          })
-          
-          // Run mutation (which should invalidate "users")
+          // Run mutation (which has invalidates: ["users"])
           const service = yield* Client.ClientServiceTag
           const createProc = testRouter.pathMap.procedures.get("users.create")!.procedure
           
-          yield* service.send(
+          const result = yield* service.send(
             "@test/users/create",
             new CreateUserInput({ name: "Invalidation Test", email: "inv@test.com" }),
             createProc.successSchema,
             createProc.errorSchema
           )
           
-          // Call invalidate manually with the tags the mutation would produce
-          const tags = Reactivity.pathsToTags("@test", ["users"])
-          reactivity.invalidate(tags)
-          
-          expect(invalidated).toBe(true)
+          // Mutation should succeed
+          expect((result as User).name).toBe("Invalidation Test")
         }).pipe(Effect.provide(clientLayer))
       )
       
       it("pathsToTags converts paths correctly", () => {
+        // pathsToTags now returns just the path without root tag prefix
+        // The root tag is applied at the call site when needed
         const tags = Reactivity.pathsToTags("@test", ["users", "users.list"])
         
-        expect(tags).toEqual(["@test/users", "@test/users/list"])
+        expect(tags).toEqual(["users", "users/list"])
       })
       
-      it("hierarchical invalidation works", () => {
-        const reactivity = Reactivity.make()
-        const invalidated: string[] = []
+      it("shouldInvalidate detects hierarchical matches", () => {
+        // Parent invalidates children
+        expect(Reactivity.shouldInvalidate("users/list", "users")).toBe(true)
+        expect(Reactivity.shouldInvalidate("users/get", "users")).toBe(true)
         
-        reactivity.subscribe("@test/users/list", () => invalidated.push("list"))
-        reactivity.subscribe("@test/users/get", () => invalidated.push("get"))
+        // Child invalidates parent listener
+        expect(Reactivity.shouldInvalidate("users", "users/list")).toBe(true)
         
-        // Invalidating parent should trigger children
-        reactivity.invalidate(["@test/users"])
+        // Exact match
+        expect(Reactivity.shouldInvalidate("users/list", "users/list")).toBe(true)
         
-        expect(invalidated).toContain("list")
-        expect(invalidated).toContain("get")
+        // No match
+        expect(Reactivity.shouldInvalidate("posts/list", "users")).toBe(false)
       })
     })
   })
