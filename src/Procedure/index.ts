@@ -85,8 +85,9 @@ export interface ProcedureBase<
   
   /**
    * Middleware applied to this procedure
+   * @internal
    */
-  readonly middlewares: ReadonlyArray<unknown>
+  readonly middlewares: ReadonlyArray<import("../Middleware/index.js").Applicable>
   
   /**
    * Custom metadata for this procedure.
@@ -208,9 +209,10 @@ export type Any = Query<any, any, any> | Mutation<any, any, any, any> | Stream<a
 // Constructors
 // =============================================================================
 
+/** @internal */
 const ProcedureProto = {
   [ProcedureTypeId]: ProcedureTypeId,
-  middlewares: [] as ReadonlyArray<unknown>,
+  middlewares: [] as ReadonlyArray<import("../Middleware/index.js").Applicable>,
   meta: {} as Record<string, unknown>,
   pipe() {
     return pipeArguments(this, arguments)

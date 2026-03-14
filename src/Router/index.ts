@@ -389,7 +389,8 @@ export type DefinitionOf<R> = R extends Router<infer D> ? D : never
  */
 export interface DefinitionWithMiddleware<D extends Definition> {
   readonly definition: D
-  readonly middlewares: ReadonlyArray<unknown>
+  /** @internal */
+  readonly middlewares: ReadonlyArray<import("../Middleware/index.js").Applicable>
 }
 
 /**
@@ -411,8 +412,8 @@ export interface DefinitionWithMiddleware<D extends Definition> {
  * })
  * ```
  */
-export const withMiddleware = <D extends Definition, M extends ReadonlyArray<unknown>>(
-  middlewares: M,
+export const withMiddleware = <D extends Definition>(
+  middlewares: ReadonlyArray<import("../Middleware/index.js").Applicable>,
   definition: D
 ): DefinitionWithMiddleware<D> => ({
   definition,
