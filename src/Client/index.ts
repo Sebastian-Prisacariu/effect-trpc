@@ -569,10 +569,12 @@ export const make = <D extends Router.Definition>(
     
     invalidate: (paths: readonly string[]) => {
       // Get tags from paths
-      const tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
+      const _tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
       // Note: This only works if a ReactivityService is available globally
       // For proper usage, use the BoundClient's invalidate method
-      console.warn("invalidate() on unbound client requires ReactivityService in scope. Use api.provide(layer) first.")
+      Effect.runSync(
+        Effect.logWarning("invalidate() on unbound client requires ReactivityService in scope. Use api.provide(layer) first.")
+      )
     },
     
     provide: (layer: Layer.Layer<Transport.Transport>): BoundClient<Router.Router<D>> => {
