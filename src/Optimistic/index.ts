@@ -160,12 +160,12 @@ export const createOptimisticMutation = <Input, Success, Error>(
       
       // 3. Run the actual mutation
       const result = yield* mutation(input).pipe(
-        Effect.tapError(() =>
+        Effect.tapError((error) =>
           // 4a. On error: rollback to previous state
           Ref.set(cacheRef, previousCache).pipe(
             Effect.tap(() =>
               config.onError
-                ? Effect.sync(() => config.onError!(undefined, input))
+                ? Effect.sync(() => config.onError!(error, input))
                 : Effect.void
             )
           )

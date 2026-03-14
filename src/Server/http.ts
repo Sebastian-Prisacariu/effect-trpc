@@ -121,8 +121,8 @@ export const toHttpHandler = <D extends Router.Definition, R>(
  */
 export const toSSEHandler = <D extends Router.Definition, R>(
   server: Server<D, R>
-): (body: unknown) => Stream.Stream<Transport.StreamResponse, never, R> => {
-  return (body: unknown) => {
+): (body: unknown, signal?: AbortSignal) => Stream.Stream<Transport.StreamResponse, never, R> => {
+  return (body: unknown, signal?: AbortSignal) => {
     const request = new Transport.TransportRequest({
       id: (body as any).id ?? Transport.generateRequestId(),
       tag: (body as any).tag ?? "",
@@ -130,7 +130,7 @@ export const toSSEHandler = <D extends Router.Definition, R>(
       headers: {},
     })
     
-    return server.handleStream(request)
+    return server.handleStream(request, signal)
   }
 }
 
@@ -149,7 +149,7 @@ export const toFetchSSEHandler = <D extends Router.Definition, R>(
   
   return async (request: Request): Promise<Response> => {
     const body = await request.json()
-    const stream = sseHandler(body)
+    const stream = sseHandler(body, request.signal)
     
     const { readable, writable } = new TransformStream()
     const writer = writable.getWriter()
