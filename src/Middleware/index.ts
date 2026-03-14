@@ -358,16 +358,75 @@ export const execute = <A, E, R>(
   request: MiddlewareRequest,
   handler: Effect.Effect<A, E, R>
 ): Effect.Effect<A, E | Failure<typeof middlewares[number]>, R | Provides<typeof middlewares[number]>> => {
-  // Flatten combined middlewares
-  const flatMiddlewares = middlewares.flatMap((m) =>
-    MiddlewareTypeId in m ? (m as CombinedMiddleware<any>).tags : [m]
-  )
+  // Process middlewares, respecting concurrency for CombinedMiddleware
+  let current = handler as Effect.Effect<A, any, any>
   
-  // Execute from outermost to innermost
-  return flatMiddlewares.reduceRight(
-    (next, middleware) => executeOne(middleware, request, next),
-    handler as Effect.Effect<A, any, any>
-  )
+  // Process in reverse order (outermost to innermost)
+  for (let i = middlewares.length - 1; i >= 0; i--) {
+    const m = middlewares[i]
+    
+    if (MiddlewareTypeId in m) {
+      // CombinedMiddleware - check concurrency setting
+      const combined = m as CombinedMiddleware<any>
+      const tags = combined.tags
+      const concurrency = combined.concurrency
+      
+      if (concurrency === "sequential" || tags.length <= 1) {
+        // Sequential: wrap each middleware around current
+        for (let j = tags.length - 1; j >= 0; j--) {
+          current = executeOne(tags[j], request, current)
+        }
+      } else {
+        // Concurrent: run "provides" middleware in parallel, then handler
+        // Wrap middleware still chains sequentially (they modify control flow)
+        const captured = current
+        const concurrencyNum = concurrency === "unbounded" ? tags.length : concurrency
+        
+        type MiddlewareResult = 
+          | { _tag: "wrap"; tag: MiddlewareTag<any, any, any>; impl: WrapMiddlewareImpl<any> }
+          | { _tag: "provides"; tag: MiddlewareTag<any, any, any>; provided: unknown }
+        
+        current = Effect.gen(function* () {
+          // Collect all provides concurrently
+          const effects = tags.map((tag: MiddlewareTag<any, any, any>): Effect.Effect<MiddlewareResult, any, any> =>
+            Effect.gen(function* () {
+              const impl = yield* tag as any as Context.Tag<any, MiddlewareImpl<any, any> | WrapMiddlewareImpl<any>>
+              
+              if ("wrap" in impl) {
+                return { _tag: "wrap" as const, tag, impl: impl as WrapMiddlewareImpl<any> }
+              } else {
+                const provided = yield* (impl as MiddlewareImpl<any, any>).run(request)
+                return { _tag: "provides" as const, tag, provided }
+              }
+            })
+          )
+          
+          const results = (yield* Effect.all(effects, { concurrency: concurrencyNum })) as MiddlewareResult[]
+          
+          // Apply wrap middleware sequentially, provide services from provides middleware
+          let inner = captured
+          for (const r of results) {
+            const result = r as MiddlewareResult
+            if (result._tag === "wrap") {
+              const prev = inner
+              inner = result.impl.wrap(request, prev) as Effect.Effect<A, any, any>
+            } else {
+              inner = inner.pipe(
+                Effect.provideService(result.tag.provides, result.provided)
+              )
+            }
+          }
+          
+          return yield* inner
+        }) as Effect.Effect<A, any, any>
+      }
+    } else {
+      // Single middleware tag
+      current = executeOne(m as MiddlewareTag<any, any, any>, request, current)
+    }
+  }
+  
+  return current
 }
 
 const executeOne = <A, E, R, Provides, Failure>(

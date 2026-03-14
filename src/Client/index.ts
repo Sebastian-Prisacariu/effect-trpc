@@ -164,17 +164,17 @@ export const ClientServiceLive: Layer.Layer<ClientServiceTag, never, Transport.T
                   }))
                 )
               } else if (Schema.is(Transport.Failure)(response)) {
+                // Decode the domain error, then fail with it
+                // Only wrap in TransportError if decode itself fails
                 return Schema.decodeUnknown(errorSchema)(response.error).pipe(
-                  Effect.flatMap((err) => Effect.fail(err as E)),
-                  Effect.mapError((e) => 
-                    e instanceof Transport.TransportError 
-                      ? e 
-                      : new Transport.TransportError({
-                          reason: "Protocol",
-                          message: "Failed to decode stream error",
-                          cause: e,
-                        })
-                  )
+                  Effect.mapError((decodeError) => 
+                    new Transport.TransportError({
+                      reason: "Protocol",
+                      message: "Failed to decode stream error",
+                      cause: decodeError,
+                    })
+                  ),
+                  Effect.flatMap((err) => Effect.fail(err as E))
                 ) as Effect.Effect<S, E | Transport.TransportError>
               }
               // Should not reach here

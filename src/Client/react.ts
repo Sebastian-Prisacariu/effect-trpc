@@ -164,20 +164,20 @@ export const createUseQuery = <Payload, Success, Error>(
     payload?: Payload,
     options: UseQueryOptions = {}
   ): UseQueryResult<Success, Error> {
-    const { enabled = true, suspense = false } = options
+    const { enabled = true, suspense = false, refetchInterval } = options
     const ctx = useTrpcContext()
     
-    // Stable payload reference for memoization
-    const payloadRef = useRef(payload)
-    payloadRef.current = payload
+    // Stable serialized payload for cache key
+    const payloadKey = useMemo(() => JSON.stringify(payload), [payload])
     
     // Create the query atom using AtomRuntime
+    // Key includes payload so different payloads get different atoms
     const queryAtom = useMemo(() => {
       const queryEffect = Effect.gen(function* () {
         const service = yield* ClientServiceTag
         return yield* service.send(
           tag,
-          payloadRef.current,
+          payload,
           procedure.successSchema,
           procedure.errorSchema
         )
@@ -192,18 +192,33 @@ export const createUseQuery = <Payload, Success, Error>(
       }
       
       return atom
-    }, [ctx.atomRuntime, tag])
+    }, [ctx.atomRuntime, tag, payloadKey]) // payloadKey in deps
     
     // Mount the atom (keeps it alive)
+    // Note: useAtomMount handles undefined internally
     useAtomMount(queryAtom)
     
     // Get the refresh function
     const refetch = useAtomRefresh(queryAtom)
     
+    // Refetch interval polling
+    useEffect(() => {
+      if (!enabled || !refetchInterval || refetchInterval <= 0) return
+      
+      const intervalId = setInterval(() => {
+        refetch()
+      }, refetchInterval)
+      
+      return () => clearInterval(intervalId)
+    }, [enabled, refetchInterval, refetch])
+    
     // Get the value using appropriate hook
     let result: Result.Result<Success, Error>
     
-    if (suspense) {
+    // When disabled, return initial state
+    if (!enabled) {
+      result = Result.initial()
+    } else if (suspense) {
       result = useAtomSuspense(queryAtom) as Result.Result<Success, Error>
     } else {
       result = useAtomValue(queryAtom) as Result.Result<Success, Error>
@@ -407,6 +422,7 @@ export const createUseStream = <Payload, Success, Error>(
     const [data, setData] = useState<readonly Success[]>([])
     const [isConnected, setIsConnected] = useState(false)
     const [error, setError] = useState<Error | undefined>()
+    const [restartCount, setRestartCount] = useState(0) // Trigger for restart
     const fiberRef = useRef<Fiber.RuntimeFiber<void, unknown> | null>(null)
     
     // Subscribe to stream updates
@@ -454,21 +470,20 @@ export const createUseStream = <Payload, Success, Error>(
         }
         setIsConnected(false)
       }
-    }, [enabled, ctx.layer, tag, payload, procedure.successSchema, procedure.errorSchema])
+    }, [enabled, ctx.layer, tag, payload, procedure.successSchema, procedure.errorSchema, restartCount])
     
     const stop = useCallback(() => {
       if (fiberRef.current) {
         Effect.runPromise(Fiber.interrupt(fiberRef.current)).catch(() => {})
+        fiberRef.current = null
       }
       setIsConnected(false)
     }, [])
     
     const restart = useCallback(() => {
-      // Stop existing stream
+      // Stop existing stream and increment counter to trigger useEffect re-run
       stop()
-      // Reset state - useEffect will restart
-      setData([])
-      setError(undefined)
+      setRestartCount((c) => c + 1)
     }, [stop])
     
     return {

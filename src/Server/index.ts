@@ -856,42 +856,69 @@ export const middleware = <M extends Middleware.Applicable>(m: M) => <D extends 
   }
   
   // Create MiddlewareRequest from TransportRequest (server-level doesn't know procedure type)
-  const toMiddlewareRequest = (request: Transport.TransportRequest): Middleware.MiddlewareRequest => ({
+  const toMiddlewareRequest = (
+    request: Transport.TransportRequest,
+    type: Middleware.ProcedureType,
+    signal?: AbortSignal
+  ): Middleware.MiddlewareRequest => ({
     id: request.id,
     tag: request.tag,
     path: tagToPath(request.tag),
-    type: "query", // Default - actual type determined in handler
+    type,
     headers: {
       get: (name: string) => request.headers[name.toLowerCase()] ?? null,
       has: (name: string) => name.toLowerCase() in request.headers,
     },
     payload: request.payload,
     meta: {},
-    signal: undefined,
+    signal,
   })
   
   // Wrap the original handle with middleware execution
   const wrappedHandle = (
-    request: Transport.TransportRequest
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
   ): Effect.Effect<Transport.TransportResponse, never, R> => {
-    const middlewareRequest = toMiddlewareRequest(request)
+    const middlewareRequest = toMiddlewareRequest(request, "query", signal)
     
     // Execute server-level middleware then delegate to original handle
     if (newMiddlewares.length > 0) {
       return Middleware.execute(
         newMiddlewares,
         middlewareRequest,
-        server.handle(request)
+        server.handle(request, signal)
       ) as Effect.Effect<Transport.TransportResponse, never, R>
     }
     
-    return server.handle(request)
+    return server.handle(request, signal)
+  }
+  
+  // Wrap the original handleStream with middleware execution
+  const wrappedHandleStream = (
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
+  ): Stream.Stream<Transport.StreamResponse, never, R> => {
+    const middlewareRequest = toMiddlewareRequest(request, "stream", signal)
+    
+    // Execute server-level middleware before stream starts
+    if (newMiddlewares.length > 0) {
+      return Stream.unwrap(
+        Middleware.execute(
+          newMiddlewares,
+          middlewareRequest,
+          Effect.succeed(server.handleStream(request, signal))
+        ) as Effect.Effect<Stream.Stream<Transport.StreamResponse, never, R>, never, R>
+      )
+    }
+    
+    return server.handleStream(request, signal)
   }
   
   return {
     ...server,
     middlewares: newMiddlewares,
     handle: wrappedHandle,
+    handleStream: wrappedHandleStream,
     pipe() {
       return pipeArguments(this, arguments)
     },

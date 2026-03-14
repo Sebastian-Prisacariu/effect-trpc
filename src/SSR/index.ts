@@ -225,9 +225,44 @@ export interface HydrateProps {
 }
 
 /**
+ * Hydration context for passing server state to client
+ */
+const HydrationContext = React.createContext<DehydratedState | null>(null)
+
+/**
+ * Hook to access hydration state
+ * 
+ * @since 1.0.0
+ * @category hooks
+ */
+export const useHydrationState = (): DehydratedState | null => {
+  return React.useContext(HydrationContext)
+}
+
+/**
+ * Hook to get pre-fetched data for a specific path
+ * 
+ * @since 1.0.0
+ * @category hooks
+ * @example
+ * ```tsx
+ * function UserList() {
+ *   const prefetched = useHydratedData<User[]>("users.list")
+ *   // prefetched is the server-fetched data or undefined
+ * }
+ * ```
+ */
+export const useHydratedData = <T>(path: string): T | undefined => {
+  const state = React.useContext(HydrationContext)
+  return state?.queries[path] as T | undefined
+}
+
+/**
  * Hydrate component - rehydrates server state on client
  * 
  * Wrap your app with this component to restore server-prefetched data.
+ * The dehydrated state is made available via context, and components
+ * can access it via useHydratedData() to use as initial values.
  * 
  * @since 1.0.0
  * @category components
@@ -241,15 +276,15 @@ export interface HydrateProps {
  * ```
  */
 export const Hydrate: React.FC<HydrateProps> = ({ state, children }) => {
-  // Use Effect Atom's hydration mechanism
-  React.useEffect(() => {
-    if (state) {
-      // Hydration happens automatically via context
-      // The Provider's registry will pick up the state
-    }
-  }, [state])
+  // Validate staleness - reject if too old (default: 5 minutes)
+  const isStale = state && (Date.now() - state.timestamp > 5 * 60 * 1000)
+  const validState = isStale ? null : state ?? null
   
-  return React.createElement(React.Fragment, null, children)
+  return React.createElement(
+    HydrationContext.Provider,
+    { value: validState },
+    children
+  )
 }
 
 // =============================================================================
