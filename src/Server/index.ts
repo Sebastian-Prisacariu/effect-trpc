@@ -83,7 +83,7 @@ import { ServerTypeId, type Server } from "./types.js"
 export type HandlerFor<P, R = never> = 
   P extends Procedure.Query<infer Payload, infer Success, infer Error>
     ? (payload: Schema.Schema.Type<Payload>) => Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Error>, R>
-    : P extends Procedure.Mutation<any, infer Payload, infer Success, infer Error>
+    : P extends Procedure.Mutation<infer Payload, infer Success, infer Error, any>
     ? (payload: Schema.Schema.Type<Payload>) => Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Error>, R>
     : P extends Procedure.Stream<infer Payload, infer Success, infer Error>
     ? (payload: Schema.Schema.Type<Payload>) => Stream.Stream<Schema.Schema.Type<Success>, Schema.Schema.Type<Error>, R>

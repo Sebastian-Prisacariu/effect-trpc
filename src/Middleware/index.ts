@@ -151,7 +151,7 @@ export interface MiddlewareTag<
   Self,
   Provides,
   Failure = never
-> extends Context.Tag<Self, MiddlewareImpl<Provides, Failure>> {
+> extends Context.Tag<Self, MiddlewareImpl<Provides, Failure, any>> {
   readonly [MiddlewareTagTypeId]: MiddlewareTagTypeId
   readonly _provides: Provides
   readonly _failure: Failure
@@ -164,10 +164,10 @@ export interface MiddlewareTag<
  * @since 1.0.0
  * @category models
  */
-export interface MiddlewareImpl<Provides, Failure> {
+export interface MiddlewareImpl<Provides, Failure, R = never> {
   readonly run: (
     request: MiddlewareRequest
-  ) => Effect.Effect<Provides, Failure>
+  ) => Effect.Effect<Provides, Failure, R>
 }
 
 /**
@@ -200,7 +200,7 @@ export const Tag = <Provides, Failure = never>(
   id: string,
   provides: Context.Tag<any, Provides>
 ): MiddlewareTag<any, Provides, Failure> => {
-  const tag = Context.GenericTag<any, MiddlewareImpl<Provides, Failure>>(id)
+  const tag = Context.GenericTag<any, MiddlewareImpl<Provides, Failure, any>>(id)
   return Object.assign(tag, {
     [MiddlewareTagTypeId]: MiddlewareTagTypeId,
     _provides: undefined as unknown as Provides,
@@ -229,11 +229,11 @@ export const Tag = <Provides, Failure = never>(
  * )
  * ```
  */
-export const implement = <Self, Provides, Failure>(
+export const implement = <Self, Provides, Failure, R>(
   tag: MiddlewareTag<Self, Provides, Failure>,
-  run: (request: MiddlewareRequest) => Effect.Effect<Provides, Failure>
-): Layer.Layer<Self, never, never> =>
-  Layer.succeed(tag as any, { run } as MiddlewareImpl<Provides, Failure>) as any
+  run: (request: MiddlewareRequest) => Effect.Effect<Provides, Failure, R>
+): Layer.Layer<Self, never, R> =>
+  Layer.succeed(tag as any, { run } as MiddlewareImpl<Provides, Failure, R>) as any
 
 /**
  * Implement a wrap middleware (has access to next)
@@ -252,13 +252,13 @@ export const implement = <Self, Provides, Failure>(
  * )
  * ```
  */
-export const implementWrap = <Self, Failure>(
+export const implementWrap = <Self, Failure, R2 = never>(
   tag: MiddlewareTag<Self, never, Failure>,
   wrap: <A, E, R>(
     request: MiddlewareRequest,
     next: Effect.Effect<A, E, R>
-  ) => Effect.Effect<A, E | Failure, R>
-): Layer.Layer<Self, never, never> =>
+  ) => Effect.Effect<A, E | Failure, R | R2>
+): Layer.Layer<Self, never, R2> =>
   Layer.succeed(tag as any, { wrap } as WrapMiddlewareImpl<Failure>) as any
 
 // =============================================================================
@@ -435,14 +435,14 @@ const executeOne = <A, E, R, Provides, Failure>(
   next: Effect.Effect<A, E, R>
 ): Effect.Effect<A, E | Failure, R> =>
   Effect.gen(function* () {
-    const impl = yield* middleware as any as Context.Tag<any, MiddlewareImpl<Provides, Failure> | WrapMiddlewareImpl<Failure>>
+    const impl = yield* middleware as any as Context.Tag<any, MiddlewareImpl<Provides, Failure, any> | WrapMiddlewareImpl<Failure>>
     
     if ("wrap" in impl) {
       // Wrap middleware - wraps the handler execution
       return yield* (impl as WrapMiddlewareImpl<Failure>).wrap(request, next)
     } else {
       // Provides middleware - runs first, then provides service to handler
-      const provided = yield* (impl as MiddlewareImpl<Provides, Failure>).run(request)
+      const provided = yield* (impl as MiddlewareImpl<Provides, Failure, any>).run(request)
       // Provide to the middleware's "provides" tag (e.g., CurrentUser)
       return yield* next.pipe(
         Effect.provideService(middleware.provides, provided)
