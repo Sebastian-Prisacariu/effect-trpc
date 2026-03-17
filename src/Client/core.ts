@@ -1146,11 +1146,11 @@ export const makeClientCore = (
   const clientRuntime = makeClientRuntime(runtime)
   const eventsRef = AtomRef.make<ReadonlyArray<ClientEvent>>([])
   const mutationsRef = AtomRef.make<ReadonlyArray<MutationExecution>>([])
-  const queriesRef = Effect.runSync(
-    Ref.make(HashMap.empty<string, QueryEntryService<unknown, unknown, unknown>>())
+  const queriesRef = Ref.unsafeMake(
+    HashMap.empty<string, QueryEntryService<unknown, unknown, unknown>>()
   )
-  const nextObserverRef = Effect.runSync(Ref.make(0))
-  const nextMutationRef = Effect.runSync(Ref.make(0))
+  const nextObserverRef = Ref.unsafeMake(0)
+  const nextMutationRef = Ref.unsafeMake(0)
 
   const emit = (event: ClientEvent): void => {
     eventsRef.update((events) => [...events, event].slice(-200))
