@@ -1,0 +1,28 @@
+# Source and config (dist is published)
+/src
+tsconfig.json
+vitest.config.ts
+.eslintignore
+
+# Tests and examples
+/test
+/examples
+/benchmarks
+/inspection
+/external-repos
+
+# Development files
+/.github
+/.vscode
+/.idea
+bun.lock
+pnpm-lock.yaml
+package-lock.json
+
+# Documentation (for now)
+/docs
+CODE_STANDARDS.md
+
+# Git
+.git
+.gitignore
