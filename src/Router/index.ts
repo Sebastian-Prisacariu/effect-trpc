@@ -54,13 +54,14 @@ export type RouterTypeId = typeof RouterTypeId
 // =============================================================================
 
 /**
- * A definition is a record of procedures or nested definitions
+ * A definition is a record of procedures, nested definitions, or
+ * middleware-wrapped nested definitions.
  * 
  * @since 1.0.0
  * @category models
  */
 export type Definition = {
-  readonly [key: string]: Procedure.Any | Definition
+  readonly [key: string]: Procedure.Any | Definition | DefinitionWithMiddleware<Definition>
 }
 
 /**
@@ -178,7 +179,7 @@ export const make = <D extends Definition>(
   // Walk the definition tree and build tagged procedures
   const walk = (def: Definition, pathPrefix: string, tagPrefix: string): void => {
     for (const key of Object.keys(def)) {
-      const value = def[key]
+      const value = unwrapDefinitionEntry(def[key])
       const path = pathPrefix ? `${pathPrefix}.${key}` : key
       const procedureTag = `${tagPrefix}/${key}`
       
@@ -320,10 +321,10 @@ export const tagsToInvalidate = <D extends Definition>(
  * @category type-level
  */
 export type Paths<D extends Definition, Prefix extends string = ""> = {
-  [K in keyof D & string]: D[K] extends Procedure.Any
+  [K in keyof D & string]: UnwrapDefinitionEntry<D[K]> extends Procedure.Any
     ? Prefix extends "" ? K : `${Prefix}.${K}`
-    : D[K] extends Definition
-      ? Paths<D[K], Prefix extends "" ? K : `${Prefix}.${K}`>
+    : UnwrapDefinitionEntry<D[K]> extends Definition
+      ? Paths<UnwrapDefinitionEntry<D[K]>, Prefix extends "" ? K : `${Prefix}.${K}`>
       : never
 }[keyof D & string]
 
@@ -336,13 +337,13 @@ export type Paths<D extends Definition, Prefix extends string = ""> = {
 export type ProcedureAt<D extends Definition, Path extends string> = 
   Path extends `${infer Head}.${infer Tail}`
     ? Head extends keyof D
-      ? D[Head] extends Definition
-        ? ProcedureAt<D[Head], Tail>
+      ? UnwrapDefinitionEntry<D[Head]> extends Definition
+        ? ProcedureAt<UnwrapDefinitionEntry<D[Head]>, Tail>
         : never
       : never
     : Path extends keyof D
-      ? D[Path] extends Procedure.Any
-        ? D[Path]
+      ? UnwrapDefinitionEntry<D[Path]> extends Procedure.Any
+        ? UnwrapDefinitionEntry<D[Path]>
         : never
       : never
 
@@ -353,13 +354,13 @@ export type ProcedureAt<D extends Definition, Path extends string> =
  * @category type-level
  */
 export type Flatten<D extends Definition, Prefix extends string = ""> = {
-  [K in keyof D & string as D[K] extends Procedure.Any 
+  [K in keyof D & string as UnwrapDefinitionEntry<D[K]> extends Procedure.Any 
     ? (Prefix extends "" ? K : `${Prefix}.${K}`)
     : never
-  ]: D[K]
+  ]: UnwrapDefinitionEntry<D[K]>
 } & UnionToIntersection<{
-  [K in keyof D & string]: D[K] extends Definition
-    ? Flatten<D[K], Prefix extends "" ? K : `${Prefix}.${K}`>
+  [K in keyof D & string]: UnwrapDefinitionEntry<D[K]> extends Definition
+    ? Flatten<UnwrapDefinitionEntry<D[K]>, Prefix extends "" ? K : `${Prefix}.${K}`>
     : {}
 }[keyof D & string]>
 
@@ -392,6 +393,28 @@ export interface DefinitionWithMiddleware<D extends Definition> {
   /** @internal */
   readonly middlewares: ReadonlyArray<import("../Middleware/index.js").Applicable>
 }
+
+/** @internal */
+export type UnwrapDefinitionEntry<T> = T extends DefinitionWithMiddleware<infer Inner> ? Inner : T
+
+/** @internal */
+export const isDefinitionWithMiddleware = (
+  value: unknown
+): value is DefinitionWithMiddleware<Definition> =>
+  typeof value === "object" &&
+  value !== null &&
+  "definition" in value &&
+  "middlewares" in value
+
+/** @internal */
+export const unwrapDefinitionEntry = <T>(value: T): UnwrapDefinitionEntry<T> =>
+  (isDefinitionWithMiddleware(value) ? value.definition : value) as UnwrapDefinitionEntry<T>
+
+/** @internal */
+export const getDefinitionMiddlewares = (
+  value: unknown
+): ReadonlyArray<import("../Middleware/index.js").Applicable> =>
+  isDefinitionWithMiddleware(value) ? value.middlewares : []
 
 /**
  * Wrap a definition with middleware that applies to all procedures in it

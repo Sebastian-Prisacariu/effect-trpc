@@ -39,3 +39,11 @@ bun-debug.log*
 
 # local research workspace
 /inspection
+/docs
+/examples
+/external-repos
+/packages
+/plans
+/reviews
+/test
+/CLAUDE.md

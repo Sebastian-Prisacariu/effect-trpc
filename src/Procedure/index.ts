@@ -139,11 +139,24 @@ export interface Query<
  * @since 1.0.0
  * @category models
  */
+export interface OptimisticTarget<in Payload> {
+  /**
+   * Query path to update optimistically.
+   */
+  readonly path: string
+
+  /**
+   * Optional query payload used to target a specific cached query instance.
+   * When provided as a function, it is derived from the mutation payload.
+   */
+  readonly payload?: unknown | ((payload: Payload) => unknown)
+}
+
 export interface OptimisticConfig<in out Target, in Payload, in Success> {
   /**
    * The path to the query that should be optimistically updated
    */
-  readonly target: string
+  readonly target: string | OptimisticTarget<Payload>
   
   /**
    * Update the target data immediately with the mutation payload

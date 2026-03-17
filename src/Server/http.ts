@@ -12,6 +12,42 @@ import * as Router from "../Router/index.js"
 import * as Transport from "../Transport/index.js"
 import type { Server, HttpRequest, HttpResponse, HttpHandlerOptions, NextApiRequest, NextApiResponse } from "./types.js"
 
+const extractHeaders = (headers: HttpRequest["headers"]): Record<string, string> => {
+  const extracted: Record<string, string> = {}
+
+  if (!headers) {
+    return extracted
+  }
+
+  if (headers instanceof Headers) {
+    headers.forEach((value: string, key: string) => {
+      extracted[key.toLowerCase()] = value
+    })
+    return extracted
+  }
+
+  if ("get" in headers && typeof headers.get === "function") {
+    const commonHeaders = ["authorization", "content-type", "x-request-id", "x-batch"]
+    for (const name of commonHeaders) {
+      const value = headers.get(name)
+      if (value) {
+        extracted[name] = value
+      }
+    }
+    return extracted
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string") {
+      extracted[key.toLowerCase()] = value
+    } else if (Array.isArray(value) && value.length > 0) {
+      extracted[key.toLowerCase()] = value.join(", ")
+    }
+  }
+
+  return extracted
+}
+
 // =============================================================================
 // HTTP Handler
 // =============================================================================
@@ -50,29 +86,16 @@ export const toHttpHandler = <D extends Router.Definition, R>(
         }
         
         // Extract headers from request if available
-        const headers: Record<string, string> = {}
-        if (request.headers) {
-          if (typeof request.headers.get === "function") {
-            // Headers object with get method (fetch API)
-            const commonHeaders = ["authorization", "content-type", "x-request-id", "x-batch"]
-            for (const name of commonHeaders) {
-              const value = (request.headers as any).get(name)
-              if (value) headers[name] = value
-            }
-          } else if (typeof request.headers === "object") {
-            // Plain object (Express, Next.js)
-            for (const [key, value] of Object.entries(request.headers)) {
-              if (typeof value === "string") {
-                headers[key.toLowerCase()] = value
-              }
-            }
-          }
-        }
+        const headers = extractHeaders(request.headers)
         
         // Check if this is a batch request
         if (Transport.Batching.isBatchRequest(body)) {
           return Transport.Batching.handleBatch(server.handle)(
-            body as Transport.Batching.BatchRequest
+            body as Transport.Batching.BatchRequest,
+            {
+              headers,
+              signal: request.signal,
+            }
           ).pipe(
             Effect.map((batchResponse): HttpResponse => ({
               status: 200,
@@ -121,13 +144,17 @@ export const toHttpHandler = <D extends Router.Definition, R>(
  */
 export const toSSEHandler = <D extends Router.Definition, R>(
   server: Server<D, R>
-): (body: unknown, signal?: AbortSignal) => Stream.Stream<Transport.StreamResponse, never, R> => {
-  return (body: unknown, signal?: AbortSignal) => {
+): (
+  body: unknown,
+  signal?: AbortSignal,
+  headers?: Record<string, string>
+) => Stream.Stream<Transport.StreamResponse, never, R> => {
+  return (body: unknown, signal?: AbortSignal, headers?: Record<string, string>) => {
     const request = new Transport.TransportRequest({
       id: (body as any).id ?? Transport.generateRequestId(),
       tag: (body as any).tag ?? "",
       payload: (body as any).payload,
-      headers: {},
+      headers: headers ?? {},
     })
     
     return server.handleStream(request, signal)
@@ -149,7 +176,7 @@ export const toFetchSSEHandler = <D extends Router.Definition, R>(
   
   return async (request: Request): Promise<Response> => {
     const body = await request.json()
-    const stream = sseHandler(body, request.signal)
+    const stream = sseHandler(body, request.signal, extractHeaders(request.headers))
     
     const { readable, writable } = new TransformStream()
     const writer = writable.getWriter()
@@ -210,6 +237,7 @@ export const toFetchHandler = <D extends Router.Definition, R>(
     const httpRequest: HttpRequest = {
       json: () => request.json(),
       headers: request.headers,
+      signal: request.signal,
     }
     
     const response = await Effect.runPromise(
@@ -283,7 +311,11 @@ export const toNextApiSSEHandler = <D extends Router.Definition, R>(
     res.setHeader("Cache-Control", "no-cache")
     res.setHeader("Connection", "keep-alive")
     
-    const stream = sseHandler(req.body)
+    const stream = sseHandler(
+      req.body,
+      undefined,
+      extractHeaders(req.headers as HttpRequest["headers"])
+    )
     
     await Effect.runPromise(
       stream.pipe(

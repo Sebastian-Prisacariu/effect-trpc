@@ -32,23 +32,40 @@
 
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as ManagedRuntime from "effect/ManagedRuntime"
 import * as Record from "effect/Record"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
-import * as Router from "../Router/index.js"
 import * as Procedure from "../Procedure/index.js"
+import * as Router from "../Router/index.js"
 import * as Transport from "../Transport/index.js"
 
 // Re-export from service module
 export {
-  ClientTypeId,
-  type ClientService,
-  ClientServiceTag,
-  ClientServiceLive,
+  ClientService, ClientTypeId
 } from "./service.js"
 
-import { ClientTypeId, ClientServiceTag, ClientServiceLive } from "./service.js"
+import {
+  ClientCore,
+  type ClientCoreService,
+  ClientEventSchema,
+  MutationFailedEvent,
+  MutationStartedEvent,
+  MutationSucceededEvent,
+  OptimisticLayerAddedEvent,
+  OptimisticLayerRemovedEvent,
+  QueryFetchFailedEvent,
+  QueryFetchStartedEvent,
+  QueryFetchSucceededEvent,
+  QueryHydratedEvent,
+  QueryInvalidatedEvent,
+  QueryObservedEvent,
+  StreamChunkEvent,
+  StreamFailedEvent,
+  StreamStartedEvent,
+  StreamStoppedEvent,
+  makeClientCore,
+} from "./core.js"
+import { ClientService, ClientTypeId } from "./service.js"
 
 // =============================================================================
 // Client Types
@@ -62,17 +79,17 @@ import { ClientTypeId, ClientServiceTag, ClientServiceLive } from "./service.js"
  */
 export interface Client<R extends Router.Router<Router.Definition>> {
   readonly [ClientTypeId]: ClientTypeId
-  
+
   /**
    * React Provider component that supplies the runtime
    */
   readonly Provider: React.FC<ProviderProps>
-  
+
   /**
    * Invalidate queries by path (strict typing)
    */
   readonly invalidate: (paths: readonly Router.Paths<Router.DefinitionOf<R>>[]) => void
-  
+
   /**
    * Create a bound client with runtime for vanilla usage
    */
@@ -85,16 +102,17 @@ export interface Client<R extends Router.Router<Router.Definition>> {
  * @since 1.0.0
  * @category models
  */
-export type BoundClient<R extends Router.Router<Router.Definition>> = 
+export type BoundClient<R extends Router.Router<Router.Definition>> =
   & ClientProxy<Router.DefinitionOf<R>>
   & {
     readonly [ClientTypeId]: ClientTypeId
-    
+    readonly core: ClientCoreService
+
     /**
      * Invalidate queries by path
      */
     readonly invalidate: (paths: readonly Router.Paths<Router.DefinitionOf<R>>[]) => void
-    
+
     /**
      * Shutdown the runtime
      */
@@ -119,11 +137,11 @@ export interface ProviderProps {
  * @category models
  */
 export type ClientProxy<D extends Router.Definition> = {
-  readonly [K in keyof D]: D[K] extends Procedure.Any
-    ? ProcedureClient<D[K]>
-    : D[K] extends Router.Definition
-      ? ClientProxy<D[K]>
-      : never
+  readonly [K in keyof D]: Router.UnwrapDefinitionEntry<D[K]> extends Procedure.Any
+  ? ProcedureClient<Router.UnwrapDefinitionEntry<D[K]>>
+  : Router.UnwrapDefinitionEntry<D[K]> extends Router.Definition
+  ? ClientProxy<Router.UnwrapDefinitionEntry<D[K]>>
+  : never
 }
 
 /**
@@ -132,26 +150,26 @@ export type ClientProxy<D extends Router.Definition> = {
  * @since 1.0.0
  * @category models
  */
-export type ProcedureClient<P extends Procedure.Any> = 
+export type ProcedureClient<P extends Procedure.Any> =
   P extends Procedure.Query<infer Payload, infer Success, infer Error>
-    ? QueryClient<
-        Schema.Schema.Type<Payload>,
-        Schema.Schema.Type<Success>,
-        Schema.Schema.Type<Error>
-      >
-    : P extends Procedure.Mutation<infer Payload, infer Success, infer Error, any>
-      ? MutationClient<
-          Schema.Schema.Type<Payload>,
-          Schema.Schema.Type<Success>,
-          Schema.Schema.Type<Error>
-        >
-      : P extends Procedure.Stream<infer Payload, infer Success, infer Error>
-        ? StreamClient<
-            Schema.Schema.Type<Payload>,
-            Schema.Schema.Type<Success>,
-            Schema.Schema.Type<Error>
-          >
-        : never
+  ? QueryClient<
+    Schema.Schema.Type<Payload>,
+    Schema.Schema.Type<Success>,
+    Schema.Schema.Type<Error>
+  >
+  : P extends Procedure.Mutation<infer Payload, infer Success, infer Error, any>
+  ? MutationClient<
+    Schema.Schema.Type<Payload>,
+    Schema.Schema.Type<Success>,
+    Schema.Schema.Type<Error>
+  >
+  : P extends Procedure.Stream<infer Payload, infer Success, infer Error>
+  ? StreamClient<
+    Schema.Schema.Type<Payload>,
+    Schema.Schema.Type<Success>,
+    Schema.Schema.Type<Error>
+  >
+  : never
 
 /**
  * Query procedure client
@@ -164,27 +182,27 @@ export interface QueryClient<Payload, Success, Error> {
    * React hook for queries
    */
   readonly useQuery: UseQueryFn<Payload, Success, Error>
-  
+
   /**
    * Effect that executes the query (requires ClientService)
    */
   readonly run: Payload extends void
-    ? Effect.Effect<Success, Error | Transport.TransportError, ClientServiceTag>
-    : (payload: Payload) => Effect.Effect<Success, Error | Transport.TransportError, ClientServiceTag>
-  
+  ? Effect.Effect<Success, Error | Transport.TransportError, ClientService>
+  : (payload: Payload) => Effect.Effect<Success, Error | Transport.TransportError, ClientService>
+
   /**
    * Promise that executes the query (requires bound runtime)
    */
   readonly runPromise: Payload extends void
-    ? () => Promise<Success>
-    : (payload: Payload) => Promise<Success>
-  
+  ? () => Promise<Success>
+  : (payload: Payload) => Promise<Success>
+
   /**
    * Prefetch the query
    */
   readonly prefetch: Payload extends void
-    ? Effect.Effect<void, Error | Transport.TransportError, ClientServiceTag>
-    : (payload: Payload) => Effect.Effect<void, Error | Transport.TransportError, ClientServiceTag>
+  ? Effect.Effect<void, Error | Transport.TransportError, ClientService>
+  : (payload: Payload) => Effect.Effect<void, Error | Transport.TransportError, ClientService>
 }
 
 /**
@@ -198,12 +216,12 @@ export interface MutationClient<Payload, Success, Error> {
    * React hook for mutations
    */
   readonly useMutation: UseMutationFn<Payload, Success, Error>
-  
+
   /**
    * Effect that executes the mutation
    */
-  readonly run: (payload: Payload) => Effect.Effect<Success, Error | Transport.TransportError, ClientServiceTag>
-  
+  readonly run: (payload: Payload) => Effect.Effect<Success, Error | Transport.TransportError, ClientService>
+
   /**
    * Promise that executes the mutation (requires bound runtime)
    */
@@ -221,13 +239,13 @@ export interface StreamClient<Payload, Success, Error> {
    * React hook for streams
    */
   readonly useStream: UseStreamFn<Payload, Success, Error>
-  
+
   /**
    * Stream that yields values
    */
   readonly stream: Payload extends void
-    ? Stream.Stream<Success, Error | Transport.TransportError, ClientServiceTag>
-    : (payload: Payload) => Stream.Stream<Success, Error | Transport.TransportError, ClientServiceTag>
+  ? Stream.Stream<Success, Error | Transport.TransportError, ClientService>
+  : (payload: Payload) => Stream.Stream<Success, Error | Transport.TransportError, ClientService>
 }
 
 // =============================================================================
@@ -253,7 +271,7 @@ export type UseQueryFn<Payload, Success, Error> = Payload extends void
 export interface QueryOptions {
   readonly enabled?: boolean
   readonly refetchInterval?: number
-  readonly staleTime?: number
+  readonly suspense?: boolean
 }
 
 /**
@@ -278,7 +296,7 @@ export interface QueryResult<Success, Error> {
  * @since 1.0.0
  * @category hooks
  */
-export type UseMutationFn<Payload, Success, Error> = 
+export type UseMutationFn<Payload, Success, Error> =
   (options?: MutationOptions<Success, Error>) => MutationResult<Payload, Success, Error>
 
 /**
@@ -394,65 +412,65 @@ export const make = <D extends Router.Definition>(
   router: Router.Router<D>
 ): Client<Router.Router<D>> & ClientProxy<D> => {
   const rootTag = router.tag
-  
+
   // Build the proxy structure using Record.map
   const buildProxy = <Def extends Router.Definition>(
     def: Def,
     pathParts: readonly string[]
   ): ClientProxy<Def> =>
     Record.map(def, (value, key) => {
+      const entry = Router.unwrapDefinitionEntry(value)
       const newPath = [...pathParts, key]
       const tag = [rootTag, ...newPath].join("/")
-      
-      if (Procedure.isProcedure(value)) {
-        return createProcedureClient(tag, value, null)
+
+      if (Procedure.isProcedure(entry)) {
+        return createProcedureClient(tag, entry, null)
       }
-      return buildProxy(value as Router.Definition, newPath)
+      return buildProxy(entry as Router.Definition, newPath)
     }) as ClientProxy<Def>
-  
+
   const proxy = buildProxy(router.definition, [])
-  
+
   // Create the client object
   const client = {
     [ClientTypeId]: ClientTypeId,
-    
+
     Provider: createProvider(router),
-    
+
     invalidate: (paths: readonly string[]) => {
-      // Get tags from paths
-      const _tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
-      // Note: This only works if a ReactivityService is available globally
-      // For proper usage, use the BoundClient's invalidate method
-      Effect.runSync(
-        Effect.logWarning("invalidate() on unbound client requires ReactivityService in scope. Use api.provide(layer) first.")
+      const normalizedPaths = paths.flatMap((path) => router.pathMap.getChildPaths(path))
+
+      if (normalizedPaths.length === 0) {
+        return
+      }
+
+      throw new Error(
+        "api.invalidate() requires a bound runtime. Use api.provide(layer).invalidate(...) instead."
       )
     },
-    
+
     provide: (layer: Layer.Layer<Transport.Transport>): BoundClient<Router.Router<D>> => {
-      const fullLayer = ClientServiceLive.pipe(Layer.provide(layer))
-      const runtime = ManagedRuntime.make(fullLayer)
-      
-      const boundProxy = buildBoundProxy(router.definition, [], rootTag, runtime)
-      
+      const core = makeClientCore(layer)
+      const boundProxy = buildBoundProxy(router.definition, [], rootTag, core)
+
       return {
         [ClientTypeId]: ClientTypeId,
+        core,
         ...boundProxy,
         invalidate: (paths: readonly string[]) => {
-          const tags = paths.flatMap((path) => Router.tagsToInvalidate(router, path))
-          runtime.runPromise(
-            Effect.gen(function* () {
-              const service = yield* ClientServiceTag
-              yield* service.invalidate(tags)
-            })
-          )
+          const normalizedPaths = paths.flatMap((path) => router.pathMap.getChildPaths(path))
+          if (normalizedPaths.length === 0) {
+            return
+          }
+          void core.runClosedPromise(core.invalidate(normalizedPaths))
         },
-        shutdown: () => runtime.dispose(),
+        shutdown: () => core.runClosedPromise(core.shutdown),
       } as BoundClient<Router.Router<D>>
     },
-    
+
     ...proxy,
   }
-  
+
   return client as Client<Router.Router<D>> & ClientProxy<D>
 }
 
@@ -463,72 +481,70 @@ export const make = <D extends Router.Definition>(
 const createProcedureClient = <P extends Procedure.Any>(
   tag: string,
   procedure: P,
-  runtime: ManagedRuntime.ManagedRuntime<ClientServiceTag, never> | null
+  core: ClientCoreService | null
 ): ProcedureClient<P> => {
   const payloadSchema = procedure.payloadSchema
   const successSchema = procedure.successSchema
   const errorSchema = procedure.errorSchema
-  
+
   const createRunEffect = (payload: unknown) =>
     Effect.gen(function* () {
-      const service = yield* ClientServiceTag
+      const service = yield* ClientService
       return yield* service.send(tag, payload, successSchema, errorSchema, "query")
     })
-  
+
   const createStreamEffect = (payload: unknown) =>
     Stream.unwrap(
       Effect.gen(function* () {
-        const service = yield* ClientServiceTag
+        const service = yield* ClientService
         return service.sendStream(tag, payload, successSchema, errorSchema)
       })
     )
-  
+
   if (Procedure.isQuery(procedure)) {
     return {
       useQuery: createUseQuery(tag, procedure),
       run: Schema.is(Schema.Void)(payloadSchema)
         ? createRunEffect(undefined)
         : (payload: unknown) => createRunEffect(payload),
-      runPromise: runtime
-        ? (payload?: unknown) => runtime.runPromise(createRunEffect(payload))
+      runPromise: core
+        ? (payload?: unknown) => core.runClientPromise(createRunEffect(payload))
         : () => { throw new Error("runPromise requires a bound runtime. Use api.provide(layer) first.") },
       prefetch: Schema.is(Schema.Void)(payloadSchema)
         ? createRunEffect(undefined).pipe(Effect.asVoid)
         : (payload: unknown) => createRunEffect(payload).pipe(Effect.asVoid),
     } as ProcedureClient<P>
   }
-  
+
   if (Procedure.isMutation(procedure)) {
     const mutation = procedure as Procedure.Mutation<any, any, any, any>
     const invalidatePaths = mutation.invalidates
-    
-    // Extract root tag (e.g., "@api" from "@api/users/create")
-    const rootTag = tag.split("/")[0]
-    
-    // Create mutation effect that also invalidates after success
+
     const createMutationEffect = (payload: unknown) =>
       Effect.gen(function* () {
-        const service = yield* ClientServiceTag
+        const service = yield* ClientService
         const result = yield* service.send(tag, payload, successSchema, errorSchema, "mutation")
-        
-        // Invalidate on success
-        // PathReactivity handles normalization internally ("users.list" → "users/list")
+
         if (invalidatePaths.length > 0) {
-          yield* service.invalidate(invalidatePaths)
+          if (core !== null) {
+            yield* core.invalidate(invalidatePaths)
+          } else {
+            yield* service.invalidate(invalidatePaths)
+          }
         }
-        
+
         return result
       })
-    
+
     return {
       useMutation: createUseMutation(tag, procedure),
       run: (payload: unknown) => createMutationEffect(payload),
-      runPromise: runtime
-        ? (payload: unknown) => runtime.runPromise(createMutationEffect(payload))
+      runPromise: core
+        ? (payload: unknown) => core.runClientPromise(createMutationEffect(payload))
         : () => { throw new Error("runPromise requires a bound runtime. Use api.provide(layer) first.") },
     } as ProcedureClient<P>
   }
-  
+
   if (Procedure.isStream(procedure)) {
     return {
       useStream: createUseStream(tag, procedure),
@@ -537,7 +553,7 @@ const createProcedureClient = <P extends Procedure.Any>(
         : (payload: unknown) => createStreamEffect(payload),
     } as ProcedureClient<P>
   }
-  
+
   throw new Error(`Unknown procedure type: ${(procedure as any)._tag}`)
 }
 
@@ -545,16 +561,17 @@ const buildBoundProxy = <D extends Router.Definition>(
   def: D,
   pathParts: readonly string[],
   rootTag: string,
-  runtime: ManagedRuntime.ManagedRuntime<ClientServiceTag, never>
+  core: ClientCoreService
 ): ClientProxy<D> =>
   Record.map(def, (value, key) => {
+    const entry = Router.unwrapDefinitionEntry(value)
     const newPath = [...pathParts, key]
     const tag = [rootTag, ...newPath].join("/")
-    
-    if (Procedure.isProcedure(value)) {
-      return createProcedureClient(tag, value, runtime)
+
+    if (Procedure.isProcedure(entry)) {
+      return createProcedureClient(tag, entry, core)
     }
-    return buildBoundProxy(value as Router.Definition, newPath, rootTag, runtime)
+    return buildBoundProxy(entry as Router.Definition, newPath, rootTag, core)
   }) as ClientProxy<D>
 
 // =============================================================================
@@ -564,8 +581,8 @@ const buildBoundProxy = <D extends Router.Definition>(
 // Import React hooks - these will throw helpful errors if React isn't available
 import {
   createProvider as createProviderImpl,
-  createUseQuery as createUseQueryImpl,
   createUseMutation as createUseMutationImpl,
+  createUseQuery as createUseQueryImpl,
   createUseStream as createUseStreamImpl,
 } from "./react.js"
 
@@ -575,8 +592,9 @@ const createProvider = <D extends Router.Definition>(
   try {
     return createProviderImpl(router)
   } catch {
-    // React not available - return stub
-    return ({ children }) => children as any
+    return () => {
+      throw new Error("Provider requires React. Import and use it in a React environment.")
+    }
   }
 }
 
@@ -630,3 +648,11 @@ const createUseStream = <P extends Procedure.Stream<any, any, any>>(
  * @category type-level
  */
 export type { Definition } from "../Router/index.js"
+export {
+  ClientEventSchema, MutationFailedEvent, MutationStartedEvent,
+  MutationSucceededEvent, OptimisticLayerAddedEvent,
+  OptimisticLayerRemovedEvent, QueryFetchFailedEvent, QueryFetchStartedEvent,
+  QueryFetchSucceededEvent, QueryHydratedEvent,
+  QueryInvalidatedEvent, QueryObservedEvent, StreamChunkEvent, StreamFailedEvent, StreamStartedEvent, StreamStoppedEvent, makeClientCore, ClientCore, type ClientCoreService
+}
+

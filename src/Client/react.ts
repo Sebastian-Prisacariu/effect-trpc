@@ -1,42 +1,27 @@
 /**
  * React Integration for effect-trpc
- * 
- * Built on @effect-atom/atom-react - uses Effect Atom's hooks and registry
- * for state management, caching, and React integration.
- * 
+ *
+ * Built on @effect-atom/atom-react, with a shared Effect-driven client core.
+ *
  * @since 1.0.0
  * @module
  */
 
 import * as React from "react"
-import { useContext, useMemo, useCallback, useState, useEffect, useRef } from "react"
+import { useCallback, useContext, useEffect, useMemo } from "react"
+import { AtomRef, Result, RegistryProvider, useAtomRef } from "@effect-atom/atom-react"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
-import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
-import * as Stream from "effect/Stream"
-import * as Scope from "effect/Scope"
-import { pipe } from "effect/Function"
+import * as Option from "effect/Option"
+import * as Schema from "effect/Schema"
 
-// Import from @effect-atom/atom-react
-import {
-  Atom,
-  Registry,
-  Result,
-  useAtomValue,
-  useAtomSuspense,
-  useAtomRefresh,
-  useAtomMount,
-  RegistryContext,
-  RegistryProvider,
-} from "@effect-atom/atom-react"
-
-// Import @effect/experimental/Reactivity for cache invalidation
-import * as Reactivity from "@effect/experimental/Reactivity"
-
-import * as Transport from "../Transport/index.js"
 import * as Procedure from "../Procedure/index.js"
 import * as Router from "../Router/index.js"
-import { ClientServiceTag, ClientServiceLive } from "./index.js"
+import { normalizePath } from "../Reactivity/index.js"
+import { queryKey as toSsrQueryKey, queryKeyFromSchema as toSchemaQueryKey, useHydrationState } from "../SSR/index.js"
+import * as Transport from "../Transport/index.js"
+import { type ClientCoreService, makeClientCore } from "./core.js"
 
 // =============================================================================
 // Provider
@@ -47,20 +32,88 @@ export interface ProviderProps {
   readonly children: React.ReactNode
 }
 
-/**
- * Context for the Atom runtime (created per router)
- */
+const suspensePromiseRegistry = new WeakMap<object, Promise<void>>()
+
+const waitForResultRef = <A, E>(
+  ref: AtomRef.ReadonlyRef<Result.Result<A, E>>
+): Effect.Effect<void> =>
+  Effect.async<void>((resume) => {
+    const unsubscribe = ref.subscribe((next) => {
+      if (next._tag === "Initial") {
+        return
+      }
+      unsubscribe()
+      resume(Effect.void)
+    })
+
+    return Effect.sync(() => {
+      unsubscribe()
+    })
+  })
+
+const refToSuspensePromise = <A, E>(
+  core: ClientCoreService,
+  ref: AtomRef.ReadonlyRef<Result.Result<A, E>>
+): Promise<void> => {
+  const existing = suspensePromiseRegistry.get(ref as object)
+  if (existing !== undefined) {
+    return existing
+  }
+
+  const promise = core.runClosedPromise(waitForResultRef(ref)).finally(() => {
+    suspensePromiseRegistry.delete(ref as object)
+  })
+
+  suspensePromiseRegistry.set(ref as object, promise)
+  return promise
+}
+
+const useResultRefWithOptionalSuspense = <A, E>(
+  core: ClientCoreService,
+  ref: AtomRef.ReadonlyRef<Result.Result<A, E>>,
+  suspense: boolean
+): Result.Result<A, E> => {
+  const result = useAtomRef(ref)
+  if (!suspense) {
+    return result
+  }
+
+  if (result._tag === "Initial") {
+    throw refToSuspensePromise(core, ref)
+  }
+
+  if (result._tag === "Failure") {
+    throw Cause.squash(result.cause)
+  }
+
+  return result
+}
+
+const getHydratedValue = <A>(
+  state: { readonly queries: Record<string, unknown> } | null,
+  primaryKey: string,
+  fallbackKey: string
+): A | undefined => (state?.queries[primaryKey] ?? state?.queries[fallbackKey]) as A | undefined
+
+const getResultValueOrUndefined = <A, E>(result: Result.Result<A, E>): A | undefined => {
+  const value = Result.value(result)
+  return Option.isSome(value) ? value.value : undefined
+}
+
+const getResultErrorOrUndefined = <A, E>(result: Result.Result<A, E>): E | undefined => {
+  const error = Result.error(result)
+  return Option.isSome(error) ? error.value : undefined
+}
+
 interface TrpcContextValue {
-  readonly atomRuntime: Atom.AtomRuntime<ClientServiceTag | Reactivity.Reactivity>
-  readonly layer: Layer.Layer<ClientServiceTag | Reactivity.Reactivity>
-  readonly rootTag: string
+  readonly core: ClientCoreService
 }
 
 const TrpcContext = React.createContext<TrpcContextValue | null>(null)
 
 const useTrpcContext = (): TrpcContextValue => {
   const ctx = useContext(TrpcContext)
-  if (!ctx) {
+  if (ctx === null) {
     throw new Error(
       "useTrpcContext must be used within <api.Provider>. " +
       "Wrap your app with <api.Provider layer={Transport.http('/api')}>."
@@ -69,38 +122,20 @@ const useTrpcContext = (): TrpcContextValue => {
   return ctx
 }
 
-/**
- * Create a Provider component for a router
- * 
- * The Provider sets up:
- * - Effect Atom Registry (for caching)
- * - Reactivity service (for invalidation)
- * - Transport layer (for network requests)
- * 
- * @internal
- */
 export const createProvider = <D extends Router.Definition>(
-  router: Router.Router<D>
+  _router: Router.Router<D>
 ): React.FC<ProviderProps> => {
   return function TrpcProvider({ layer, children }: ProviderProps) {
-    // Create the Atom runtime with Reactivity support
-    const contextValue = useMemo<TrpcContextValue>(() => {
-      // Build the full layer with ClientService + Reactivity
-      const fullLayer = ClientServiceLive.pipe(
-        Layer.provideMerge(Reactivity.layer),
-        Layer.provide(layer)
-      )
-      
-      // Create AtomRuntime from the layer
-      const atomRuntime = Atom.runtime(fullLayer)
-      
-      return {
-        atomRuntime,
-        layer: fullLayer,
-        rootTag: router.tag,
+    const core = useMemo(() => makeClientCore(layer), [layer])
+
+    useEffect(() => {
+      return () => {
+        void core.runClosedPromise(core.shutdown)
       }
-    }, [layer])
-    
+    }, [core])
+
+    const contextValue = useMemo<TrpcContextValue>(() => ({ core }), [core])
+
     return React.createElement(
       RegistryProvider,
       {},
@@ -118,19 +153,8 @@ export const createProvider = <D extends Router.Definition>(
 // =============================================================================
 
 export interface UseQueryOptions {
-  /**
-   * Enable/disable the query (default: true)
-   */
   readonly enabled?: boolean
-  
-  /**
-   * Refetch interval in milliseconds (optional)
-   */
   readonly refetchInterval?: number
-  
-  /**
-   * Use Suspense for loading state (default: false)
-   */
   readonly suspense?: boolean
 }
 
@@ -144,102 +168,93 @@ export interface UseQueryResult<Success, Error> {
   readonly refetch: () => void
 }
 
-/**
- * Create a useQuery hook for a procedure
- * 
- * @internal
- */
-export const createUseQuery = <Payload, Success, Error>(
+export const createUseQuery = <
+  PayloadSchema extends Schema.Schema.AnyNoContext,
+  SuccessSchema extends Schema.Schema.AnyNoContext,
+  ErrorSchema extends Schema.Schema.AnyNoContext
+>(
   tag: string,
-  procedure: Procedure.Query<any, any, any>
-): (payload?: Payload, options?: UseQueryOptions) => UseQueryResult<Success, Error> => {
-  // Compute reactivity keys from tag (e.g., "@api/users/list" → ["users", "users/list"])
-  const tagParts = tag.split("/").slice(1)
-  const reactivityKeys = tagParts.reduce<string[]>((acc, part, i) => {
-    const key = i === 0 ? part : `${acc[i - 1]}/${part}`
-    return [...acc, key]
-  }, [])
-  
+  procedure: Procedure.Query<PayloadSchema, SuccessSchema, ErrorSchema>
+): (
+  payload?: Schema.Schema.Type<PayloadSchema>,
+  options?: UseQueryOptions
+) => UseQueryResult<Schema.Schema.Type<SuccessSchema>, Schema.Schema.Type<ErrorSchema>> => {
+  type Payload = Schema.Schema.Type<PayloadSchema>
+  type Success = Schema.Schema.Type<SuccessSchema>
+  type Error = Schema.Schema.Type<ErrorSchema>
+
+  const path = tag.split("/").slice(1).join(".")
+  const normalizedPath = normalizePath(path)
+
   return function useQuery(
     payload?: Payload,
     options: UseQueryOptions = {}
   ): UseQueryResult<Success, Error> {
     const { enabled = true, suspense = false, refetchInterval } = options
     const ctx = useTrpcContext()
-    
-    // Stable serialized payload for cache key
-    const payloadKey = useMemo(() => JSON.stringify(payload), [payload])
-    
-    // Create the query atom using AtomRuntime
-    // Key includes payload so different payloads get different atoms
-    const queryAtom = useMemo(() => {
-      const queryEffect = Effect.gen(function* () {
-        const service = yield* ClientServiceTag
-        return yield* service.send(
+    const hydrationState = useHydrationState()
+    const cacheKey = useMemo(
+      () => toSchemaQueryKey(path, procedure.payloadSchema, payload),
+      [path, payload, procedure.payloadSchema]
+    )
+    const stablePayload = useMemo(() => payload, [cacheKey])
+    const hydratedValue = getHydratedValue<Success>(hydrationState, cacheKey, path)
+
+    const observer = useMemo(
+      () =>
+        ctx.core.observeQuery<Payload, Success, Error>({
           tag,
-          payload,
-          procedure.successSchema,
-          procedure.errorSchema
-        )
-      })
-      
-      // Create atom with the runtime
-      let atom = ctx.atomRuntime.atom(queryEffect)
-      
-      // Register for reactivity (invalidation)
-      if (reactivityKeys.length > 0) {
-        atom = ctx.atomRuntime.factory.withReactivity(reactivityKeys)(atom)
-      }
-      
-      return atom
-    }, [ctx.atomRuntime, tag, payloadKey]) // payloadKey in deps
-    
-    // Mount the atom (keeps it alive)
-    // Note: useAtomMount handles undefined internally
-    useAtomMount(queryAtom)
-    
-    // Get the refresh function
-    const refetch = useAtomRefresh(queryAtom)
-    
-    // Refetch interval polling
+          key: cacheKey,
+          path,
+          normalizedPath,
+          payload: stablePayload,
+          successSchema: procedure.successSchema,
+          errorSchema: procedure.errorSchema,
+        }),
+      [cacheKey, ctx.core, stablePayload]
+    )
+
     useEffect(() => {
-      if (!enabled || !refetchInterval || refetchInterval <= 0) return
-      
-      const intervalId = setInterval(() => {
-        refetch()
-      }, refetchInterval)
-      
-      return () => clearInterval(intervalId)
-    }, [enabled, refetchInterval, refetch])
-    
-    // Get the value using appropriate hook
-    let result: Result.Result<Success, Error>
-    
-    // When disabled, return initial state
-    if (!enabled) {
-      result = Result.initial()
-    } else if (suspense) {
-      result = useAtomSuspense(queryAtom) as Result.Result<Success, Error>
-    } else {
-      result = useAtomValue(queryAtom) as Result.Result<Success, Error>
-    }
-    
-    // Derive convenience values
+      const setupEffect = (hydratedValue !== undefined
+        ? observer.seedHydratedValue(hydratedValue)
+        : Effect.void
+      ).pipe(
+        Effect.zipRight(observer.setOptions({ enabled, refetchInterval })),
+        Effect.zipRight(observer.retain)
+      )
+      void ctx.core.runClosedPromise(setupEffect)
+      return () => {
+        void ctx.core.runClosedPromise(observer.release)
+      }
+    }, [ctx.core, enabled, hydratedValue, observer, refetchInterval])
+
+    const atomResult = useResultRefWithOptionalSuspense(ctx.core, observer.resultRef, suspense)
+    const result =
+      Result.isInitial(atomResult) && hydratedValue !== undefined
+        ? Result.success<Success, Error>(hydratedValue)
+        : atomResult
     const isLoading = Result.isInitial(result) || Result.isWaiting(result)
     const isSuccess = Result.isSuccess(result)
     const isError = Result.isFailure(result)
-    const data = isSuccess ? (result as Result.Success<Success, Error>).value : undefined
-    const error = isError ? (result as Result.Failure<Success, Error>).cause : undefined
-    
+    const data = getResultValueOrUndefined(result)
+    const error = getResultErrorOrUndefined(result)
+
+    const refetch = useCallback(() => {
+      if (!enabled) {
+        return
+      }
+      void ctx.core.runClosedPromise(observer.refetch)
+    }, [ctx.core, enabled, observer])
+
     return {
       result,
       data,
-      error: error as Error | undefined,
+      error,
       isLoading,
       isSuccess,
       isError,
       refetch,
-    }
+    } satisfies UseQueryResult<Success, Error>
   }
 }
 
@@ -265,123 +280,74 @@ export interface UseMutationResult<Payload, Success, Error> {
   readonly reset: () => void
 }
 
-/**
- * Create a useMutation hook for a procedure
- * 
- * @internal
- */
-export const createUseMutation = <Payload, Success, Error>(
+export const createUseMutation = <
+  PayloadSchema extends Schema.Schema.AnyNoContext,
+  SuccessSchema extends Schema.Schema.AnyNoContext,
+  ErrorSchema extends Schema.Schema.AnyNoContext,
+  Invalidates extends ReadonlyArray<string>
+>(
   tag: string,
-  procedure: Procedure.Mutation<any, any, any, any>
-): (options?: UseMutationOptions<Success, Error>) => UseMutationResult<Payload, Success, Error> => {
-  const invalidatePaths = procedure.invalidates
-  
-  // Extract optimistic config from procedure
-  const optimisticConfig = procedure.optimistic as {
-    target: string
-    reducer: (current: unknown, payload: unknown) => unknown
-    reconcile?: (current: unknown, payload: unknown, result: unknown) => unknown
-  } | undefined
-  
+  procedure: Procedure.Mutation<PayloadSchema, SuccessSchema, ErrorSchema, Invalidates>
+): (
+  options?: UseMutationOptions<Schema.Schema.Type<SuccessSchema>, Schema.Schema.Type<ErrorSchema>>
+) => UseMutationResult<
+  Schema.Schema.Type<PayloadSchema>,
+  Schema.Schema.Type<SuccessSchema>,
+  Schema.Schema.Type<ErrorSchema>
+> => {
+  type Payload = Schema.Schema.Type<PayloadSchema>
+  type Success = Schema.Schema.Type<SuccessSchema>
+  type Error = Schema.Schema.Type<ErrorSchema>
+
   return function useMutation(
     options: UseMutationOptions<Success, Error> = {}
   ): UseMutationResult<Payload, Success, Error> {
     const { onSuccess, onError, onSettled } = options
     const ctx = useTrpcContext()
-    
-    // Local state for mutation result
-    const [result, setResult] = useState<Result.Result<Success, Error>>(
-      Result.initial()
-    )
-    
-    // Track optimistic state for rollback
-    const optimisticRef = useRef<{ previousValue: unknown } | null>(null)
-    
-    const mutateAsync = useCallback((payload: Payload): Promise<Success> => {
-      setResult(Result.initial(true)) // waiting = true
-      
-      // Build the mutation effect with optimistic support
-      const mutationEffect = Effect.gen(function* () {
-        const service = yield* ClientServiceTag
-        
-        // Apply optimistic update if configured
-        if (optimisticConfig) {
-          // Store rollback state (would need atom access for real impl)
-          // For now, optimistic updates are applied via Reactivity
-          yield* Effect.logDebug("Applying optimistic update", {
-            target: optimisticConfig.target,
-            payload,
-          })
-        }
-        
-        const data = yield* service.send(
+
+    const observer = useMemo(
+      () =>
+        ctx.core.createMutationObserver<Payload, Success, Error>({
           tag,
-          payload,
-          procedure.successSchema,
-          procedure.errorSchema,
-          "mutation"
-        )
-        
-        // Reconcile or invalidate on success
-        if (optimisticConfig?.reconcile) {
-          // If reconcile is provided, apply it instead of invalidating
-          yield* Effect.logDebug("Reconciling optimistic update", {
-            target: optimisticConfig.target,
-            result: data,
-          })
-        } else if (invalidatePaths.length > 0) {
-          // Invalidate on success
-          yield* service.invalidate(invalidatePaths)
-        }
-        
-        return data as Success
-      })
-      
-      // Run the effect with proper handling
-      return Effect.runPromise(
-        mutationEffect.pipe(
-          Effect.tap((data) => Effect.sync(() => {
-            optimisticRef.current = null // Clear rollback state
-            setResult(Result.success(data))
-            onSuccess?.(data)
-          })),
-          Effect.tapError((error) => Effect.sync(() => {
-            // Rollback optimistic update on error
-            if (optimisticRef.current && optimisticConfig) {
-              // Would rollback via atom here
-              Effect.runSync(
-                Effect.logDebug("Rolling back optimistic update", {
-                  target: optimisticConfig.target,
-                })
-              )
-            }
-            optimisticRef.current = null
-            setResult(Result.fail(error as Error))
-            onError?.(error as Error)
-          })),
-          Effect.ensuring(Effect.sync(() => onSettled?.())),
-          Effect.provide(ctx.layer)
-        )
-      )
-    }, [ctx.layer, tag, procedure.successSchema, procedure.errorSchema, invalidatePaths, optimisticConfig, onSuccess, onError, onSettled])
-    
-    const mutate = useCallback((payload: Payload) => {
-      mutateAsync(payload).catch(() => {
-        // Error already handled via onError
-      })
-    }, [mutateAsync])
-    
-    const reset = useCallback(() => {
-      setResult(Result.initial())
-    }, [])
-    
-    // Derive convenience values
+          successSchema: procedure.successSchema,
+          errorSchema: procedure.errorSchema,
+          invalidates: procedure.invalidates,
+          optimistic: procedure.optimistic,
+        }),
+      [ctx.core]
+    )
+
+    const result = useAtomRef(observer.resultRef)
     const isLoading = Result.isWaiting(result)
     const isSuccess = Result.isSuccess(result)
     const isError = Result.isFailure(result)
-    const data = isSuccess ? (result as Result.Success<Success, Error>).value : undefined
-    const error = isError ? (result as Result.Failure<Success, Error>).cause : undefined
-    
+    const data = getResultValueOrUndefined(result)
+    const error = getResultErrorOrUndefined(result)
+
+    const mutateAsync = useCallback(async (payload: Payload): Promise<Success> => {
+      const effect = observer.execute(payload).pipe(
+        Effect.tap((next) => Effect.sync(() => {
+          onSuccess?.(next)
+        })),
+        Effect.tapError((nextError) => Effect.sync(() => {
+          onError?.(nextError)
+        })),
+        Effect.ensuring(Effect.sync(() => {
+          onSettled?.()
+        }))
+      )
+
+      return ctx.core.runClosedPromise(effect)
+    }, [ctx.core, observer, onError, onSettled, onSuccess])
+
+    const mutate = useCallback((payload: Payload) => {
+      void mutateAsync(payload).catch(() => undefined)
+    }, [mutateAsync])
+
+    const reset = useCallback(() => {
+      void ctx.core.runClosedPromise(observer.reset)
+    }, [ctx.core, observer])
+
     return {
       result,
       mutate,
@@ -390,9 +356,9 @@ export const createUseMutation = <Payload, Success, Error>(
       isSuccess,
       isError,
       data,
-      error: error as Error | undefined,
+      error,
       reset,
-    }
+    } satisfies UseMutationResult<Payload, Success, Error>
   }
 }
 
@@ -413,96 +379,79 @@ export interface UseStreamResult<Success, Error> {
   readonly restart: () => void
 }
 
-/**
- * Create a useStream hook for a stream procedure
- * 
- * @internal
- */
-export const createUseStream = <Payload, Success, Error>(
+export const createUseStream = <
+  PayloadSchema extends Schema.Schema.AnyNoContext,
+  SuccessSchema extends Schema.Schema.AnyNoContext,
+  ErrorSchema extends Schema.Schema.AnyNoContext
+>(
   tag: string,
-  procedure: Procedure.Stream<any, any, any>
-): (payload?: Payload, options?: UseStreamOptions) => UseStreamResult<Success, Error> => {
+  procedure: Procedure.Stream<PayloadSchema, SuccessSchema, ErrorSchema>
+): (
+  payload?: Schema.Schema.Type<PayloadSchema>,
+  options?: UseStreamOptions
+) => UseStreamResult<
+  Schema.Schema.Type<SuccessSchema>,
+  Schema.Schema.Type<ErrorSchema>
+> => {
+  type Payload = Schema.Schema.Type<PayloadSchema>
+  type Success = Schema.Schema.Type<SuccessSchema>
+  type Error = Schema.Schema.Type<ErrorSchema>
+
+  const path = tag.split("/").slice(1).join(".")
+
   return function useStream(
     payload?: Payload,
     options: UseStreamOptions = {}
   ): UseStreamResult<Success, Error> {
     const { enabled = true } = options
     const ctx = useTrpcContext()
-    
-    const [data, setData] = useState<readonly Success[]>([])
-    const [isConnected, setIsConnected] = useState(false)
-    const [error, setError] = useState<Error | undefined>()
-    const [restartCount, setRestartCount] = useState(0) // Trigger for restart
-    const fiberRef = useRef<Fiber.RuntimeFiber<void, unknown> | null>(null)
-    
-    // Subscribe to stream updates
-    useEffect(() => {
-      if (!enabled) return
-      
-      setIsConnected(true)
-      setData([])
-      setError(undefined)
-      
-      // Build the stream effect
-      const streamEffect = Effect.gen(function* () {
-        const service = yield* ClientServiceTag
-        const stream = service.sendStream(
+    const streamKey = useMemo(
+      () => toSchemaQueryKey(path, procedure.payloadSchema, payload),
+      [path, payload, procedure.payloadSchema]
+    )
+    const stablePayload = useMemo(() => payload, [streamKey])
+
+    const observer = useMemo(
+      () =>
+        ctx.core.createStreamObserver<Payload, Success, Error>({
           tag,
-          payload,
-          procedure.successSchema,
-          procedure.errorSchema
+          key: streamKey,
+          payload: stablePayload,
+          successSchema: procedure.successSchema,
+          errorSchema: procedure.errorSchema,
+        }),
+      [ctx.core, stablePayload, streamKey]
+    )
+
+    useEffect(() => {
+      void ctx.core.runClosedPromise(
+        observer.setEnabled(enabled).pipe(
+          Effect.zipRight(observer.retain)
         )
-        
-        // Run the stream, collecting values
-        yield* stream.pipe(
-          Stream.tap((value) => Effect.sync(() => {
-            setData((prev) => [...prev, value as Success])
-          })),
-          Stream.runDrain
-        )
-      }).pipe(
-        Effect.tapError((err) => Effect.sync(() => {
-          setError(err as Error)
-          setIsConnected(false)
-        })),
-        Effect.ensuring(Effect.sync(() => setIsConnected(false))),
-        Effect.provide(ctx.layer)
       )
-      
-      // Fork the stream as a fiber so we can interrupt it
-      const fiber = Effect.runFork(streamEffect)
-      fiberRef.current = fiber
-      
       return () => {
-        // Interrupt the fiber on cleanup
-        if (fiberRef.current) {
-          Effect.runPromise(Fiber.interrupt(fiberRef.current)).catch(() => {})
-        }
-        setIsConnected(false)
+        void ctx.core.runClosedPromise(observer.release)
       }
-    }, [enabled, ctx.layer, tag, payload, procedure.successSchema, procedure.errorSchema, restartCount])
-    
+    }, [ctx.core, enabled, observer])
+
+    const state = useAtomRef(observer.stateRef)
+
     const stop = useCallback(() => {
-      if (fiberRef.current) {
-        Effect.runPromise(Fiber.interrupt(fiberRef.current)).catch(() => {})
-        fiberRef.current = null
-      }
-      setIsConnected(false)
-    }, [])
-    
+      void ctx.core.runClosedPromise(observer.stop)
+    }, [ctx.core, observer])
+
     const restart = useCallback(() => {
-      // Stop existing stream and increment counter to trigger useEffect re-run
-      stop()
-      setRestartCount((c) => c + 1)
-    }, [stop])
-    
+      void ctx.core.runClosedPromise(observer.restart)
+    }, [ctx.core, observer])
+
     return {
-      data,
-      latestValue: data[data.length - 1],
-      isConnected,
-      error,
+      data: state.data,
+      latestValue: state.latestValue,
+      isConnected: state.isConnected,
+      error: state.error,
       stop,
       restart,
-    }
+    } satisfies UseStreamResult<Success, Error>
   }
 }
+

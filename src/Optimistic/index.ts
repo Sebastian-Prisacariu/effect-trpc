@@ -238,11 +238,16 @@ export interface UseOptimisticMutationResult<Input, Success, Error> {
  * @since 1.0.0
  * @category models
  */
+export interface ProcedureOptimisticTarget<Payload> {
+  readonly path: string
+  readonly payload?: unknown | ((payload: Payload) => unknown)
+}
+
 export interface ProcedureOptimisticConfig<Target, Payload, Success> {
   /**
    * The path to the query that should be optimistically updated
    */
-  readonly target: string
+  readonly target: string | ProcedureOptimisticTarget<Payload>
   
   /**
    * Update the target data immediately with the mutation payload
@@ -267,8 +272,12 @@ export const fromProcedureConfig = <Target, Payload, Success>(
 ): OptimisticConfig<Payload, Success> => ({
   optimisticUpdate: (cache, input) => ({
     ...cache,
-    [procedureConfig.target]: procedureConfig.reducer(
-      cache[procedureConfig.target] as Target,
+    [typeof procedureConfig.target === "string"
+      ? procedureConfig.target
+      : procedureConfig.target.path]: procedureConfig.reducer(
+      cache[typeof procedureConfig.target === "string"
+        ? procedureConfig.target
+        : procedureConfig.target.path] as Target,
       input
     ),
   }),
@@ -276,8 +285,12 @@ export const fromProcedureConfig = <Target, Payload, Success>(
   onSuccess: procedureConfig.reconcile
     ? (result, cache, input) => ({
         ...cache,
-        [procedureConfig.target]: procedureConfig.reconcile!(
-          cache[procedureConfig.target] as Target,
+        [typeof procedureConfig.target === "string"
+          ? procedureConfig.target
+          : procedureConfig.target.path]: procedureConfig.reconcile!(
+          cache[typeof procedureConfig.target === "string"
+            ? procedureConfig.target
+            : procedureConfig.target.path] as Target,
           input,
           result
         ),

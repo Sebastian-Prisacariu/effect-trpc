@@ -55,6 +55,11 @@ export class BatchResponse extends Schema.Class<BatchResponse>("BatchResponse")(
   )),
 }) {}
 
+interface BatchExecutionOptions {
+  readonly headers?: Record<string, string>
+  readonly signal?: AbortSignal
+}
+
 /**
  * Batching configuration
  */
@@ -125,7 +130,7 @@ export class BatcherService extends Context.Tag("@effect-trpc/Batcher")<
 export const make = (
   url: string,
   fetchFn: typeof globalThis.fetch,
-  headers: Record<string, string>,
+  resolveHeaders: () => Effect.Effect<Record<string, string>>,
   config: BatchingConfig = {}
 ): Effect.Effect<Batcher, never, import("effect/Scope").Scope> => {
   const maxSize = config.maxSize ?? 25
@@ -146,6 +151,7 @@ export const make = (
         if (Chunk.isEmpty(chunk)) return
         
         const pending = Chunk.toReadonlyArray(chunk)
+        const headers = yield* resolveHeaders()
         
         yield* Effect.logDebug(`[Batcher] Processing batch of ${pending.length} requests`)
         
@@ -271,54 +277,175 @@ export const layer = (
   return Layer.scoped(
     Transport.Transport,
     Effect.gen(function* () {
-      // Resolve headers
-      const resolvedHeaders: Record<string, string> = typeof config.headers === "function"
-        ? yield* Effect.promise(() => (config.headers as () => Promise<Record<string, string>>)())
-        : (config.headers ?? {}) as Record<string, string>
+      const resolveHeaders = (): Effect.Effect<Record<string, string>> =>
+        typeof config.headers === "function"
+          ? Effect.promise(() => (config.headers as () => Promise<Record<string, string>>)())
+          : Effect.succeed((config.headers ?? {}) as Record<string, string>)
       
       // Create batcher
-      const batcher = yield* make(url, fetchFn, resolvedHeaders, config)
+      const batcher = yield* make(url, fetchFn, resolveHeaders, config)
       
       // Direct send for non-batched requests
       const sendDirect = (
         request: Transport.TransportRequest
       ): Effect.Effect<Transport.TransportResponse, Transport.TransportError> =>
-        Effect.tryPromise({
-          try: async () => {
-            const response = await fetchFn(url, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...resolvedHeaders,
+        Effect.gen(function* () {
+          const resolvedHeaders = yield* resolveHeaders()
+
+          const json = yield* Effect.tryPromise({
+            try: async () => {
+              const response = await fetchFn(url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...resolvedHeaders,
+                },
+                body: JSON.stringify({
+                  id: request.id,
+                  tag: request.tag,
+                  payload: request.payload,
+                }),
+              })
+              
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+              }
+              
+              return response.json()
+            },
+            catch: (error) => new Transport.TransportError({
+              reason: "Network",
+              message: "Request failed",
+              cause: error,
+            }),
+          })
+
+          return yield* Schema.decodeUnknown(Transport.TransportResponse)(json).pipe(
+            Effect.mapError((error) => new Transport.TransportError({
+              reason: "Protocol",
+              message: "Invalid response",
+              cause: error,
+            }))
+          )
+        })
+
+      const sendDirectStream = (
+        request: Transport.TransportRequest
+      ): Stream.Stream<Transport.StreamResponse, Transport.TransportError> =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const resolvedHeaders = yield* resolveHeaders()
+
+            const body = yield* Effect.tryPromise({
+              try: async () => {
+              const response = await fetchFn(`${url}/stream`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Accept": "text/event-stream",
+                  ...resolvedHeaders,
+                },
+                body: JSON.stringify({
+                  id: request.id,
+                  tag: request.tag,
+                  payload: request.payload,
+                }),
+              })
+
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+              }
+
+              if (!response.body) {
+                throw new Error("Response body is empty")
+              }
+
+              return response.body
               },
-              body: JSON.stringify({
-                id: request.id,
-                tag: request.tag,
-                payload: request.payload,
+              catch: (error) => new Transport.TransportError({
+                reason: "Network",
+                message: "Failed to connect to stream",
+                cause: error,
               }),
             })
-            
-            if (!response.ok) {
-              throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-            }
-            
-            return response.json()
-          },
-          catch: (error) => new Transport.TransportError({
-            reason: "Network",
-            message: "Request failed",
-            cause: error,
-          }),
-        }).pipe(
-          Effect.flatMap((json) =>
-            Schema.decodeUnknown(Transport.TransportResponse)(json).pipe(
-              Effect.mapError((error) => new Transport.TransportError({
-                reason: "Protocol",
-                message: "Invalid response",
-                cause: error,
-              }))
-            )
-          )
+
+            return Stream.async<Transport.StreamResponse, Transport.TransportError>((emit) => {
+                const reader = body.getReader()
+                const decoder = new TextDecoder()
+                let buffer = ""
+
+                const processLine = (line: string) => {
+                  if (!line.startsWith("data: ")) return
+
+                  const data = line.slice(6)
+                  if (data === "[DONE]") {
+                    emit.end()
+                    return
+                  }
+
+                  try {
+                    const parsed = JSON.parse(data) as Record<string, unknown>
+
+                    if (parsed._tag === "StreamChunk") {
+                      emit.single(new Transport.StreamChunk({
+                        id: parsed.id as string,
+                        chunk: parsed.chunk,
+                      }))
+                      return
+                    }
+
+                    if (parsed._tag === "StreamEnd") {
+                      emit.end()
+                      return
+                    }
+
+                    if (parsed._tag === "Failure") {
+                      emit.single(new Transport.Failure({
+                        id: parsed.id as string,
+                        error: parsed.error,
+                      }))
+                      emit.end()
+                    }
+                  } catch {
+                    // Ignore malformed event lines and keep reading.
+                  }
+                }
+
+                const read = async (): Promise<void> => {
+                  try {
+                    while (true) {
+                      const { done, value } = await reader.read()
+
+                      if (done) {
+                        if (buffer.trim()) {
+                          processLine(buffer.trim())
+                        }
+                        emit.end()
+                        break
+                      }
+
+                      buffer += decoder.decode(value, { stream: true })
+                      const lines = buffer.split("\n")
+                      buffer = lines.pop() ?? ""
+
+                      for (const line of lines) {
+                        if (line.trim()) {
+                          processLine(line.trim())
+                        }
+                      }
+                    }
+                  } catch (error) {
+                    emit.fail(new Transport.TransportError({
+                      reason: "Network",
+                      message: "Stream read error",
+                      cause: error,
+                    }))
+                  }
+                }
+
+                void read()
+              })
+          })
         )
       
       return {
@@ -340,14 +467,7 @@ export const layer = (
         
         sendStream: (request) => {
           // Streams are never batched
-          return Stream.fromEffect(sendDirect(request)).pipe(
-            Stream.map((response): Transport.StreamResponse => {
-              if (Schema.is(Transport.Success)(response)) {
-                return new Transport.StreamChunk({ id: response.id, chunk: response.value })
-              }
-              return response as Transport.Failure
-            })
-          )
+          return sendDirectStream(request)
         },
       }
     })
@@ -371,9 +491,13 @@ export const isBatchRequest = (body: unknown): body is BatchRequest =>
  * Handle a batch request on the server
  */
 export const handleBatch = <R>(
-  handle: (request: Transport.TransportRequest) => Effect.Effect<Transport.TransportResponse, never, R>
+  handle: (
+    request: Transport.TransportRequest,
+    signal?: AbortSignal
+  ) => Effect.Effect<Transport.TransportResponse, never, R>
 ) => (
-  batchRequest: BatchRequest
+  batchRequest: BatchRequest,
+  options?: BatchExecutionOptions
 ): Effect.Effect<BatchResponse, never, R> =>
   Effect.gen(function* () {
     // Process all requests in parallel
@@ -383,8 +507,8 @@ export const handleBatch = <R>(
         id: req.id,
         tag: req.tag,
         payload: req.payload,
-        headers: {},
-      })),
+        headers: options?.headers ?? {},
+      }), options?.signal),
       { concurrency: "unbounded" }
     )
     

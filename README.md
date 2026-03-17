@@ -211,12 +211,12 @@ type UserPayload = InferProcedurePayload<typeof appRouter.users.get>
 
 - ✅ Core RPC (Procedure, Router, Server)
 - ✅ HTTP Transport
+- ✅ Request Batching
 - ✅ Middleware
 - ✅ Path-based Reactivity
 - ✅ React Integration
 - ✅ SSR utilities
 - 🚧 WebSocket Transport (planned)
-- 🚧 Request Batching (planned)
 
 ## License
 

@@ -51,6 +51,9 @@
 
 import * as React from "react"
 import { Hydration, Registry } from "@effect-atom/atom-react"
+import * as Either from "effect/Either"
+import * as ParseResult from "effect/ParseResult"
+import * as Schema from "effect/Schema"
 
 // =============================================================================
 // Types
@@ -105,6 +108,57 @@ export const dehydrate = (
   queries,
   timestamp: Date.now(),
 })
+
+/**
+ * Build a stable hydration key for a query path + optional payload.
+ *
+ * Plain path keys remain supported for backwards compatibility.
+ *
+ * @since 1.0.0
+ * @category utilities
+ */
+const stableStringify = (value: unknown): string =>
+  JSON.stringify(value, (_key, currentValue) => {
+    if (currentValue === null || typeof currentValue !== "object" || Array.isArray(currentValue)) {
+      return currentValue
+    }
+
+    const record = currentValue as Record<string, unknown>
+    return Object.keys(record)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = record[key]
+        return acc
+      }, {})
+  })
+
+export const queryKey = (path: string, payload?: unknown): string =>
+  payload === undefined ? path : `${path}:${stableStringify(payload)}`
+
+/**
+ * Build a stable hydration key using a payload schema for encoding first.
+ *
+ * This ensures custom schema encodings participate in key generation.
+ *
+ * @since 1.0.0
+ * @category utilities
+ */
+export const queryKeyFromSchema = <A, I>(
+  path: string,
+  schema: Schema.Schema<A, I, never>,
+  payload?: A
+): string => {
+  if (payload === undefined) {
+    return path
+  }
+
+  const encoded = Schema.encodeUnknownEither(schema)(payload)
+  if (Either.isLeft(encoded)) {
+    throw new Error(ParseResult.TreeFormatter.formatErrorSync(encoded.left))
+  }
+
+  return queryKey(path, encoded.right)
+}
 
 /**
  * Prefetch context passed to the prefetch function.

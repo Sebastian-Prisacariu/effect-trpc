@@ -96,10 +96,10 @@ export type HandlerFor<P, R = never> =
  * @category models
  */
 export type Handlers<D extends Router.Definition, R = never> = {
-  readonly [K in keyof D]: D[K] extends Procedure.Any
-    ? HandlerFor<D[K], R>
-    : D[K] extends Router.Definition
-    ? Handlers<D[K], R>
+  readonly [K in keyof D]: Router.UnwrapDefinitionEntry<D[K]> extends Procedure.Any
+    ? HandlerFor<Router.UnwrapDefinitionEntry<D[K]>, R>
+    : Router.UnwrapDefinitionEntry<D[K]> extends Router.Definition
+    ? Handlers<Router.UnwrapDefinitionEntry<D[K]>, R>
     : never
 }
 
@@ -134,27 +134,29 @@ export const make = <D extends Router.Definition, R = never>(
     parentMiddlewares: ReadonlyArray<Middleware.Applicable>
   ) => {
     for (const [key, value] of Object.entries(def)) {
+      const definitionMiddlewares = Router.getDefinitionMiddlewares(value)
+      const entry = Router.unwrapDefinitionEntry(value)
       const tag = `${prefix}/${key}`
       const handler = handlers[key]
       
-      if (Procedure.isProcedure(value)) {
+      if (Procedure.isProcedure(entry)) {
         // Combine parent middlewares with procedure middlewares
-        const procedureMiddlewares = value.middlewares as ReadonlyArray<Middleware.Applicable>
-        const allMiddlewares = [...parentMiddlewares, ...procedureMiddlewares]
+        const procedureMiddlewares = entry.middlewares as ReadonlyArray<Middleware.Applicable>
+        const allMiddlewares = [...parentMiddlewares, ...definitionMiddlewares, ...procedureMiddlewares]
         
         handlerMap.set(tag, {
           handler: handler as (payload: unknown) => Effect.Effect<unknown, unknown, R>,
-          procedure: value,
-          isStream: Procedure.isStream(value),
+          procedure: entry,
+          isStream: Procedure.isStream(entry),
           middlewares: allMiddlewares,
         })
-      } else if (typeof value === "object" && value !== null) {
+      } else if (typeof entry === "object" && entry !== null) {
         // Nested definition
         buildHandlerMap(
-          value as Router.Definition,
+          entry as Router.Definition,
           handler as Record<string, unknown>,
           tag,
-          parentMiddlewares
+          [...parentMiddlewares, ...definitionMiddlewares]
         )
       }
     }
