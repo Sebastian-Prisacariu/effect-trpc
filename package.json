@@ -1,6 +1,6 @@
 {
   "name": "effect-trpc",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "End-to-end typesafe APIs with Effect",
   "type": "module",
   "main": "./dist/cjs/index.js",
