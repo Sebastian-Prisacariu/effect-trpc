@@ -26,3 +26,16 @@ CODE_STANDARDS.md
 # Git
 .git
 .gitignore
+
+# Extra directories
+/packages
+/plans
+/reviews
+/node_modules
+
+# Secrets
+.env
+.env.*
+
+# Claude
+CLAUDE.md
